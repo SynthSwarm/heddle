@@ -1,0 +1,21 @@
+[package]
+name = "heddle-render"
+description = "Transcript, tool card and diff rendering"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+heddle-agent.workspace = true
+heddle-matrix.workspace = true
+
+ratatui.workspace = true
+tui-markdown.workspace = true
+similar.workspace = true
+unicode-width.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

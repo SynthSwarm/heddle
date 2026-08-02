@@ -1,0 +1,25 @@
+[package]
+name = "heddle-matrix"
+description = "Matrix transport: session, sliding sync, encryption and timelines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+heddle-agent.workspace = true
+
+matrix-sdk.workspace = true
+matrix-sdk-ui.workspace = true
+
+tokio.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

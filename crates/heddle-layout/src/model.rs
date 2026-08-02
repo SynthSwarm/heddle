@@ -1,0 +1,451 @@
+//! Workspace, tab and pane model.
+//!
+//! heddle maps Matrix's existing hierarchy onto a terminal workspace manager:
+//!
+//! | heddle    | Matrix | Hermes                    |
+//! |-----------|--------|---------------------------|
+//! | Workspace | Space  | project                   |
+//! | Tab       | Room   | room-scoped session lane  |
+//! | Pane      | Thread | agent session             |
+//!
+//! Rooms belonging to no Space collect in an implicit workspace. Threadless room
+//! timelines render as the tab's root pane.
+//!
+//! See `docs/SPEC.md` §2.
+
+use heddle_agent::AgentState;
+use ratatui_hypertile::PaneId;
+use serde::{Deserialize, Serialize};
+
+/// Identifier for the implicit workspace holding rooms with no parent Space.
+pub const ORPHAN_WORKSPACE: &str = "~";
+
+/// What a pane is showing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PaneKind {
+    /// The room's main timeline, outside any thread.
+    Room { room_id: String },
+    /// One thread: a single agent session.
+    Thread {
+        room_id: String,
+        /// Event ID of the thread root. This is the agent session key.
+        root: String,
+    },
+}
+
+impl PaneKind {
+    pub fn room_id(&self) -> &str {
+        match self {
+            Self::Room { room_id } | Self::Thread { room_id, .. } => room_id,
+        }
+    }
+
+    /// The thread root, when this pane is a thread.
+    pub fn thread_root(&self) -> Option<&str> {
+        match self {
+            Self::Thread { root, .. } => Some(root),
+            Self::Room { .. } => None,
+        }
+    }
+}
+
+/// A single tiled view.
+#[derive(Debug, Clone)]
+pub struct Pane {
+    /// Assigned by the tiling engine.
+    pub id: PaneId,
+    pub kind: PaneKind,
+    /// Shown in the pane header. Falls back to the thread's first line.
+    pub title: String,
+    /// Derived agent state; drives the pane badge and rolls up to the tab.
+    pub state: AgentState,
+    /// Set when this pane's agent events came from the fallback parser.
+    pub degraded: bool,
+}
+
+impl Pane {
+    pub fn new(id: PaneId, kind: PaneKind, title: impl Into<String>) -> Self {
+        Self {
+            id,
+            kind,
+            title: title.into(),
+            state: AgentState::Idle,
+            degraded: false,
+        }
+    }
+
+    /// Header text including the badge and the degraded marker.
+    pub fn header(&self) -> String {
+        let marker = if self.degraded { "~" } else { "" };
+        format!("{} {}{}", self.state.glyph(), marker, self.title)
+    }
+}
+
+/// A room, rendered as a tab containing tiled panes.
+#[derive(Debug, Clone)]
+pub struct Tab {
+    pub room_id: String,
+    pub title: String,
+    pub panes: Vec<Pane>,
+    /// Index into `panes`. Kept in range by every mutating method.
+    focused: usize,
+    pub is_encrypted: bool,
+    pub notification_count: u64,
+    pub highlight_count: u64,
+}
+
+impl Tab {
+    pub fn new(room_id: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            room_id: room_id.into(),
+            title: title.into(),
+            panes: Vec::new(),
+            focused: 0,
+            is_encrypted: false,
+            notification_count: 0,
+            highlight_count: 0,
+        }
+    }
+
+    pub fn focused_pane(&self) -> Option<&Pane> {
+        self.panes.get(self.focused)
+    }
+
+    pub fn focused_pane_mut(&mut self) -> Option<&mut Pane> {
+        self.panes.get_mut(self.focused)
+    }
+
+    /// Focus a pane by its tiling id. Returns `false` if it is not in this tab.
+    pub fn focus(&mut self, id: PaneId) -> bool {
+        match self.panes.iter().position(|p| p.id == id) {
+            Some(i) => {
+                self.focused = i;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn push_pane(&mut self, pane: Pane) {
+        self.panes.push(pane);
+        self.focused = self.panes.len() - 1;
+    }
+
+    /// Remove a pane, keeping focus on a sensible neighbour.
+    pub fn remove_pane(&mut self, id: PaneId) -> Option<Pane> {
+        let i = self.panes.iter().position(|p| p.id == id)?;
+        let pane = self.panes.remove(i);
+        // Focus the previous pane rather than snapping to zero: closing the pane you
+        // just finished with should leave you next to where you were.
+        self.focused = self.focused.min(self.panes.len().saturating_sub(1));
+        Some(pane)
+    }
+
+    /// Find the pane showing a given thread.
+    pub fn pane_for_thread(&self, root: &str) -> Option<&Pane> {
+        self.panes
+            .iter()
+            .find(|p| p.kind.thread_root() == Some(root))
+    }
+
+    /// The tab badge: the most urgent state among its panes.
+    pub fn state(&self) -> AgentState {
+        self.panes.iter().map(|p| p.state).max().unwrap_or_default()
+    }
+
+    /// How many panes are in the given state.
+    pub fn count_in(&self, state: AgentState) -> usize {
+        self.panes.iter().filter(|p| p.state == state).count()
+    }
+}
+
+/// A Space, or the implicit orphan workspace.
+#[derive(Debug, Clone)]
+pub struct Workspace {
+    /// Space room ID, or [`ORPHAN_WORKSPACE`].
+    pub id: String,
+    pub title: String,
+    pub tabs: Vec<Tab>,
+    focused: usize,
+}
+
+impl Workspace {
+    pub fn new(id: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            tabs: Vec::new(),
+            focused: 0,
+        }
+    }
+
+    pub fn focused_tab(&self) -> Option<&Tab> {
+        self.tabs.get(self.focused)
+    }
+
+    pub fn focused_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.focused)
+    }
+
+    pub fn focus_tab(&mut self, index: usize) -> bool {
+        if index < self.tabs.len() {
+            self.focused = index;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cycle to the next tab, wrapping.
+    pub fn next_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.focused = (self.focused + 1) % self.tabs.len();
+        }
+    }
+
+    /// Cycle to the previous tab, wrapping.
+    pub fn prev_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.focused = (self.focused + self.tabs.len() - 1) % self.tabs.len();
+        }
+    }
+
+    pub fn tab_for_room(&self, room_id: &str) -> Option<&Tab> {
+        self.tabs.iter().find(|t| t.room_id == room_id)
+    }
+
+    pub fn tab_for_room_mut(&mut self, room_id: &str) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|t| t.room_id == room_id)
+    }
+
+    /// The workspace badge: the most urgent state among its tabs.
+    pub fn state(&self) -> AgentState {
+        self.tabs.iter().map(Tab::state).max().unwrap_or_default()
+    }
+
+    pub fn count_in(&self, state: AgentState) -> usize {
+        self.tabs.iter().map(|t| t.count_in(state)).sum()
+    }
+}
+
+/// The whole workspace bar.
+#[derive(Debug, Clone, Default)]
+pub struct Workspaces {
+    pub items: Vec<Workspace>,
+    focused: usize,
+}
+
+impl Workspaces {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn focused(&self) -> Option<&Workspace> {
+        self.items.get(self.focused)
+    }
+
+    pub fn focused_mut(&mut self) -> Option<&mut Workspace> {
+        self.items.get_mut(self.focused)
+    }
+
+    pub fn focus(&mut self, index: usize) -> bool {
+        if index < self.items.len() {
+            self.focused = index;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get or create a workspace by Space ID.
+    pub fn entry(&mut self, id: &str, title: &str) -> &mut Workspace {
+        if let Some(i) = self.items.iter().position(|w| w.id == id) {
+            return &mut self.items[i];
+        }
+        self.items.push(Workspace::new(id, title));
+        let last = self.items.len() - 1;
+        &mut self.items[last]
+    }
+
+    /// Find the workspace and tab showing a room.
+    pub fn locate_room(&self, room_id: &str) -> Option<(usize, usize)> {
+        self.items.iter().enumerate().find_map(|(wi, w)| {
+            w.tabs
+                .iter()
+                .position(|t| t.room_id == room_id)
+                .map(|ti| (wi, ti))
+        })
+    }
+
+    /// Global badge, shown in the top-right.
+    pub fn state(&self) -> AgentState {
+        self.items
+            .iter()
+            .map(Workspace::state)
+            .max()
+            .unwrap_or_default()
+    }
+
+    /// Total panes in a given state across everything.
+    pub fn count_in(&self, state: AgentState) -> usize {
+        self.items.iter().map(|w| w.count_in(state)).sum()
+    }
+
+    /// Order workspaces so the ones needing attention come first, then alphabetically.
+    ///
+    /// Stable within a priority band, so the bar does not shuffle under the cursor
+    /// while an agent is working.
+    pub fn sort_by_urgency(&mut self) {
+        let focused_id = self.focused().map(|w| w.id.clone());
+        self.items.sort_by(|a, b| {
+            b.state()
+                .cmp(&a.state())
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        if let Some(id) = focused_id {
+            if let Some(i) = self.items.iter().position(|w| w.id == id) {
+                self.focused = i;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    use super::*;
+
+    fn pane(n: u64, state: AgentState) -> Pane {
+        let mut p = Pane::new(
+            PaneId::new(n),
+            PaneKind::Thread {
+                room_id: "!r:x".into(),
+                root: format!("$t{n}"),
+            },
+            format!("thread {n}"),
+        );
+        p.state = state;
+        p
+    }
+
+    #[test]
+    fn tab_badge_takes_the_most_urgent_pane() {
+        let mut tab = Tab::new("!r:x", "#backend");
+        tab.push_pane(pane(1, AgentState::Idle));
+        tab.push_pane(pane(2, AgentState::Blocked));
+        tab.push_pane(pane(3, AgentState::Working));
+        assert_eq!(tab.state(), AgentState::Blocked);
+        assert_eq!(tab.count_in(AgentState::Working), 1);
+    }
+
+    #[test]
+    fn badges_roll_all_the_way_up() {
+        let mut ws = Workspaces::new();
+        let w = ws.entry("!space:x", "hermes-proj");
+        let mut tab = Tab::new("!r:x", "#backend");
+        tab.push_pane(pane(1, AgentState::Blocked));
+        w.tabs.push(tab);
+
+        assert_eq!(ws.state(), AgentState::Blocked);
+        assert_eq!(ws.count_in(AgentState::Blocked), 1);
+    }
+
+    #[test]
+    fn entry_is_idempotent() {
+        let mut ws = Workspaces::new();
+        ws.entry("!s:x", "one");
+        ws.entry("!s:x", "one");
+        assert_eq!(ws.items.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_pane_keeps_focus_in_range() {
+        let mut tab = Tab::new("!r:x", "#backend");
+        tab.push_pane(pane(1, AgentState::Idle));
+        tab.push_pane(pane(2, AgentState::Idle));
+        tab.push_pane(pane(3, AgentState::Idle));
+        assert_eq!(tab.focused_pane().expect("focused").id, PaneId::new(3));
+
+        tab.remove_pane(PaneId::new(3));
+        assert_eq!(
+            tab.focused_pane().expect("focused").id,
+            PaneId::new(2),
+            "focus should land on a neighbour, not snap to the first pane"
+        );
+
+        tab.remove_pane(PaneId::new(1));
+        tab.remove_pane(PaneId::new(2));
+        assert!(tab.focused_pane().is_none());
+    }
+
+    #[test]
+    fn tab_cycling_wraps_both_ways() {
+        let mut w = Workspace::new("~", "orphans");
+        w.tabs.push(Tab::new("!a:x", "a"));
+        w.tabs.push(Tab::new("!b:x", "b"));
+
+        w.next_tab();
+        assert_eq!(w.focused_tab().expect("tab").room_id, "!b:x");
+        w.next_tab();
+        assert_eq!(w.focused_tab().expect("tab").room_id, "!a:x");
+        w.prev_tab();
+        assert_eq!(w.focused_tab().expect("tab").room_id, "!b:x");
+    }
+
+    #[test]
+    fn cycling_an_empty_workspace_does_not_panic() {
+        let mut w = Workspace::new("~", "empty");
+        w.next_tab();
+        w.prev_tab();
+        assert!(w.focused_tab().is_none());
+    }
+
+    #[test]
+    fn threads_are_locatable_by_root() {
+        let mut tab = Tab::new("!r:x", "#backend");
+        tab.push_pane(pane(1, AgentState::Idle));
+        tab.push_pane(pane(2, AgentState::Idle));
+        assert_eq!(tab.pane_for_thread("$t2").expect("pane").id, PaneId::new(2));
+        assert!(tab.pane_for_thread("$nope").is_none());
+    }
+
+    #[test]
+    fn urgency_sort_keeps_the_focused_workspace_focused() {
+        let mut ws = Workspaces::new();
+        for (id, title) in [("!a:x", "alpha"), ("!b:x", "bravo"), ("!c:x", "charlie")] {
+            let w = ws.entry(id, title);
+            w.tabs.push(Tab::new("!r:x", "r"));
+        }
+        ws.focus(0);
+
+        // Make the last workspace blocked; it should sort to the front without
+        // dragging focus with it.
+        let w = ws.entry("!c:x", "charlie");
+        w.tabs[0].push_pane(pane(1, AgentState::Blocked));
+
+        ws.sort_by_urgency();
+        assert_eq!(ws.items[0].id, "!c:x");
+        assert_eq!(
+            ws.focused().expect("focused").id,
+            "!a:x",
+            "sorting must not move the user's focus"
+        );
+    }
+
+    #[test]
+    fn rooms_are_locatable_across_workspaces() {
+        let mut ws = Workspaces::new();
+        ws.entry("!a:x", "alpha").tabs.push(Tab::new("!r1:x", "r1"));
+        ws.entry("!b:x", "bravo").tabs.push(Tab::new("!r2:x", "r2"));
+        assert_eq!(ws.locate_room("!r2:x"), Some((1, 0)));
+        assert_eq!(ws.locate_room("!nope:x"), None);
+    }
+
+    #[test]
+    fn pane_header_shows_badge_and_degraded_marker() {
+        let mut p = pane(1, AgentState::Working);
+        assert_eq!(p.header(), "● thread 1");
+        p.degraded = true;
+        assert_eq!(p.header(), "● ~thread 1");
+    }
+}
