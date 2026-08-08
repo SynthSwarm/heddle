@@ -84,6 +84,8 @@ pub struct App {
     pub viewport_height: u16,
     /// Clickable regions of the workspace and tab bars, recorded by the renderer.
     pub bars: BarHits,
+    /// Whether the `<prefix> ?` key overlay is showing.
+    pub help: bool,
 
     pub should_quit: bool,
     /// Commands produced by the last update, drained by the caller.
@@ -122,6 +124,7 @@ impl App {
             rendered_lines: 0,
             viewport_height: 0,
             bars: BarHits::default(),
+            help: false,
             should_quit: false,
             pending: Vec::new(),
         }
@@ -159,7 +162,14 @@ impl App {
         match event {
             WorkerEvent::SyncState(state) => self.sync = state,
 
-            WorkerEvent::Rooms(rooms) => self.apply_rooms(rooms),
+            WorkerEvent::Rooms(rooms) => {
+                self.apply_rooms(rooms);
+                // The app opens its focused view once at startup, but the room list has
+                // not arrived yet at that point so there is nothing to focus and the
+                // call is a no-op. Without re-trying here the transcript stays empty
+                // until the user happens to touch a pane or a tab.
+                self.open_focused_view();
+            }
 
             WorkerEvent::Timeline { view, entries } => {
                 // Whatever the request achieved, it is no longer in flight. Clearing on
@@ -352,6 +362,9 @@ impl App {
 
             Action::Approve => self.resolve_prompt(true),
             Action::Deny => self.resolve_prompt(false),
+
+            Action::ToggleHelp => self.help = !self.help,
+            Action::CloseHelp => self.help = false,
 
             Action::WorkspaceSwitcher | Action::FuzzyJump | Action::CommandPalette => {
                 // Overlays land in M4 alongside the rest of the workspace UI.
@@ -560,13 +573,26 @@ impl App {
         }
     }
 
+    /// The largest meaningful scroll offset: one screen short of the oldest line.
+    ///
+    /// Derived from the geometry the renderer recorded, since wrapping depends on the
+    /// pane width and the app cannot know it.
+    fn max_scroll(&self) -> u16 {
+        self.rendered_lines.saturating_sub(self.viewport_height)
+    }
+
     fn scroll_by(&mut self, delta: i32) {
         let Some(view) = self.focused_view() else {
             return;
         };
         let current = *self.scroll.get(&view).unwrap_or(&0);
         // Scroll is an offset *from the bottom*, so scrolling up increases it.
-        let next = (current as i32 - delta).max(0) as u16;
+        //
+        // Clamping at the top is what makes scrolling back down work. Unclamped, every
+        // keypress past the oldest line increments a counter with no visible effect,
+        // and scrolling down then has to unwind all of it before the transcript moves —
+        // which looks exactly like the newest messages having been lost.
+        let next = ((current as i32 - delta).max(0) as u16).min(self.max_scroll());
         self.scroll.insert(view.clone(), next);
         if delta < 0 {
             self.paginate_if_near_top(&view, next);
@@ -600,9 +626,15 @@ impl App {
     }
 
     fn set_scroll(&mut self, value: u16) {
-        if let Some(view) = self.focused_view() {
-            self.scroll.insert(view, value);
-        }
+        // `ScrollTop` passes u16::MAX rather than computing the ceiling itself. Left
+        // unclamped that would need 65,000 keypresses to scroll back to the bottom.
+        let value = value.min(self.max_scroll());
+        let Some(view) = self.focused_view() else {
+            return;
+        };
+        self.scroll.insert(view.clone(), value);
+        // Jumping to the top is as much a pagination trigger as scrolling there.
+        self.paginate_if_near_top(&view, value);
     }
 
     /// Toggle the newest tool card in the focused view.
@@ -747,6 +779,9 @@ mod tests {
             notification_count: 0,
             highlight_count: 0,
         }]));
+        // The room list now opens the focused view, so drain the resulting OpenView and
+        // Paginate. Tests asserting on commands want to see only what they triggered.
+        let _ = app.take_commands();
         app
     }
 
@@ -1284,12 +1319,95 @@ mod tests {
     #[test]
     fn scrolling_never_goes_below_the_bottom() {
         let mut app = app();
+        app.rendered_lines = 200;
+        app.viewport_height = 20;
+
         app.apply_action(Action::ScrollDown(50));
         let view = app.focused_view().expect("view");
         assert_eq!(*app.scroll.get(&view).unwrap_or(&0), 0);
 
         app.apply_action(Action::ScrollUp(5));
         assert_eq!(*app.scroll.get(&view).unwrap_or(&0), 5);
+    }
+
+    #[test]
+    fn scrolling_up_past_the_top_does_not_strand_the_transcript() {
+        let mut app = app();
+        // 200 wrapped rows in a 20-row pane: 180 is as far up as it goes.
+        app.rendered_lines = 200;
+        app.viewport_height = 20;
+        let view = app.focused_view().expect("view");
+
+        app.apply_action(Action::ScrollUp(1_000));
+        assert_eq!(
+            *app.scroll.get(&view).expect("scroll"),
+            180,
+            "scroll must clamp at the oldest line, not keep counting"
+        );
+
+        // One page down from the top must actually move, rather than unwinding an
+        // invisible counter. This is the bug where the newest messages appeared lost.
+        app.apply_action(Action::ScrollDown(20));
+        assert_eq!(*app.scroll.get(&view).expect("scroll"), 160);
+    }
+
+    #[test]
+    fn jumping_to_the_top_is_reversible() {
+        let mut app = app();
+        app.rendered_lines = 200;
+        app.viewport_height = 20;
+        let view = app.focused_view().expect("view");
+
+        // ScrollTop passes u16::MAX; unclamped it would take 65,000 keypresses to
+        // scroll back to the newest message.
+        app.apply_action(Action::ScrollTop);
+        assert_eq!(*app.scroll.get(&view).expect("scroll"), 180);
+
+        app.apply_action(Action::ScrollBottom);
+        assert_eq!(*app.scroll.get(&view).expect("scroll"), 0);
+    }
+
+    #[test]
+    fn the_room_list_arriving_opens_the_focused_view() {
+        // At startup the app opens its focused view before any room exists, so the
+        // call is a no-op. If nothing retries, the transcript stays empty until the
+        // user happens to click a pane.
+        let mut app = App::new(Config::default());
+        app.open_focused_view();
+        assert!(app.take_commands().is_empty(), "nothing to focus yet");
+
+        app.apply_worker_event(WorkerEvent::Rooms(vec![RoomSummary {
+            room_id: "!r:x".into(),
+            display_name: "Commons".into(),
+            is_space: false,
+            parents: Vec::new(),
+            is_direct: false,
+            is_encrypted: false,
+            notification_count: 0,
+            highlight_count: 0,
+        }]));
+
+        let commands = app.take_commands();
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::OpenView(v) if v == &View::room("!r:x"))),
+            "the first room list must open the focused view: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn the_help_overlay_toggles_and_escape_closes_it() {
+        let mut app = app();
+        assert!(!app.help);
+        app.apply_action(Action::ToggleHelp);
+        assert!(app.help);
+        app.apply_action(Action::ToggleHelp);
+        assert!(!app.help);
+
+        app.apply_action(Action::ToggleHelp);
+        app.apply_action(Action::CloseHelp);
+        assert!(!app.help, "escape must close the overlay");
     }
 
     #[test]

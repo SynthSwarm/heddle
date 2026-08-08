@@ -53,6 +53,10 @@ pub enum Action {
     Approve,
     Deny,
 
+    // Overlays
+    ToggleHelp,
+    CloseHelp,
+
     // Composer
     Insert(char),
     Backspace,
@@ -162,6 +166,151 @@ impl Prefix {
     }
 }
 
+/// One documented binding.
+///
+/// The status-bar hints and the `<prefix> ?` overlay both read this table, so they
+/// cannot drift from each other. Keeping it beside `map_prefix` and `map_normal` is
+/// what stops it drifting from the bindings themselves.
+pub struct Binding {
+    /// Keys, without the prefix.
+    pub keys: &'static str,
+    pub action: &'static str,
+    /// Whether the prefix must be pressed first.
+    pub prefixed: bool,
+    /// Also shown in the status bar, space permitting.
+    pub hint: bool,
+}
+
+/// Every binding worth documenting, in the order the overlay lists them.
+pub const BINDINGS: &[Binding] = &[
+    Binding {
+        keys: "i",
+        action: "write a message",
+        prefixed: false,
+        hint: true,
+    },
+    Binding {
+        keys: "enter",
+        action: "send",
+        prefixed: false,
+        hint: false,
+    },
+    Binding {
+        keys: "shift+enter",
+        action: "newline",
+        prefixed: false,
+        hint: false,
+    },
+    Binding {
+        keys: "esc",
+        action: "normal mode",
+        prefixed: false,
+        hint: false,
+    },
+    Binding {
+        keys: "y / n",
+        action: "approve / deny",
+        prefixed: false,
+        hint: false,
+    },
+    Binding {
+        keys: "tab",
+        action: "toggle tool card",
+        prefixed: false,
+        hint: false,
+    },
+    Binding {
+        keys: "j / k",
+        action: "scroll",
+        prefixed: false,
+        hint: false,
+    },
+    Binding {
+        keys: "^u / ^d",
+        action: "half-page scroll",
+        prefixed: false,
+        hint: false,
+    },
+    Binding {
+        keys: "g / G",
+        action: "top / bottom",
+        prefixed: false,
+        hint: false,
+    },
+    Binding {
+        keys: ":",
+        action: "command palette",
+        prefixed: false,
+        hint: false,
+    },
+    Binding {
+        keys: "n / p",
+        action: "next / prev tab",
+        prefixed: true,
+        hint: true,
+    },
+    Binding {
+        keys: "| / -",
+        action: "split right / down",
+        prefixed: true,
+        hint: true,
+    },
+    Binding {
+        keys: "h j k l",
+        action: "focus pane",
+        prefixed: true,
+        hint: false,
+    },
+    Binding {
+        keys: "H J K L",
+        action: "resize pane",
+        prefixed: true,
+        hint: false,
+    },
+    Binding {
+        keys: "z",
+        action: "zoom pane",
+        prefixed: true,
+        hint: false,
+    },
+    Binding {
+        keys: "x",
+        action: "close pane",
+        prefixed: true,
+        hint: false,
+    },
+    Binding {
+        keys: "c",
+        action: "new thread",
+        prefixed: true,
+        hint: false,
+    },
+    Binding {
+        keys: "w",
+        action: "workspace switcher",
+        prefixed: true,
+        hint: false,
+    },
+    Binding {
+        keys: "f",
+        action: "fuzzy jump",
+        prefixed: true,
+        hint: true,
+    },
+    Binding {
+        keys: "?",
+        action: "this help",
+        prefixed: true,
+        hint: true,
+    },
+    Binding {
+        keys: "q",
+        action: "quit",
+        prefixed: true,
+        hint: false,
+    },
+];
+
 /// Translate a key press into an [`Action`], given the current mode.
 ///
 /// Returns the action and the mode to switch to.
@@ -202,6 +351,7 @@ fn map_prefix(key: KeyEvent) -> Action {
         KeyCode::Char('p') => Action::PrevTab,
         KeyCode::Char('w') => Action::WorkspaceSwitcher,
         KeyCode::Char('f') => Action::FuzzyJump,
+        KeyCode::Char('?') | KeyCode::Char('/') => Action::ToggleHelp,
 
         KeyCode::Char('q') => Action::Quit,
         _ => Action::None,
@@ -211,6 +361,8 @@ fn map_prefix(key: KeyEvent) -> Action {
 fn map_normal(key: KeyEvent) -> (Action, Mode) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
+        // Escape closes the help overlay. Harmless when nothing is open.
+        KeyCode::Esc => (Action::CloseHelp, Mode::Normal),
         KeyCode::Char('i') => (Action::EnterInsert, Mode::Insert),
         KeyCode::Char(':') => (Action::CommandPalette, Mode::Normal),
 
@@ -412,5 +564,40 @@ mod tests {
         assert_eq!(Prefix::parse("alt+x").expect("alt+x").label(), "⌥x");
         assert_eq!(Prefix::parse("ctrl+space").expect("spc").label(), "^spc");
         assert_eq!(Prefix::parse("f5").expect("f5").label(), "f5");
+    }
+
+    #[test]
+    fn the_help_overlay_is_reachable_and_dismissable() {
+        let p = Prefix::default();
+        assert_eq!(map(key('?'), Mode::Prefix, p).0, Action::ToggleHelp);
+        assert_eq!(
+            map(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                Mode::Normal,
+                p
+            )
+            .0,
+            Action::CloseHelp
+        );
+    }
+
+    #[test]
+    fn every_documented_binding_is_actually_bound() {
+        // The overlay and the status hints read BINDINGS. A row here that no key
+        // produces would be a lie told in the UI.
+        let p = Prefix::default();
+        for binding in BINDINGS {
+            // Only single-key prefixed rows are mechanically checkable; the rest
+            // document chords and ranges.
+            if !binding.prefixed || binding.keys.chars().count() != 1 {
+                continue;
+            }
+            let c = binding.keys.chars().next().expect("one char");
+            assert_ne!(
+                map(key(c), Mode::Prefix, p).0,
+                Action::None,
+                "BINDINGS documents `{c}` but map_prefix ignores it"
+            );
+        }
     }
 }

@@ -9,6 +9,12 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# A push that supersedes an earlier one cancels it. Without this a stale run keeps a
+# runner busy building a commit nobody cares about any more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -30,6 +36,16 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # Split out rather than tacked onto `check`. The release profile shares no artefacts
+  # with the debug builds clippy and test produce, so running it in sequence added a
+  # third full compile of the matrix-sdk tree to the critical path. In parallel it costs
+  # wall-clock nothing.
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Build release
         run: cargo build --release --locked
 
@@ -41,3 +57,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
         run: cargo check --workspace
+

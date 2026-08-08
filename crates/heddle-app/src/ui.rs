@@ -4,12 +4,12 @@
 //! turns state into cells.
 
 use crate::app::{App, Hit};
-use crate::keymap::Mode;
+use crate::keymap::{self, Mode};
 use heddle_matrix::SyncState;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
@@ -42,6 +42,75 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_panes(frame, app, chunks[2]);
     draw_composer(frame, app, chunks[3]);
     draw_status(frame, app, chunks[4]);
+
+    // Last, so it sits above everything.
+    if app.help {
+        draw_help(frame, app, frame.area());
+    }
+}
+
+/// The `<prefix> ?` key overlay.
+fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
+    let prefix = app.prefix.label();
+
+    let rows: Vec<(String, &str)> = keymap::BINDINGS
+        .iter()
+        .map(|b| {
+            let keys = if b.prefixed {
+                format!("{prefix} {}", b.keys)
+            } else {
+                b.keys.to_owned()
+            };
+            (keys, b.action)
+        })
+        .collect();
+
+    let key_width = rows
+        .iter()
+        .map(|(k, _)| UnicodeWidthStr::width(k.as_str()))
+        .max()
+        .unwrap_or(0);
+    let action_width = rows
+        .iter()
+        .map(|(_, a)| UnicodeWidthStr::width(*a))
+        .max()
+        .unwrap_or(0);
+
+    // Two spaces of padding each side, two between the columns, two for the border.
+    let width = (key_width + action_width + 8).min(area.width as usize) as u16;
+    let height = (rows.len() + 2).min(area.height as usize) as u16;
+    if width < 8 || height < 4 {
+        return;
+    }
+
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|(keys, action)| {
+            let pad = key_width.saturating_sub(UnicodeWidthStr::width(keys.as_str()));
+            Line::from(vec![
+                Span::raw(" ".repeat(pad + 1)),
+                Span::styled(keys.clone(), app.theme.accent_style()),
+                Span::raw("  "),
+                Span::styled((*action).to_owned(), app.theme.dim_style()),
+            ])
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style(true))
+        .title(Span::styled(" keys ", app.theme.accent_style()));
+
+    // Blank the cells underneath: the overlay is opaque, not a tint.
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 /// Build a strip of tab-like cells.
@@ -249,23 +318,24 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
         // Only the focused pane shows the loaded transcript for now; per-pane
         // transcripts arrive with the M4 workspace work.
         if placement.is_focused {
+            let paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
+
+            // The *wrapped* row count, not `lines.len()`. A single long message can
+            // occupy many rows, and scrolling is measured in rows, so counting
+            // unwrapped lines under-reports the scrollable extent and strands the
+            // bottom of the transcript out of reach.
+            let total = paragraph.line_count(inner.width) as u16;
             let height = inner.height;
-            let total = lines.len() as u16;
-            // Hand the geometry back: only the renderer knows how many lines the
-            // transcript wrapped to at this width, and scroll-to-top pagination needs it.
+
+            // Hand the geometry back: only the renderer knows the wrapped extent at
+            // this width, and both scroll clamping and pagination depend on it.
             app.rendered_lines = total;
             app.viewport_height = height;
+
             // `scroll` counts up from the bottom, so translate it to a top offset.
-            let offset = total
-                .saturating_sub(height)
-                .saturating_sub(scroll)
-                .min(total);
-            frame.render_widget(
-                Paragraph::new(lines.clone())
-                    .wrap(Wrap { trim: false })
-                    .scroll((offset, 0)),
-                inner,
-            );
+            let max_scroll = total.saturating_sub(height);
+            let offset = max_scroll.saturating_sub(scroll.min(max_scroll));
+            frame.render_widget(paragraph.scroll((offset, 0)), inner);
         }
     }
 }
@@ -329,15 +399,24 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(Paragraph::new(Line::from(left)), area);
 
-    // Key hints, evenly spaced and flush right.
+    // Key hints, evenly spaced and flush right. Drawn from the same table as the
+    // `<prefix> ?` overlay, so the two cannot disagree.
     let prefix = app.prefix.label();
-    let hints = [
-        ("i".to_owned(), "write"),
-        (format!("{prefix} n"), "tab"),
-        (format!("{prefix} |"), "split"),
-        (format!("{prefix} f"), "jump"),
-        ("q".to_owned(), "quit"),
-    ];
+    let hints: Vec<(String, &str)> = keymap::BINDINGS
+        .iter()
+        .filter(|b| b.hint)
+        .map(|b| {
+            let keys = if b.prefixed {
+                format!("{prefix} {}", b.keys)
+            } else {
+                b.keys.to_owned()
+            };
+            (keys, b.action)
+        })
+        .collect();
+    if hints.is_empty() {
+        return;
+    }
 
     // One width for every cell, so the row reads as a rank rather than a ragged list.
     let cell = hints
