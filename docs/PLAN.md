@@ -40,8 +40,8 @@ any time with `heddle --check`.
 - [x] `heddle --check` homeserver capability probe
 - [x] Single-pane transcript, markdown + syntax highlighting, scrollback
 - [x] Date dividers, sender colouring, read markers, UTD placeholders
-- [ ] Read receipts sent on focus (plumbing exists, not yet triggered)
-- [ ] Backwards pagination on scroll-to-top
+- [x] Read receipts sent on focus
+- [x] Backwards pagination: a first page on open, and more on scroll-to-top
 
 **Exit:** `heddle` logs in, lists rooms, opens one, renders history and live messages.
 

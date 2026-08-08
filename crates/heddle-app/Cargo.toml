@@ -19,6 +19,7 @@ heddle-layout.workspace = true
 
 ratatui.workspace = true
 crossterm.workspace = true
+unicode-width.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
 serde.workspace = true

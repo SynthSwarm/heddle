@@ -9,14 +9,48 @@ use heddle_agent::{AgentState, AgentStore};
 use heddle_layout::{Dir, Pane, PaneId, PaneKind, Tab, Tiling, Workspaces, ORPHAN_WORKSPACE};
 use heddle_matrix::{Command, Entry, RoomSummary, SyncState, View, WorkerEvent};
 use heddle_render::{Options, Overrides, Theme};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// How much of a split to move per resize keypress.
 const RESIZE_STEP: f32 = 0.05;
 
+/// How close to the top of the loaded transcript the user must scroll before older
+/// events are requested. A margin rather than zero, so the page arrives before the
+/// scrollback runs out rather than after it visibly stops.
+const PAGINATE_MARGIN: u16 = 20;
+
 /// Maximum worker events folded into state per frame. Beyond this the rest wait for the
 /// next frame, so a sync burst cannot stall input.
 pub const EVENT_BUDGET: usize = 128;
+
+/// A clickable cell on one of the bars, in absolute terminal columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    /// First column, inclusive.
+    pub x0: u16,
+    /// Last column, exclusive.
+    pub x1: u16,
+    pub index: usize,
+}
+
+impl Hit {
+    fn contains(&self, column: u16) -> bool {
+        column >= self.x0 && column < self.x1
+    }
+}
+
+/// Where the bars were drawn, recorded by the renderer so clicks can be routed back.
+///
+/// Only the renderer knows this: cell widths depend on labels, padding and emoji width.
+#[derive(Debug, Clone, Default)]
+pub struct BarHits {
+    pub workspace_row: u16,
+    pub workspaces: Vec<Hit>,
+    pub tab_row: u16,
+    pub tabs: Vec<Hit>,
+    /// Column span of the `+` affordance on the tab bar.
+    pub new_tab: Option<(u16, u16)>,
+}
 
 /// Everything the UI draws from.
 pub struct App {
@@ -39,6 +73,17 @@ pub struct App {
     pub scroll: HashMap<View, u16>,
     pub sync: SyncState,
     pub status: Option<String>,
+
+    /// Views with a pagination request in flight. Without this, holding `<c-u>` at the
+    /// top of a transcript would queue one request per keypress.
+    paginating: HashSet<View>,
+    /// Rendered line count of the focused transcript, recorded by the renderer. The app
+    /// cannot compute it: wrapping depends on the pane width.
+    pub rendered_lines: u16,
+    /// Visible height of the focused pane, recorded by the renderer.
+    pub viewport_height: u16,
+    /// Clickable regions of the workspace and tab bars, recorded by the renderer.
+    pub bars: BarHits,
 
     pub should_quit: bool,
     /// Commands produced by the last update, drained by the caller.
@@ -73,6 +118,10 @@ impl App {
             scroll: HashMap::new(),
             sync: SyncState::Idle,
             status: None,
+            paginating: HashSet::new(),
+            rendered_lines: 0,
+            viewport_height: 0,
+            bars: BarHits::default(),
             should_quit: false,
             pending: Vec::new(),
         }
@@ -113,6 +162,9 @@ impl App {
             WorkerEvent::Rooms(rooms) => self.apply_rooms(rooms),
 
             WorkerEvent::Timeline { view, entries } => {
+                // Whatever the request achieved, it is no longer in flight. Clearing on
+                // any snapshot also covers the case where pagination returned nothing.
+                self.paginating.remove(&view);
                 self.ingest_agent_events(&view, &entries);
                 self.timelines.insert(view, entries);
             }
@@ -152,8 +204,11 @@ impl App {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| ORPHAN_WORKSPACE.to_owned());
+            // The orphan workspace is titled with its own marker rather than a word, so
+            // it reads as "the rooms with no Space" instead of a section heading.
+            // SPEC.md §2.
             let title = if workspace_id == ORPHAN_WORKSPACE {
-                "rooms"
+                ORPHAN_WORKSPACE
             } else {
                 &room.display_name
             };
@@ -277,12 +332,14 @@ impl App {
                 if let Some(w) = self.workspaces.focused_mut() {
                     w.next_tab();
                 }
+                self.mark_focused_seen();
                 self.open_focused_view();
             }
             Action::PrevTab => {
                 if let Some(w) = self.workspaces.focused_mut() {
                     w.prev_tab();
                 }
+                self.mark_focused_seen();
                 self.open_focused_view();
             }
 
@@ -407,8 +464,17 @@ impl App {
         self.open_focused_view();
     }
 
-    /// Looking at a pane collapses its `Done` badge to `Idle`.
+    /// Looking at a pane collapses its `Done` badge to `Idle` and sends a read receipt.
     fn mark_focused_seen(&mut self) {
+        let Some(view) = self.focused_view() else {
+            return;
+        };
+        // Only tell the server about views we are actually streaming; the worker needs
+        // an open timeline to place the receipt against.
+        if self.timelines.contains_key(&view) {
+            self.queue(Command::MarkRead { view });
+        }
+
         let Some(root) = self
             .workspaces
             .focused()
@@ -424,13 +490,73 @@ impl App {
         self.refresh_pane_states();
     }
 
+    /// Route a left click on the workspace or tab bar.
+    ///
+    /// Returns `true` when the click landed on a bar, so the caller does not also
+    /// hit-test the panes. Clicks anywhere on a bar are swallowed, including the gaps
+    /// between cells: falling through to the tiling would focus a pane the user did not
+    /// aim at.
+    pub fn click_bar(&mut self, column: u16, row: u16) -> bool {
+        if row == self.bars.workspace_row && !self.bars.workspaces.is_empty() {
+            let index = self
+                .bars
+                .workspaces
+                .iter()
+                .find(|h| h.contains(column))
+                .map(|h| h.index);
+            if let Some(index) = index {
+                if self.workspaces.focus(index) {
+                    self.mark_focused_seen();
+                    self.open_focused_view();
+                }
+            }
+            return true;
+        }
+
+        if row == self.bars.tab_row {
+            if self.bars.new_tab.is_some_and(|(x0, x1)| {
+                let hit = Hit { x0, x1, index: 0 };
+                hit.contains(column)
+            }) {
+                self.apply_action(Action::NewThread);
+                return true;
+            }
+            let index = self
+                .bars
+                .tabs
+                .iter()
+                .find(|h| h.contains(column))
+                .map(|h| h.index);
+            if let Some(index) = index {
+                if self
+                    .workspaces
+                    .focused_mut()
+                    .is_some_and(|w| w.focus_tab(index))
+                {
+                    self.mark_focused_seen();
+                    self.open_focused_view();
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+
     /// Ask the worker for the focused view if it is not already streaming.
     pub fn open_focused_view(&mut self) {
         let Some(view) = self.focused_view() else {
             return;
         };
         if !self.timelines.contains_key(&view) {
-            self.queue(Command::OpenView(view));
+            self.queue(Command::OpenView(view.clone()));
+            // A live timeline starts with only what sync delivered, which for a room
+            // opened at launch is usually nothing. Without this first page the pane is
+            // simply empty and the client looks broken. The worker handles commands in
+            // order and `OpenView` is awaited, so the timeline exists by the time this
+            // is processed.
+            self.paginating.insert(view.clone());
+            self.queue(Command::Paginate { view, count: 0 });
         }
     }
 
@@ -441,7 +567,36 @@ impl App {
         let current = *self.scroll.get(&view).unwrap_or(&0);
         // Scroll is an offset *from the bottom*, so scrolling up increases it.
         let next = (current as i32 - delta).max(0) as u16;
-        self.scroll.insert(view, next);
+        self.scroll.insert(view.clone(), next);
+        if delta < 0 {
+            self.paginate_if_near_top(&view, next);
+        }
+    }
+
+    /// Request older events once the user is within [`PAGINATE_MARGIN`] of the top.
+    fn paginate_if_near_top(&mut self, view: &View, scroll: u16) {
+        // Already at the start of the room: there is nothing older to fetch, and asking
+        // anyway would re-request on every keypress.
+        if self
+            .timelines
+            .get(view)
+            .and_then(|entries| entries.first())
+            .is_some_and(|first| matches!(first.kind, heddle_matrix::EntryKind::TimelineStart))
+        {
+            return;
+        }
+
+        let ceiling = self.rendered_lines.saturating_sub(self.viewport_height);
+        if scroll + PAGINATE_MARGIN < ceiling {
+            return;
+        }
+        if !self.paginating.insert(view.clone()) {
+            return;
+        }
+        self.queue(Command::Paginate {
+            view: view.clone(),
+            count: 0,
+        });
     }
 
     fn set_scroll(&mut self, value: u16) {
@@ -877,10 +1032,18 @@ mod tests {
     }
 
     #[test]
-    fn opening_a_view_is_requested_once() {
+    fn opening_a_view_requests_it_and_a_first_page() {
         let mut app = app();
         app.open_focused_view();
-        assert_eq!(app.take_commands().len(), 1);
+        // The first page matters: a live timeline opened at launch is usually empty, so
+        // without it the pane renders blank and the client looks broken.
+        match app.take_commands().as_slice() {
+            [Command::OpenView(a), Command::Paginate { view: b, .. }] => {
+                assert_eq!(a, &View::room("!r:x"));
+                assert_eq!(b, &View::room("!r:x"));
+            }
+            other => panic!("expected OpenView then Paginate, got {other:?}"),
+        }
 
         app.apply_worker_event(WorkerEvent::Timeline {
             view: View::room("!r:x"),
@@ -890,6 +1053,223 @@ mod tests {
         assert!(
             app.take_commands().is_empty(),
             "an already-streaming view must not be re-opened"
+        );
+    }
+
+    #[test]
+    fn focusing_a_streaming_view_sends_a_read_receipt() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: Vec::new(),
+        });
+        let _ = app.take_commands();
+
+        app.focus_pane_id(
+            app.workspaces
+                .focused()
+                .and_then(|w| w.focused_tab())
+                .and_then(|t| t.focused_pane())
+                .expect("pane")
+                .id,
+        );
+        assert!(
+            app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::MarkRead { .. })),
+            "looking at a room must mark it read"
+        );
+    }
+
+    #[test]
+    fn a_view_that_is_not_open_is_not_marked_read() {
+        let mut app = app();
+        app.mark_focused_seen();
+        assert!(
+            !app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::MarkRead { .. })),
+            "the worker needs an open timeline to place a receipt against"
+        );
+    }
+
+    #[test]
+    fn scrolling_to_the_top_requests_older_events_once() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: Vec::new(),
+        });
+        let _ = app.take_commands();
+
+        // Geometry the renderer would have recorded: a long transcript in a short pane.
+        app.rendered_lines = 200;
+        app.viewport_height = 20;
+
+        app.apply_action(Action::ScrollUp(10));
+        assert!(
+            app.take_commands().is_empty(),
+            "scrolling near the bottom must not paginate"
+        );
+
+        app.apply_action(Action::ScrollUp(170));
+        assert!(
+            app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::Paginate { .. })),
+            "reaching the top must request older events"
+        );
+
+        // Holding the key down must not queue a request per keypress.
+        app.apply_action(Action::ScrollUp(5));
+        assert!(
+            app.take_commands().is_empty(),
+            "a pagination request must not be duplicated while one is in flight"
+        );
+    }
+
+    #[test]
+    fn pagination_stops_at_the_start_of_the_room() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: vec![Entry {
+                id: "start".into(),
+                event_id: None,
+                kind: heddle_matrix::EntryKind::TimelineStart,
+            }],
+        });
+        let _ = app.take_commands();
+
+        app.rendered_lines = 200;
+        app.viewport_height = 20;
+        app.apply_action(Action::ScrollUp(200));
+        assert!(
+            app.take_commands().is_empty(),
+            "there is nothing older than the start of the room"
+        );
+    }
+
+    #[test]
+    fn rooms_without_a_space_land_in_the_orphan_workspace() {
+        let app = app();
+        // SPEC.md §2 names it `~`; a word here reads as a section heading instead.
+        assert_eq!(app.workspaces.items[0].id, ORPHAN_WORKSPACE);
+        assert_eq!(app.workspaces.items[0].title, ORPHAN_WORKSPACE);
+    }
+
+    /// Two rooms, so there is a tab to switch *to*.
+    fn app_with_two_rooms() -> App {
+        let mut app = App::new(Config::default());
+        app.apply_worker_event(WorkerEvent::Rooms(vec![
+            RoomSummary {
+                room_id: "!a:x".into(),
+                display_name: "Commons".into(),
+                is_space: false,
+                parents: Vec::new(),
+                is_direct: false,
+                is_encrypted: false,
+                notification_count: 0,
+                highlight_count: 0,
+            },
+            RoomSummary {
+                room_id: "!b:x".into(),
+                display_name: "smith".into(),
+                is_space: false,
+                parents: Vec::new(),
+                is_direct: false,
+                is_encrypted: true,
+                notification_count: 0,
+                highlight_count: 0,
+            },
+        ]));
+        let _ = app.take_commands();
+        app
+    }
+
+    #[test]
+    fn clicking_a_tab_focuses_its_room() {
+        let mut app = app_with_two_rooms();
+        assert_eq!(app.focused_view(), Some(View::room("!a:x")));
+
+        // Geometry as the renderer would have recorded it.
+        app.bars.tab_row = 1;
+        app.bars.tabs = vec![
+            Hit {
+                x0: 1,
+                x1: 13,
+                index: 0,
+            },
+            Hit {
+                x0: 14,
+                x1: 26,
+                index: 1,
+            },
+        ];
+
+        assert!(app.click_bar(20, 1), "a click on the tab bar is handled");
+        assert_eq!(
+            app.focused_view(),
+            Some(View::room("!b:x")),
+            "clicking the second tab must focus the second room"
+        );
+    }
+
+    #[test]
+    fn a_click_on_the_bar_never_falls_through_to_a_pane() {
+        let mut app = app_with_two_rooms();
+        app.bars.tab_row = 1;
+        app.bars.tabs = vec![Hit {
+            x0: 1,
+            x1: 13,
+            index: 0,
+        }];
+
+        // A gap between cells is still the bar; falling through would focus a pane the
+        // user did not aim at.
+        assert!(app.click_bar(200, 1));
+        // And a row below the bars is not.
+        assert!(!app.click_bar(5, 9));
+    }
+
+    #[test]
+    fn clicking_a_workspace_focuses_it() {
+        let mut app = app_with_two_rooms();
+        app.workspaces.entry("!space:x", "hermes-proj");
+        app.bars.workspace_row = 0;
+        app.bars.workspaces = vec![
+            Hit {
+                x0: 1,
+                x1: 13,
+                index: 0,
+            },
+            Hit {
+                x0: 14,
+                x1: 26,
+                index: 1,
+            },
+        ];
+
+        assert!(app.click_bar(18, 0));
+        assert_eq!(app.workspaces.focused().expect("workspace").id, "!space:x");
+    }
+
+    #[test]
+    fn switching_tabs_marks_the_new_one_read() {
+        let mut app = app_with_two_rooms();
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!b:x"),
+            entries: Vec::new(),
+        });
+        let _ = app.take_commands();
+
+        app.apply_action(Action::NextTab);
+        assert_eq!(app.focused_view(), Some(View::room("!b:x")));
+        assert!(
+            app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::MarkRead { .. })),
+            "moving to a tab is looking at it"
         );
     }
 

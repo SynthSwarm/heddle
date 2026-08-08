@@ -130,6 +130,36 @@ impl Prefix {
             .union(KeyModifiers::SHIFT);
         key.code == self.code && (key.modifiers & RELEVANT) == (self.modifiers & RELEVANT)
     }
+
+    /// Short label for the status bar, e.g. `^a`.
+    ///
+    /// Derived from the parsed binding rather than hardcoded, so a custom `ui.prefix`
+    /// cannot leave the hints advertising a key that does nothing.
+    pub fn label(&self) -> String {
+        let mut out = String::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            out.push('^');
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            out.push('⌥');
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            out.push('⇧');
+        }
+        match self.code {
+            KeyCode::Char(' ') => out.push_str("spc"),
+            KeyCode::Char(c) => out.push(c),
+            KeyCode::Esc => out.push_str("esc"),
+            KeyCode::Tab => out.push_str("tab"),
+            KeyCode::Enter => out.push_str("ret"),
+            KeyCode::F(n) => {
+                out.push('f');
+                out.push_str(&n.to_string());
+            }
+            _ => out.push('?'),
+        }
+        out
+    }
 }
 
 /// Translate a key press into an [`Action`], given the current mode.
@@ -372,5 +402,15 @@ mod tests {
         assert_eq!(map(alt_space, Mode::Normal, p).1, Mode::Prefix);
         // And the old default no longer triggers it.
         assert_eq!(map(ctrl('a'), Mode::Normal, p).1, Mode::Normal);
+    }
+
+    #[test]
+    fn the_prefix_label_follows_the_binding() {
+        // The status bar advertises this, so a stale label would send users to a key
+        // that does nothing.
+        assert_eq!(Prefix::default().label(), "^a");
+        assert_eq!(Prefix::parse("alt+x").expect("alt+x").label(), "⌥x");
+        assert_eq!(Prefix::parse("ctrl+space").expect("spc").label(), "^spc");
+        assert_eq!(Prefix::parse("f5").expect("f5").label(), "f5");
     }
 }

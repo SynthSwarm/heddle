@@ -143,6 +143,13 @@ struct Worker {
 
 impl Worker {
     async fn run(&mut self, mut commands: mpsc::Receiver<Command>) -> anyhow::Result<()> {
+        // Subscribe *before* starting. `SyncService::state()` hands out an eyeball
+        // subscription that only yields transitions happening after it is created, so
+        // starting first races the Idle -> Running edge. Losing that edge leaves the
+        // status line stuck on "syncing…" for the whole session even though sync is
+        // healthy and rooms are arriving.
+        let mut sync_state = self.sync_service.state();
+
         self.sync_service.start().await;
         let _ = self
             .events
@@ -150,7 +157,6 @@ impl Worker {
             .await;
 
         let room_list = self.sync_service.room_list_service();
-        let mut sync_state = self.sync_service.state();
 
         // The room list only yields once a filter is set, so subscribe first and set an
         // all-pass filter immediately. heddle does its own grouping into workspaces, so

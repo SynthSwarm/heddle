@@ -34,7 +34,11 @@ const TICK: Duration = Duration::from_millis(250);
 #[command(name = "heddle", version, about, long_about = None)]
 struct Cli {
     /// Profile to use. Defaults to the one marked `default = true`.
-    #[arg(long, short)]
+    ///
+    /// Accepted either before or after a subcommand. With `login` this names the
+    /// profile the session is saved under, which need not exist in config.toml yet;
+    /// otherwise it selects an existing profile from config.toml.
+    #[arg(long, short, global = true)]
     profile: Option<String>,
 
     /// Verify the environment and exit.
@@ -48,13 +52,21 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Log in and save a session.
+    ///
+    /// This writes the credential store only. The matching `[profile.<name>]` block in
+    /// config.toml is not created for you and must be added by hand before plain
+    /// `heddle` will start with that profile.
     Login {
+        /// Homeserver URL, e.g. https://matrix.example.org.
         #[arg(long)]
         homeserver: String,
+        /// Full Matrix user ID, e.g. @you:example.org.
         #[arg(long)]
         user: String,
-        /// Read the password from this environment variable rather than a prompt, so it
-        /// never reaches the shell history or the process table.
+        /// Environment variable holding the password.
+        ///
+        /// The password is only ever read from the environment: passing it as an
+        /// argument would leak it into the shell history and the process table.
         #[arg(long, default_value = "HEDDLE_PASSWORD")]
         password_env: String,
     },
@@ -237,6 +249,11 @@ fn handle_input(app: &mut App, event: Event) {
         }
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Bars first. They sit above the tiling and own their rows, so a click
+                // there must never fall through and focus a pane instead.
+                if app.click_bar(mouse.column, mouse.row) {
+                    return;
+                }
                 let room = app
                     .workspaces
                     .focused()

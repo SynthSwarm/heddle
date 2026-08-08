@@ -3,7 +3,7 @@
 //! Pure layout and painting. All decisions live in [`crate::app`]; this module only
 //! turns state into cells.
 
-use crate::app::App;
+use crate::app::{App, Hit};
 use crate::keymap::Mode;
 use heddle_matrix::SyncState;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -11,9 +11,19 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 /// Height of the composer, including its border.
 const COMPOSER_HEIGHT: u16 = 3;
+
+/// Floor width for a tab label, so short room names still occupy a tab-sized slot.
+const MIN_TAB_WIDTH: usize = 10;
+
+/// Drawn between tabs and at both ends of the bar.
+const TAB_SEPARATOR: &str = "│";
+
+/// Blank columns between key hints in the status bar.
+const HINT_GAP: usize = 3;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
@@ -34,27 +44,82 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_status(frame, app, chunks[4]);
 }
 
-fn draw_workspace_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let focused_id = app.workspaces.focused().map(|w| w.id.clone());
-    let mut spans = Vec::new();
+/// Build a strip of tab-like cells.
+///
+/// Both bars go through this so a workspace and a room are visually the same kind of
+/// thing: a separated, padded, selectable cell. Without the padding and separators a
+/// short label renders as a lone highlighted word, which reads as a heading.
+///
+/// Returns the spans, the clickable span of each cell, and the column just past the
+/// trailing separator.
+fn tab_strip(
+    cells: Vec<(String, Style)>,
+    separator: Style,
+    origin_x: u16,
+) -> (Vec<Span<'static>>, Vec<Hit>, u16) {
+    let separator_width = UnicodeWidthStr::width(TAB_SEPARATOR) as u16;
+    let mut spans = Vec::with_capacity(cells.len() * 2 + 1);
+    let mut hits = Vec::with_capacity(cells.len());
+    let mut x = origin_x;
 
-    for workspace in &app.workspaces.items {
-        let is_focused = Some(&workspace.id) == focused_id.as_ref();
-        let state = workspace.state();
-        let style = if is_focused {
-            app.theme.state(state).add_modifier(Modifier::REVERSED)
-        } else {
-            app.theme.state(state)
-        };
-        spans.push(Span::styled(format!(" {} ", workspace.title), style));
+    for (index, (mut label, style)) in cells.into_iter().enumerate() {
+        let width = UnicodeWidthStr::width(label.as_str());
+        if width < MIN_TAB_WIDTH {
+            label.push_str(&" ".repeat(MIN_TAB_WIDTH - width));
+        }
+
+        spans.push(Span::styled(TAB_SEPARATOR, separator));
+        x += separator_width;
+
+        let cell = format!(" {label} ");
+        let cell_width = UnicodeWidthStr::width(cell.as_str()) as u16;
+        hits.push(Hit {
+            x0: x,
+            x1: x + cell_width,
+            index,
+        });
+        x += cell_width;
+        spans.push(Span::styled(cell, style));
     }
 
-    if spans.is_empty() {
-        spans.push(Span::styled(
+    spans.push(Span::styled(TAB_SEPARATOR, separator));
+    x += separator_width;
+    (spans, hits, x)
+}
+
+fn draw_workspace_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+    let focused_id = app.workspaces.focused().map(|w| w.id.clone());
+
+    let cells: Vec<(String, Style)> = app
+        .workspaces
+        .items
+        .iter()
+        .map(|workspace| {
+            let is_focused = Some(&workspace.id) == focused_id.as_ref();
+            let state = workspace.state();
+            let style = if is_focused {
+                app.theme.state(state).add_modifier(Modifier::REVERSED)
+            } else {
+                app.theme.state(state)
+            };
+            (workspace.title.clone(), style)
+        })
+        .collect();
+
+    let spans = if cells.is_empty() {
+        app.bars.workspaces = Vec::new();
+        vec![Span::styled(
             " connecting… ".to_owned(),
             app.theme.dim_style(),
-        ));
-    }
+        )]
+    } else {
+        // No `+` here: creating a Space is out of scope (SPEC.md §7), so an affordance
+        // suggesting otherwise would be a lie.
+        let (spans, hits, _) = tab_strip(cells, app.theme.dim_style(), area.x);
+        app.bars.workspaces = hits;
+        spans
+    };
+    app.bars.workspace_row = area.y;
 
     let (state, count) = app.badge();
     let badge = if count > 0 && state.is_notable() {
@@ -80,30 +145,46 @@ fn draw_workspace_bar(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(workspace) = app.workspaces.focused() else {
+        app.bars.tabs = Vec::new();
+        app.bars.new_tab = None;
         return;
     };
     let focused_room = workspace.focused_tab().map(|t| t.room_id.clone());
 
-    let mut spans = Vec::new();
-    for tab in &workspace.tabs {
-        let is_focused = Some(&tab.room_id) == focused_room.as_ref();
-        let state = tab.state();
-        let mut style = app.theme.state(state);
-        if is_focused {
-            style = style.add_modifier(Modifier::REVERSED);
-        }
+    let cells: Vec<(String, Style)> = workspace
+        .tabs
+        .iter()
+        .map(|tab| {
+            let is_focused = Some(&tab.room_id) == focused_room.as_ref();
+            let state = tab.state();
+            let mut style = app.theme.state(state);
+            if is_focused {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
 
-        let mut label = tab.title.clone();
-        if tab.is_encrypted {
-            label.push_str(" 🔒");
-        }
-        if tab.highlight_count > 0 {
-            label.push_str(&format!(" ({})", tab.highlight_count));
-        }
-        spans.push(Span::styled(format!(" {label} "), style));
-    }
+            let mut label = tab.title.clone();
+            if tab.is_encrypted {
+                label.push_str(" 🔒");
+            }
+            if tab.highlight_count > 0 {
+                label.push_str(&format!(" ({})", tab.highlight_count));
+            }
+            (label, style)
+        })
+        .collect();
+
+    let (mut spans, hits, x) = tab_strip(cells, app.theme.dim_style(), area.x);
+
+    // A `+` so the strip is self-describing as tabs with a "new" affordance.
+    let plus = " + ";
+    let plus_width = UnicodeWidthStr::width(plus) as u16;
+    spans.push(Span::styled(plus, app.theme.dim_style()));
+
+    app.bars.tab_row = area.y;
+    app.bars.tabs = hits;
+    app.bars.new_tab = Some((x, x + plus_width));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -170,6 +251,10 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
         if placement.is_focused {
             let height = inner.height;
             let total = lines.len() as u16;
+            // Hand the geometry back: only the renderer knows how many lines the
+            // transcript wrapped to at this width, and scroll-to-top pagination needs it.
+            app.rendered_lines = total;
+            app.viewport_height = height;
             // `scroll` counts up from the bottom, so translate it to a top offset.
             let offset = total
                 .saturating_sub(height)
@@ -219,19 +304,71 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
-    let (sync_text, sync_style) = match app.sync {
-        SyncState::Running => ("synced", app.theme.dim_style()),
-        SyncState::Initial => ("syncing…", app.theme.accent_style()),
-        SyncState::Offline => ("offline", Style::default().fg(app.theme.blocked)),
-        SyncState::Terminated => ("stopped", Style::default().fg(app.theme.error)),
-        SyncState::Idle => ("idle", app.theme.dim_style()),
+    // A glyph rather than a word: the healthy states are the common case and do not
+    // deserve a sentence. Colour carries the meaning, matching the agent badges.
+    let (glyph, word, style) = match app.sync {
+        SyncState::Running => ("●", None, Style::default().fg(app.theme.done)),
+        SyncState::Initial => ("◐", None, app.theme.accent_style()),
+        SyncState::Idle => ("○", None, app.theme.dim_style()),
+        // The unhealthy states keep their word: a dim circle is not enough to explain
+        // why nothing is arriving.
+        SyncState::Offline => ("⚠", Some("offline"), Style::default().fg(app.theme.blocked)),
+        SyncState::Terminated => ("✖", Some("stopped"), Style::default().fg(app.theme.error)),
     };
 
-    let mut spans = vec![Span::styled(sync_text.to_owned(), sync_style)];
+    let mut left = vec![Span::styled(format!(" {glyph} "), style)];
+    let mut left_width = 3;
+    if let Some(word) = word {
+        left.push(Span::styled(word.to_owned(), style));
+        left_width += UnicodeWidthStr::width(word);
+    }
     if let Some(status) = &app.status {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(status.clone(), app.theme.dim_style()));
+        left.push(Span::raw("  "));
+        left.push(Span::styled(status.clone(), app.theme.dim_style()));
+        left_width += 2 + UnicodeWidthStr::width(status.as_str());
+    }
+    frame.render_widget(Paragraph::new(Line::from(left)), area);
+
+    // Key hints, evenly spaced and flush right.
+    let prefix = app.prefix.label();
+    let hints = [
+        ("i".to_owned(), "write"),
+        (format!("{prefix} n"), "tab"),
+        (format!("{prefix} |"), "split"),
+        (format!("{prefix} f"), "jump"),
+        ("q".to_owned(), "quit"),
+    ];
+
+    // One width for every cell, so the row reads as a rank rather than a ragged list.
+    let cell = hints
+        .iter()
+        .map(|(key, label)| {
+            UnicodeWidthStr::width(key.as_str()) + 1 + UnicodeWidthStr::width(*label)
+        })
+        .max()
+        .unwrap_or(0)
+        + HINT_GAP;
+
+    let total = (cell * hints.len()) as u16;
+    // Drop the hints entirely rather than letting them collide with the status text.
+    if area.width < total + left_width as u16 {
+        return;
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    let mut spans = Vec::with_capacity(hints.len() * 4);
+    for (key, label) in &hints {
+        let used = UnicodeWidthStr::width(key.as_str()) + 1 + UnicodeWidthStr::width(*label);
+        // Pad in front, so the last cell finishes flush against the right edge.
+        spans.push(Span::raw(" ".repeat(cell.saturating_sub(used))));
+        spans.push(Span::styled(key.clone(), app.theme.accent_style()));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled((*label).to_owned(), app.theme.dim_style()));
+    }
+
+    let right = Rect {
+        x: area.x + area.width - total,
+        width: total,
+        ..area
+    };
+    frame.render_widget(Paragraph::new(Line::from(spans)), right);
 }
