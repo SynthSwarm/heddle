@@ -47,7 +47,7 @@ which one needs you.
 
 ## Requirements
 
-- Rust 1.85+
+- Rust 1.93+
 - A homeserver with **native sliding sync** (MSC4186, advertised as
   `org.matrix.simplified_msc3575`). Recent Synapse has it. This is a hard requirement:
   `matrix-sdk-ui`'s `RoomListService` has no `/sync` fallback.

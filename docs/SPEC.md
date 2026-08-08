@@ -6,7 +6,7 @@
 |---|---|
 | **Status** | Draft 1 |
 | **Date** | 2026-08-02 |
-| **Language** | Rust (edition 2021, MSRV 1.85) |
+| **Language** | Rust (edition 2021, MSRV 1.93) |
 | **Licence** | Apache-2.0 |
 
 ---
