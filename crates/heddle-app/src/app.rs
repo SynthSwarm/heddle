@@ -475,6 +475,39 @@ impl App {
         }
     }
 
+    /// Start a thread on the selected message.
+    ///
+    /// A thread has no existence of its own in Matrix: it is a root event plus whatever
+    /// relates to it, so "starting" one is opening a pane rooted at a message that has no
+    /// replies yet. Nothing is sent here. The first message typed into the pane goes
+    /// through the thread-focused timeline, which attaches the `m.thread` relation and
+    /// brings the thread into being -- so an abandoned pane leaves nothing behind.
+    ///
+    /// `enter` is the other half of this: it opens a thread that already exists. Starting
+    /// one deliberately needs a different key, or every stray `enter` on a message would
+    /// invite a thread nobody wanted.
+    fn start_thread(&mut self) {
+        let Some(view) = self.focused_view() else {
+            return;
+        };
+        // Matrix has no thread of a thread; a reply inside one stays in the same thread.
+        if view.thread_root.is_some() {
+            self.status = Some("this pane is already a thread".into());
+            return;
+        }
+        let Some(root) = self.selected_event().map(ToOwned::to_owned) else {
+            self.status = Some("select a message to start a thread on".into());
+            return;
+        };
+
+        let title = self
+            .selected_body()
+            .map(|(body, _)| body.lines().next().unwrap_or_default().trim().to_owned())
+            .unwrap_or_default();
+
+        self.open_thread_pane(root, title);
+    }
+
     /// Open the thread on the selected message.
     fn accept_selection(&mut self) {
         let Some((root, title)) = self.selected_thread() else {
@@ -1083,9 +1116,7 @@ impl App {
                     tiling.toggle_zoom();
                 }
             }
-            Action::NewThread => {
-                self.status = Some("new thread: send a message to start one".into())
-            }
+            Action::NewThread => self.start_thread(),
 
             Action::NextTab => {
                 if let Some(w) = self.workspaces.focused_mut() {
@@ -2584,6 +2615,92 @@ mod tests {
         app.apply_action(Action::CaretRight);
         app.tick_typing(1_100);
         assert!(app.take_commands().is_empty());
+    }
+
+    #[test]
+    fn starting_a_thread_opens_a_pane_on_a_message_with_no_replies() {
+        // The whole point: the selected message has no thread yet. Requiring one would
+        // mean threads could only ever be opened, never started.
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectNewer);
+        let _ = app.take_commands();
+
+        app.apply_action(Action::NewThread);
+
+        assert_eq!(
+            app.focused_view(),
+            Some(View::thread("!r:x", "$mine")),
+            "focus moves into the new thread, ready to type"
+        );
+        assert!(
+            app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::OpenView(v) if v == &View::thread("!r:x", "$mine"))),
+            "and the thread's timeline is streamed"
+        );
+    }
+
+    #[test]
+    fn starting_a_thread_sends_nothing_by_itself() {
+        // Opening the pane must not post anything: an abandoned thread pane should leave
+        // no trace in the room.
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectNewer);
+        let _ = app.take_commands();
+
+        app.apply_action(Action::NewThread);
+
+        assert!(
+            !app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::SendMessage { .. } | Command::SendReply { .. })),
+            "nothing is sent until the user types something"
+        );
+    }
+
+    #[test]
+    fn starting_a_thread_twice_focuses_the_pane_already_open() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectNewer);
+        app.apply_action(Action::NewThread);
+        let panes = app
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map_or(0, |t| t.panes.len());
+
+        app.apply_action(Action::NewThread);
+
+        assert_eq!(
+            app.workspaces
+                .focused()
+                .and_then(|w| w.focused_tab())
+                .map_or(0, |t| t.panes.len()),
+            panes,
+            "a second attempt must not grow another pane onto the same thread"
+        );
+    }
+
+    #[test]
+    fn a_thread_cannot_be_started_inside_a_thread() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectNewer);
+        app.apply_action(Action::NewThread);
+        let _ = app.take_commands();
+
+        app.apply_action(Action::NewThread);
+
+        assert_eq!(app.focused_view(), Some(View::thread("!r:x", "$mine")));
+        assert!(app.status.is_some(), "and says why");
+    }
+
+    #[test]
+    fn starting_a_thread_needs_a_selection() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::NewThread);
+
+        assert_eq!(app.focused_view(), Some(View::room("!r:x")));
+        assert!(app.status.is_some());
     }
 
     /// A plain message from someone else.

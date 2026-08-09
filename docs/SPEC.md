@@ -342,7 +342,7 @@ chosen to avoid collision when nested inside a `ctrl+b` multiplexer.
 | `<prefix> H J K L` | resize pane |
 | `<prefix> z` | zoom pane |
 | `<prefix> x` | close pane |
-| `<prefix> c` | new thread in this room (new agent session) |
+| `<prefix> c` | start a thread on the selected message (new agent session) |
 | `<prefix> n` / `<prefix> p` | next / previous room tab |
 | `<prefix> w` / `<prefix> W` | next / previous workspace |
 | `<prefix> f` | fuzzy jump to any room, thread or agent |
