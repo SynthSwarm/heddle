@@ -346,6 +346,9 @@ chosen to avoid collision when nested inside a `ctrl+b` multiplexer.
 | `<prefix> n` / `<prefix> p` | next / previous room tab |
 | `<prefix> w` | workspace switcher |
 | `<prefix> f` | fuzzy jump to any room, thread or agent |
+| `k` / `j` | select older / newer message |
+| `r` / `e` / `D` | reply / edit / delete the selection |
+| `<prefix> t` | thread picker |
 | `<prefix> ?` | key overlay |
 | `<prefix> d` | detach (leave the terminal, keep sync warm) |
 | `:` | command palette |

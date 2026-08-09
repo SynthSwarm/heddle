@@ -219,14 +219,14 @@ pub const BINDINGS: &[Binding] = &[
     b("enter", "send", false),
     b("shift+enter", "newline", false),
     b("esc", "normal mode", false),
-    b("K / J", "select older / newer message", false),
+    b("k / j", "select older / newer message", false),
     b("r", "reply to the selection", false),
     b("e", "edit the selection", false),
     b("D", "delete the selection (twice)", false),
     b("enter", "open the highlighted item", false),
     b("y / n", "approve / deny", false),
     b("tab", "toggle tool card", false),
-    b("j / k", "scroll", false),
+    b("up / down", "scroll a line", false),
     b("^u / ^d", "half-page scroll", false),
     b("g / G", "top / bottom", false),
     b(":", "command palette", false),
@@ -258,10 +258,10 @@ pub const BINDINGS: &[Binding] = &[
 /// Ordered by usefulness, because a narrow terminal drops them from the end.
 pub const HINTS: &[Binding] = &[
     b("i", "write", false),
+    b("k / j", "pick", false),
     b("n", "tab", true),
     b("?", "help", true),
     b("|", "split", true),
-    b("f", "jump", true),
 ];
 
 /// Translate a key press into an [`Action`], given the current mode.
@@ -320,8 +320,8 @@ fn map_normal(key: KeyEvent) -> (Action, Mode) {
         KeyCode::Char('i') => (Action::EnterInsert, Mode::Insert),
         KeyCode::Char(':') => (Action::CommandPalette, Mode::Normal),
 
-        KeyCode::Char('K') => (Action::SelectOlder, Mode::Normal),
-        KeyCode::Char('J') => (Action::SelectNewer, Mode::Normal),
+        KeyCode::Char('k') => (Action::SelectOlder, Mode::Normal),
+        KeyCode::Char('j') => (Action::SelectNewer, Mode::Normal),
         KeyCode::Char('r') => (Action::Reply, Mode::Insert),
         KeyCode::Char('e') => (Action::EditMessage, Mode::Insert),
         KeyCode::Char('D') => (Action::RedactMessage, Mode::Normal),
@@ -335,8 +335,10 @@ fn map_normal(key: KeyEvent) -> (Action, Mode) {
         KeyCode::Char('l') if ctrl => (Action::Redraw, Mode::Normal),
         KeyCode::Char('u') if ctrl => (Action::ScrollUp(10), Mode::Normal),
         KeyCode::Char('d') if ctrl => (Action::ScrollDown(10), Mode::Normal),
-        KeyCode::Char('k') | KeyCode::Up => (Action::ScrollUp(1), Mode::Normal),
-        KeyCode::Char('j') | KeyCode::Down => (Action::ScrollDown(1), Mode::Normal),
+        // Arrows scroll by line, so reading a long message does not have to move the
+        // selection. j/k are the message-wise pair.
+        KeyCode::Up => (Action::ScrollUp(1), Mode::Normal),
+        KeyCode::Down => (Action::ScrollDown(1), Mode::Normal),
         KeyCode::PageUp => (Action::ScrollUp(20), Mode::Normal),
         KeyCode::PageDown => (Action::ScrollDown(20), Mode::Normal),
         KeyCode::Char('g') => (Action::ScrollTop, Mode::Normal),

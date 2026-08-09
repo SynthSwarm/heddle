@@ -271,6 +271,10 @@ impl App {
     fn select_by(&mut self, delta: i32) {
         let ids = self.selectable();
         if ids.is_empty() {
+            // Nothing to select yet — an empty or still-loading room. Scroll instead of
+            // swallowing the keypress, so the transcript never feels dead. Older is up,
+            // which is the same negative delta `scroll_by` already means.
+            self.scroll_by(delta);
             return;
         }
         let Some(view) = self.focused_view() else {
@@ -1873,6 +1877,19 @@ mod tests {
         });
         let _ = app.take_commands();
         app
+    }
+
+    #[test]
+    fn selection_falls_back_to_scrolling_when_there_is_nothing_to_select() {
+        // An empty or still-loading room must not swallow the keypress and feel dead.
+        let mut app = app();
+        app.rendered_lines = 200;
+        app.viewport_height = 20;
+        let view = app.focused_view().expect("view");
+
+        app.apply_action(Action::SelectOlder);
+        assert_eq!(*app.scroll.get(&view).unwrap_or(&0), 1);
+        assert_eq!(app.selected_event(), None);
     }
 
     #[test]
