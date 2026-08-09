@@ -465,8 +465,56 @@ async fn collect_threads(room: &Room) -> anyhow::Result<Vec<ThreadSummary>> {
     Ok(out)
 }
 
+/// Map each room to the Spaces that list it as a child.
+///
+/// Read from the Space's own `m.space.child` state rather than the room's
+/// `m.space.parent`: any room may assert a parent it was never added to, while only the
+/// Space decides what it contains. A child is removed by emptying `via` rather than by
+/// deleting the event, so an empty `via` means "no longer in this Space".
+async fn space_parents(client: &Client) -> HashMap<String, Vec<String>> {
+    use matrix_sdk::ruma::events::space::child::SpaceChildEventContent;
+
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for space in client.rooms().into_iter().filter(|room| room.is_space()) {
+        let children = match space
+            .get_state_events_static::<SpaceChildEventContent>()
+            .await
+        {
+            Ok(children) => children,
+            Err(error) => {
+                tracing::warn!(space = %space.room_id(), %error, "cannot read Space children");
+                continue;
+            }
+        };
+
+        let space_id = space.room_id().to_string();
+        for raw in children {
+            let Ok(child) = raw.deserialize() else {
+                continue;
+            };
+            // Only joined and left Spaces carry full state; an invite carries stripped
+            // state, and a Space we have not accepted should not be claiming rooms in
+            // the room list anyway. A redacted child event has no content and is gone.
+            let Some(event) = child.as_sync().and_then(|e| e.as_original()) else {
+                continue;
+            };
+            if event.content.via.is_empty() {
+                continue;
+            }
+            out.entry(event.state_key.to_string())
+                .or_default()
+                .push(space_id.clone());
+        }
+    }
+    out
+}
+
 /// Build the room list the app renders.
 async fn collect_rooms(client: &Client) -> Vec<RoomSummary> {
+    // Gathered once for the whole list: every room needs to know its Spaces, and asking
+    // per room would re-read the same Space state once per member.
+    let parents = space_parents(client).await;
+
     let mut out = Vec::new();
     for room in client.rooms() {
         let room_id = room.room_id().to_string();
@@ -476,11 +524,10 @@ async fn collect_rooms(client: &Client) -> Vec<RoomSummary> {
             .unwrap_or_else(|| room_id.clone());
 
         out.push(RoomSummary {
+            parents: parents.get(&room_id).cloned().unwrap_or_default(),
             room_id,
             display_name,
             is_space: room.is_space(),
-            // Populated from m.space.child in M4, when workspaces land.
-            parents: Vec::new(),
             is_direct: room.is_direct().await.unwrap_or(false),
             is_encrypted: room
                 .latest_encryption_state()

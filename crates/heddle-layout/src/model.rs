@@ -257,6 +257,20 @@ impl Workspaces {
         }
     }
 
+    /// Cycle to the next workspace, wrapping. Mirrors [`Workspace::next_tab`].
+    pub fn next(&mut self) {
+        if !self.items.is_empty() {
+            self.focused = (self.focused + 1) % self.items.len();
+        }
+    }
+
+    /// Cycle to the previous workspace, wrapping.
+    pub fn prev(&mut self) {
+        if !self.items.is_empty() {
+            self.focused = (self.focused + self.items.len() - 1) % self.items.len();
+        }
+    }
+
     /// Get or create a workspace by Space ID.
     pub fn entry(&mut self, id: &str, title: &str) -> &mut Workspace {
         if let Some(i) = self.items.iter().position(|w| w.id == id) {

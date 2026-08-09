@@ -37,7 +37,8 @@ pub enum Action {
     // Tabs and workspaces
     NextTab,
     PrevTab,
-    WorkspaceSwitcher,
+    NextWorkspace,
+    PrevWorkspace,
     FuzzyJump,
     CommandPalette,
 
@@ -243,7 +244,7 @@ pub const BINDINGS: &[Binding] = &[
     b("x", "close pane (not the last)", true),
     b("c", "new thread", true),
     b("t", "thread picker", true),
-    b("w", "workspace switcher", true),
+    b("w / W", "next / prev workspace", true),
     b("f", "fuzzy jump", true),
     b("?", "this help", true),
     b("q", "quit", true),
@@ -303,7 +304,8 @@ fn map_prefix(key: KeyEvent) -> Action {
         KeyCode::Char('n') => Action::NextTab,
         KeyCode::Char('p') => Action::PrevTab,
         KeyCode::Char('t') => Action::OpenThreads,
-        KeyCode::Char('w') => Action::WorkspaceSwitcher,
+        KeyCode::Char('w') => Action::NextWorkspace,
+        KeyCode::Char('W') => Action::PrevWorkspace,
         KeyCode::Char('f') => Action::FuzzyJump,
         KeyCode::Char('?') | KeyCode::Char('/') => Action::ToggleHelp,
 

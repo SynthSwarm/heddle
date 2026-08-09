@@ -637,6 +637,10 @@ impl App {
         for space in &spaces {
             self.workspaces.entry(&space.room_id, &space.display_name);
         }
+        let space_titles: HashMap<&str, &str> = spaces
+            .iter()
+            .map(|s| (s.room_id.as_str(), s.display_name.as_str()))
+            .collect();
 
         for room in rooms.iter().filter(|r| !r.is_space) {
             let workspace_id = room
@@ -647,10 +651,17 @@ impl App {
             // The orphan workspace is titled with its own marker rather than a word, so
             // it reads as "the rooms with no Space" instead of a section heading.
             // SPEC.md §2.
+            //
+            // A Space workspace is titled after the Space. Falling back to the room's own
+            // name would title the workspace after whichever of its rooms happened to be
+            // processed first, which only shows up once rooms actually have parents.
             let title = if workspace_id == ORPHAN_WORKSPACE {
                 ORPHAN_WORKSPACE
             } else {
-                &room.display_name
+                space_titles
+                    .get(workspace_id.as_str())
+                    .copied()
+                    .unwrap_or(room.display_name.as_str())
             };
 
             let workspace = self.workspaces.entry(&workspace_id, title);
@@ -891,7 +902,16 @@ impl App {
             Action::ToggleHelp => self.help = !self.help,
             Action::Redraw => self.needs_redraw = true,
 
-            Action::WorkspaceSwitcher | Action::FuzzyJump | Action::CommandPalette => {
+            Action::NextWorkspace => {
+                self.workspaces.next();
+                self.focus_moved();
+            }
+            Action::PrevWorkspace => {
+                self.workspaces.prev();
+                self.focus_moved();
+            }
+
+            Action::FuzzyJump | Action::CommandPalette => {
                 // Overlays land in M4 alongside the rest of the workspace UI.
                 self.status = Some("not implemented yet".into());
             }
@@ -2030,6 +2050,111 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Command::Paginate { view: v, .. } if v == &view)),
             "reaching the oldest loaded message is a request for history"
+        );
+    }
+
+    #[test]
+    fn a_room_with_a_parent_space_lands_in_that_workspace() {
+        let mut app = App::new(Config::default());
+        app.apply_worker_event(WorkerEvent::Rooms(vec![
+            RoomSummary {
+                room_id: "!space:x".into(),
+                display_name: "SynthSwarm".into(),
+                is_space: true,
+                parents: Vec::new(),
+                is_direct: false,
+                is_encrypted: false,
+                notification_count: 0,
+                highlight_count: 0,
+            },
+            RoomSummary {
+                room_id: "!commons:x".into(),
+                display_name: "Commons".into(),
+                is_space: false,
+                parents: vec!["!space:x".into()],
+                is_direct: false,
+                is_encrypted: false,
+                notification_count: 0,
+                highlight_count: 0,
+            },
+        ]));
+
+        let workspace = app
+            .workspaces
+            .items
+            .iter()
+            .find(|w| w.id == "!space:x")
+            .expect("the Space must become a workspace");
+        assert_eq!(
+            workspace.title, "SynthSwarm",
+            "the workspace is named after the Space, not after a room inside it"
+        );
+        assert!(
+            workspace.tabs.iter().any(|t| t.room_id == "!commons:x"),
+            "a room listing the Space as a parent belongs to its workspace"
+        );
+        assert!(
+            !app.workspaces
+                .items
+                .iter()
+                .any(|w| w.id == ORPHAN_WORKSPACE),
+            "nothing is left over for the orphan workspace"
+        );
+    }
+
+    #[test]
+    fn the_prefix_cycles_workspaces_and_follows_the_focus() {
+        let mut app = App::new(Config::default());
+        app.apply_worker_event(WorkerEvent::Rooms(vec![
+            RoomSummary {
+                room_id: "!space:x".into(),
+                display_name: "SynthSwarm".into(),
+                is_space: true,
+                parents: Vec::new(),
+                is_direct: false,
+                is_encrypted: false,
+                notification_count: 0,
+                highlight_count: 0,
+            },
+            RoomSummary {
+                room_id: "!commons:x".into(),
+                display_name: "Commons".into(),
+                is_space: false,
+                parents: vec!["!space:x".into()],
+                is_direct: false,
+                is_encrypted: false,
+                notification_count: 0,
+                highlight_count: 0,
+            },
+            RoomSummary {
+                room_id: "!loose:x".into(),
+                display_name: "#loose".into(),
+                is_space: false,
+                parents: Vec::new(),
+                is_direct: false,
+                is_encrypted: false,
+                notification_count: 0,
+                highlight_count: 0,
+            },
+        ]));
+        let first = app.workspaces.focused().map(|w| w.id.clone());
+
+        app.apply_action(Action::NextWorkspace);
+        let second = app.workspaces.focused().map(|w| w.id.clone());
+        assert_ne!(first, second, "the focus must actually move");
+
+        // Two workspaces, so one more wraps back. Switching must also stream the newly
+        // focused room, or the pane it lands on stays blank.
+        app.apply_action(Action::NextWorkspace);
+        assert_eq!(app.workspaces.focused().map(|w| w.id.clone()), first);
+
+        app.apply_action(Action::PrevWorkspace);
+        assert_eq!(app.workspaces.focused().map(|w| w.id.clone()), second);
+        assert!(
+            app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::OpenView(_))),
+            "moving to a workspace opens the view it focuses"
         );
     }
 
