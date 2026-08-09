@@ -111,8 +111,23 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
             })?;
             let name = cli.profile.as_deref().unwrap_or("default");
             let paths = session::Paths::for_profile(&dirs.data, name);
-            session::login_password(&homeserver, &user, &password, "heddle", &paths).await?;
+            let (_client, cross_signing) =
+                session::login_password(&homeserver, &user, &password, "heddle", &paths).await?;
             println!("logged in as {user}; profile `{name}` saved");
+            match cross_signing {
+                session::CrossSigning::Created => {
+                    println!("cross-signing identity created for this account");
+                }
+                session::CrossSigning::AlreadyPresent => {
+                    println!("cross-signing identity already existed; left untouched");
+                }
+                session::CrossSigning::NeedsInteractiveAuth => {
+                    println!(
+                        "warning: the homeserver wants an auth flow heddle cannot drive, \
+                         so this account has no cross-signing identity yet"
+                    );
+                }
+            }
             return Ok(());
         }
         Some(Cmd::Logout) => {

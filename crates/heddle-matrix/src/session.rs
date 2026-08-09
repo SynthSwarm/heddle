@@ -142,17 +142,37 @@ pub async fn build_client(homeserver: &str, paths: &Paths) -> Result<Client, Ses
     Ok(client)
 }
 
+/// What a cross-signing bootstrap did, so the caller can say so plainly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossSigning {
+    /// The account already had an identity; nothing was uploaded.
+    AlreadyPresent,
+    /// A new identity was created, signed by this device, and uploaded.
+    Created,
+    /// The homeserver demanded an auth flow a password cannot satisfy.
+    ///
+    /// Not an error: the session is valid and usable, it simply has no cross-signing
+    /// identity yet, and one will have to be set up from a client that can drive the
+    /// server's chosen flow.
+    NeedsInteractiveAuth,
+}
+
 /// Log in with a password and persist the resulting session.
 ///
 /// `device_name` is what other clients show in the device list; a stable, recognisable
 /// name matters because the user will be verifying this device by hand.
+///
+/// Cross-signing is bootstrapped here rather than later because uploading the signing
+/// keys is a user-interactive-auth endpoint, and login is the one moment heddle legit-
+/// imately holds the password. Deferring it to the TUI would mean prompting for the
+/// password a second time, which trains exactly the habit an E2EE client should not.
 pub async fn login_password(
     homeserver: &str,
     user: &str,
     password: &str,
     device_name: &str,
     paths: &Paths,
-) -> Result<Client, SessionError> {
+) -> Result<(Client, CrossSigning), SessionError> {
     let client = build_client(homeserver, paths).await?;
 
     let response = client
@@ -168,7 +188,71 @@ pub async fn login_password(
     };
     save(&saved, paths)?;
 
-    Ok(client)
+    let outcome = bootstrap_cross_signing(&client, user, password).await?;
+
+    Ok((client, outcome))
+}
+
+/// Create this account's cross-signing identity if it has none.
+///
+/// `bootstrap_cross_signing_if_needed` is used rather than the unconditional form for a
+/// reason worth stating: the unconditional call *replaces* an existing identity, which
+/// would invalidate every verification the user has ever done from every other client.
+/// The `_if_needed` variant runs an initial key query first, so an account that already
+/// has an identity is left alone rather than being judged absent merely because this
+/// brand-new device has not yet asked the server.
+///
+/// The first attempt deliberately passes no auth data: the endpoint always rejects that
+/// with a UIAA challenge, and the response carries the session id the real attempt must
+/// quote back. A server offering only SSO or another non-password flow is reported, not
+/// failed, because a session without cross-signing still works for unencrypted rooms.
+pub async fn bootstrap_cross_signing(
+    client: &Client,
+    user: &str,
+    password: &str,
+) -> Result<CrossSigning, SessionError> {
+    use matrix_sdk::ruma::api::client::uiaa;
+
+    let encryption = client.encryption();
+
+    let error = match encryption.bootstrap_cross_signing_if_needed(None).await {
+        // Either the identity was already there, or the server took the upload without
+        // asking us to prove anything. Both leave the account cross-signed.
+        Ok(()) => return Ok(already_or_created(client).await),
+        Err(e) => e,
+    };
+
+    let Some(challenge) = error.as_uiaa_response() else {
+        return Err(SessionError::Matrix(Box::new(error)));
+    };
+
+    let mut auth = uiaa::Password::new(
+        uiaa::UserIdentifier::Matrix(uiaa::MatrixUserIdentifier::new(user.to_owned())),
+        password.to_owned(),
+    );
+    auth.session = challenge.session.clone();
+
+    match encryption
+        .bootstrap_cross_signing_if_needed(Some(uiaa::AuthData::Password(auth)))
+        .await
+    {
+        Ok(()) => Ok(CrossSigning::Created),
+        Err(e) if e.as_uiaa_response().is_some() => Ok(CrossSigning::NeedsInteractiveAuth),
+        Err(e) => Err(SessionError::Matrix(Box::new(e))),
+    }
+}
+
+/// Decide what to report when the bootstrap call succeeded without a challenge.
+///
+/// Holding all three secret halves locally means this device minted the identity; an
+/// account that merely already had one leaves the private keys on whichever device did.
+async fn already_or_created(client: &Client) -> CrossSigning {
+    match client.encryption().cross_signing_status().await {
+        Some(status) if status.has_master && status.has_self_signing && status.has_user_signing => {
+            CrossSigning::Created
+        }
+        _ => CrossSigning::AlreadyPresent,
+    }
 }
 
 /// Restore a previously saved session.
