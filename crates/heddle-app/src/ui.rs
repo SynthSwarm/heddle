@@ -635,6 +635,11 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             if tab.is_encrypted {
                 label.push_str(" 🔒");
             }
+            // A padlock says "encrypted", which is not the same as "trustworthy", and
+            // a room can be both encrypted and carrying messages we cannot vouch for.
+            if app.unverified_rooms.contains(&tab.room_id) {
+                label.push_str(" !");
+            }
             if tab.highlight_count > 0 {
                 label.push_str(&format!(" ({})", tab.highlight_count));
             }
@@ -894,6 +899,18 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(word) = word {
         left.push(Span::styled(word.to_owned(), style));
         left_width += UnicodeWidthStr::width(word);
+    }
+    // Persistent, not a passing status: an unverified device cannot be sent keys by
+    // anyone else, so every silence it causes looks like a bug somewhere else. It stays
+    // on screen until it is no longer true.
+    if app.device_verified == Some(false) {
+        const WARNING: &str = "unverified device — ^a v";
+        left.push(Span::raw("  "));
+        left.push(Span::styled(
+            WARNING.to_owned(),
+            Style::default().fg(app.theme.error),
+        ));
+        left_width += 2 + UnicodeWidthStr::width(WARNING);
     }
     if let Some(status) = &app.status {
         left.push(Span::raw("  "));

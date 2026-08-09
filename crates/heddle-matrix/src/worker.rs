@@ -895,6 +895,7 @@ fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem) -> Entry {
                         _ => event.sender().localpart().to_owned(),
                     },
                     agent: decode_agent(event, &body),
+                    shield: shield_of(event),
                     body,
                     timestamp: event.timestamp().0.into(),
                     is_own: event.is_own(),
@@ -1098,6 +1099,35 @@ async fn drive_sas(
         }
 
         state = changes.next().await;
+    }
+}
+
+/// What the SDK makes of this event's authenticity.
+///
+/// `strict` is false, which is the setting Element and the SDK's own callers use: the
+/// strict variant also shields messages from devices that are merely unsigned by a
+/// sender whose identity we have never verified, which in practice is most senders in
+/// most rooms. A shield on every message is a shield on none -- the user stops reading
+/// them, and the one that matters goes unnoticed.
+fn shield_of(event: &matrix_sdk_ui::timeline::EventTimelineItem) -> Shield {
+    use matrix_sdk_ui::timeline::{
+        TimelineEventShieldState as State, TimelineEventShieldStateCode as Code,
+    };
+
+    let reason = |code| match code {
+        Code::AuthenticityNotGuaranteed => ShieldReason::Unknown,
+        Code::UnknownDevice => ShieldReason::UnknownDevice,
+        Code::UnsignedDevice => ShieldReason::UnsignedDevice,
+        Code::UnverifiedIdentity => ShieldReason::UnverifiedIdentity,
+        Code::VerificationViolation => ShieldReason::IdentityChanged,
+        Code::MismatchedSender => ShieldReason::MismatchedSender,
+        Code::SentInClear => ShieldReason::SentInClear,
+    };
+
+    match event.get_shield(false) {
+        State::None => Shield::None,
+        State::Grey { code } => Shield::Caution(reason(code)),
+        State::Red { code } => Shield::Warning(reason(code)),
     }
 }
 

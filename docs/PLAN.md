@@ -99,8 +99,8 @@ attachment upload and download, room join / leave / invite.
 - [x] Encrypted send and receive; UTD (unable-to-decrypt) placeholder with retry
 - [x] Interactive SAS emoji verification, both initiating and accepting
 - [x] Cross-signing bootstrap on first login
-- [ ] `Recovery` — key backup enable, restore from recovery key, reset flow
-- [ ] Unverified-device shield warning surfaced at room and message level
+- [~] `Recovery` — restore from recovery key done; enable and reset still to do
+- [x] Unverified-device shield warning surfaced at room and message level
 
 **Exit:** a fully verified device that survives a restart and can restore from backup.
 

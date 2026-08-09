@@ -9,8 +9,8 @@ use crate::keymap::{Action, Mode, Prefix};
 use heddle_agent::{AgentState, AgentStore};
 use heddle_layout::{Dir, Pane, PaneId, PaneKind, Tab, Tiling, Workspaces, ORPHAN_WORKSPACE};
 use heddle_matrix::{
-    Command, Entry, RecoveryState, RoomSummary, SyncState, ThreadSummary, Verification, View,
-    WorkerEvent,
+    Command, Entry, EntryKind, RecoveryState, RoomSummary, Shield, SyncState, ThreadSummary,
+    Verification, View, WorkerEvent,
 };
 use heddle_render::{Options, Overrides, Theme};
 use std::collections::{HashMap, HashSet};
@@ -170,6 +170,8 @@ pub struct App {
     pub recovery: RecoveryState,
     /// The open recovery-key prompt, if any.
     pub recovery_prompt: Option<RecoveryPrompt>,
+    /// Rooms whose loaded history contains a message heddle cannot vouch for.
+    pub unverified_rooms: HashSet<String>,
     /// Whether this device has been verified by the account's cross-signing identity.
     ///
     /// `None` until the crypto store can answer. Drawing "unverified" before we know
@@ -235,6 +237,7 @@ impl App {
             device_verified: None,
             recovery: RecoveryState::Unknown,
             recovery_prompt: None,
+            unverified_rooms: HashSet::new(),
             typing: None,
             confirm_redact: None,
             anchors: Vec::new(),
@@ -849,6 +852,18 @@ impl App {
                 // any snapshot also covers the case where pagination returned nothing.
                 self.paginating.remove(&view);
                 self.ingest_agent_events(&view, &entries);
+                // A room-level shield, drawn from evidence rather than from a roster.
+                // Auditing every member's devices would mean a device list per member
+                // per room; what the user needs to know is that this room contains
+                // messages heddle cannot vouch for, and the messages themselves say so.
+                let suspect = entries.iter().any(|e| {
+                    matches!(&e.kind, EntryKind::Message(m) if matches!(m.shield, Shield::Warning(_)))
+                });
+                if suspect {
+                    self.unverified_rooms.insert(view.room_id.clone());
+                } else {
+                    self.unverified_rooms.remove(&view.room_id);
+                }
                 self.timelines.insert(view, entries);
             }
 
@@ -1847,6 +1862,7 @@ mod tests {
             id: event_id.into(),
             event_id: Some(event_id.into()),
             kind: EntryKind::Message(Message {
+                shield: Shield::None,
                 sender: "@hermes:x".into(),
                 sender_display: "hermes".into(),
                 body: "chrome".into(),
@@ -3209,12 +3225,54 @@ mod tests {
         assert!(prompt.error.as_deref().is_some_and(|e| e.contains("MAC")));
     }
 
+    #[test]
+    fn a_room_carrying_an_unvouched_message_is_marked() {
+        let mut app = app();
+        let mut entry = their_message("$e1", "trust me");
+        if let EntryKind::Message(m) = &mut entry.kind {
+            m.shield = Shield::Warning(heddle_matrix::ShieldReason::UnsignedDevice);
+        }
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: vec![entry],
+        });
+
+        assert!(app.unverified_rooms.contains("!r:x"));
+
+        // And it clears again once the offending message is gone, rather than marking
+        // the room for the rest of the session.
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: vec![their_message("$e2", "fine")],
+        });
+        assert!(!app.unverified_rooms.contains("!r:x"));
+    }
+
+    #[test]
+    fn a_merely_cautious_shield_does_not_mark_the_room() {
+        let mut app = app();
+        let mut entry = their_message("$e1", "hello");
+        if let EntryKind::Message(m) = &mut entry.kind {
+            m.shield = Shield::Caution(heddle_matrix::ShieldReason::UnverifiedIdentity);
+        }
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: vec![entry],
+        });
+
+        assert!(
+            !app.unverified_rooms.contains("!r:x"),
+            "most senders in most rooms are unverified; marking every room marks none"
+        );
+    }
+
     /// A plain message from someone else.
     fn their_message(event_id: &str, body: &str) -> Entry {
         Entry {
             id: event_id.into(),
             event_id: Some(event_id.into()),
             kind: EntryKind::Message(Message {
+                shield: Shield::None,
                 sender: "@someone:x".into(),
                 sender_display: "someone".into(),
                 body: body.into(),

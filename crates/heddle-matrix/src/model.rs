@@ -79,6 +79,57 @@ pub enum EntryKind {
     Notice(String),
 }
 
+/// How much the authenticity of a message can be trusted.
+///
+/// Taken from the SDK's own shield calculation rather than derived here. Deciding what
+/// counts as trustworthy is exactly the judgement a client should not be improvising:
+/// the rules cover unsigned devices, unverified identities, senders who changed their
+/// keys after being verified, and events whose sender does not own the Megolm session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shield {
+    /// Nothing to say.
+    None,
+    /// Worth noting but not alarming: authenticity cannot be fully established.
+    Caution(ShieldReason),
+    /// Actively suspicious.
+    Warning(ShieldReason),
+}
+
+/// Why a shield is being shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShieldReason {
+    /// Not enough information to check authenticity.
+    Unknown,
+    /// The sending device is not known to us at all.
+    UnknownDevice,
+    /// The sending device was never signed by its owner.
+    UnsignedDevice,
+    /// The sender's identity has not been verified by us.
+    UnverifiedIdentity,
+    /// The sender was verified before and their identity has since changed.
+    IdentityChanged,
+    /// The sender does not own the session the message came in on.
+    MismatchedSender,
+    /// Sent unencrypted into a room that is supposed to be encrypted.
+    SentInClear,
+}
+
+impl ShieldReason {
+    /// A short phrase for the transcript. Deliberately plain: "unverified" means
+    /// something specific here and the user is owed the specific meaning.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Unknown => "authenticity unknown",
+            Self::UnknownDevice => "sent from a device we do not know",
+            Self::UnsignedDevice => "sent from an unverified device",
+            Self::UnverifiedIdentity => "sender is not verified",
+            Self::IdentityChanged => "sender's identity changed since you verified them",
+            Self::MismatchedSender => "sender does not match the encrypting device",
+            Self::SentInClear => "sent unencrypted in an encrypted room",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Message {
     pub sender: String,
@@ -98,6 +149,8 @@ pub struct Message {
     pub thread_replies: Option<u32>,
     /// Reaction key to the number of senders who used it.
     pub reactions: Vec<(String, usize)>,
+    /// Authenticity warning for this message, if any.
+    pub shield: Shield,
     pub agent: AgentPayload,
 }
 

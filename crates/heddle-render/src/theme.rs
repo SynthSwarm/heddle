@@ -74,6 +74,10 @@ impl Theme {
         Style::default().fg(self.dim)
     }
 
+    pub fn error_style(&self) -> Style {
+        Style::default().fg(self.error).add_modifier(Modifier::BOLD)
+    }
+
     pub fn accent_style(&self) -> Style {
         Style::default().fg(self.accent)
     }

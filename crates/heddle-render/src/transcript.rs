@@ -6,7 +6,7 @@
 use crate::card::{self, AutoExpand};
 use crate::theme::Theme;
 use heddle_agent::{AgentEvent, Kind};
-use heddle_matrix::{AgentPayload, Entry, EntryKind, Message};
+use heddle_matrix::{AgentPayload, Entry, EntryKind, Message, Shield};
 use ratatui::text::{Line, Span};
 use std::collections::HashMap;
 
@@ -289,6 +289,22 @@ fn sender_line(message: &Message, theme: &Theme, mark_degraded: bool) -> Line<'s
     if message.is_edited {
         spans.push(Span::styled(" (edited)".to_owned(), theme.dim_style()));
     }
+    // Beside the name, because a shield is a statement about who sent this, and the name
+    // is the claim it qualifies. The reason is spelled out rather than left to a glyph:
+    // a symbol the user has to remember the meaning of is a symbol they will read as
+    // decoration. `!` and `?` rather than coloured shields, so the distinction survives
+    // a monochrome terminal.
+    match message.shield {
+        Shield::None => {}
+        Shield::Warning(reason) => spans.push(Span::styled(
+            format!("  ! {}", reason.describe()),
+            theme.error_style(),
+        )),
+        Shield::Caution(reason) => spans.push(Span::styled(
+            format!("  ? {}", reason.describe()),
+            theme.dim_style(),
+        )),
+    }
     Line::from(spans)
 }
 
@@ -373,6 +389,7 @@ mod tests {
             id: "i1".into(),
             event_id: Some("$e1".into()),
             kind: EntryKind::Message(Message {
+                shield: Shield::None,
                 sender: "@hermes:x".into(),
                 sender_display: "hermes".into(),
                 body: "hello".into(),
