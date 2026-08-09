@@ -7,7 +7,9 @@ use crate::composer::Composer;
 use crate::config::Config;
 use crate::keymap::{Action, Mode, Prefix};
 use heddle_agent::{AgentState, AgentStore};
-use heddle_layout::{Dir, Pane, PaneId, PaneKind, Tab, Tiling, Workspaces, ORPHAN_WORKSPACE};
+use heddle_layout::{
+    Dir, Pane, PaneId, PaneKind, Tab, Tiling, Unread, Workspaces, ORPHAN_WORKSPACE,
+};
 use heddle_matrix::{
     Command, Entry, EntryKind, RecoveryState, RoomSummary, Shield, SyncState, ThreadSummary,
     Verification, View, WorkerEvent,
@@ -1024,14 +1026,12 @@ impl App {
                 Some(tab) => {
                     tab.title.clone_from(&room.display_name);
                     tab.is_encrypted = room.is_encrypted;
-                    tab.notification_count = room.notification_count;
-                    tab.highlight_count = room.highlight_count;
+                    tab.unread = Unread::new(room.notification_count, room.highlight_count);
                 }
                 None => {
                     let mut tab = Tab::new(&room.room_id, &room.display_name);
                     tab.is_encrypted = room.is_encrypted;
-                    tab.notification_count = room.notification_count;
-                    tab.highlight_count = room.highlight_count;
+                    tab.unread = Unread::new(room.notification_count, room.highlight_count);
 
                     // Every room starts with a root pane showing its main timeline.
                     let mut tiling = Tiling::new();
@@ -2008,7 +2008,7 @@ mod tests {
             .expect("tab");
         assert_eq!(tab.title, "#backend-renamed");
         assert!(tab.is_encrypted);
-        assert_eq!(tab.notification_count, 3);
+        assert_eq!(tab.unread, Unread::new(3, 1));
         assert_eq!(
             app.workspaces.focused().expect("workspace").tabs.len(),
             1,

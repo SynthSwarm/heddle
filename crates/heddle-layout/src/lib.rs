@@ -7,6 +7,6 @@
 pub mod model;
 pub mod tiling;
 
-pub use model::{Pane, PaneKind, Tab, Workspace, Workspaces, ORPHAN_WORKSPACE};
+pub use model::{Pane, PaneKind, Tab, Unread, Workspace, Workspaces, ORPHAN_WORKSPACE};
 pub use ratatui_hypertile::PaneId;
 pub use tiling::{Dir, Placement, Tiling};

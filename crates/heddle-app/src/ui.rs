@@ -6,6 +6,7 @@
 use crate::app::{App, Hit, Pending, RecoveryPanel};
 use crate::composer::Composer;
 use crate::keymap::{self, Mode};
+use heddle_agent::AgentState;
 use heddle_matrix::{SyncState, View};
 use heddle_render::transcript::Anchor;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -663,12 +664,28 @@ fn draw_workspace_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|workspace| {
             let is_focused = Some(&workspace.id) == focused_id.as_ref();
             let state = workspace.state();
-            let style = if is_focused {
-                app.theme.state(state).add_modifier(Modifier::REVERSED)
+            let unread = workspace.unread();
+
+            // Agent state wins when there is one, because it is the thing this client
+            // exists to surface. Unread only has to beat "dim", so that a workspace
+            // holding traffic never looks the same as an empty one.
+            let mut style = if state == AgentState::Idle && unread.any() {
+                app.theme.unread(unread.is_highlight())
             } else {
                 app.theme.state(state)
             };
-            (workspace.title.clone(), style)
+            if is_focused {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+
+            let mut label = workspace.title.clone();
+            // The focused workspace's own counts are about to be read, so a badge on it
+            // is noise; every other workspace is out of sight and needs one.
+            if let Some(badge) = unread.label().filter(|_| !is_focused) {
+                label.push(' ');
+                label.push_str(&badge);
+            }
+            (label, style)
         })
         .collect();
 
@@ -725,7 +742,11 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|tab| {
             let is_focused = Some(&tab.room_id) == focused_room.as_ref();
             let state = tab.state();
-            let mut style = app.theme.state(state);
+            let mut style = if state == AgentState::Idle && tab.unread.any() {
+                app.theme.unread(tab.unread.is_highlight())
+            } else {
+                app.theme.state(state)
+            };
             if is_focused {
                 style = style.add_modifier(Modifier::REVERSED);
             }
@@ -739,8 +760,11 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             if app.unverified_rooms.contains(&tab.room_id) {
                 label.push_str(" ⛔");
             }
-            if tab.highlight_count > 0 {
-                label.push_str(&format!(" ({})", tab.highlight_count));
+            // Both counts, not just mentions: a busy room you have not opened is worth
+            // seeing even when nobody said your name.
+            if let Some(badge) = tab.unread.label().filter(|_| !is_focused) {
+                label.push(' ');
+                label.push_str(&badge);
             }
             (label, style)
         })

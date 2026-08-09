@@ -49,6 +49,85 @@ impl PaneKind {
     }
 }
 
+/// Unread counts, as the homeserver reports them.
+///
+/// Two axes rather than one: `highlights` are messages that named you, `notifications`
+/// is everything the push rules think is worth a badge. They are rolled up separately
+/// because "someone is talking" and "someone is talking to you" deserve different
+/// amounts of the user's attention, and collapsing them loses the only distinction
+/// that justifies interrupting a focused pane.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unread {
+    pub notifications: u64,
+    pub highlights: u64,
+}
+
+impl Unread {
+    pub const fn new(notifications: u64, highlights: u64) -> Self {
+        Self {
+            notifications,
+            highlights,
+        }
+    }
+
+    /// Whether there is anything at all to report.
+    pub const fn any(self) -> bool {
+        self.notifications > 0 || self.highlights > 0
+    }
+
+    /// Whether any of it names you.
+    pub const fn is_highlight(self) -> bool {
+        self.highlights > 0
+    }
+
+    /// The number worth showing.
+    ///
+    /// Takes whichever counter is larger rather than trusting `notifications` to be the
+    /// superset it usually is: a push rule can raise a highlight without also counting
+    /// a notification, and a badge that reads `(@0)` would be worse than useless.
+    pub const fn count(self) -> u64 {
+        if self.highlights > self.notifications {
+            self.highlights
+        } else {
+            self.notifications
+        }
+    }
+
+    /// Badge text, or `None` when there is nothing unread.
+    ///
+    /// `(3)` is three unread. `(@3)` is three unread, at least one of which names you.
+    /// Deliberately ASCII: this sits inside a tab cell whose width is measured with
+    /// `unicode-width`, and emoji that measure narrow but paint wide drift the whole
+    /// strip out of alignment.
+    pub fn label(self) -> Option<String> {
+        if !self.any() {
+            return None;
+        }
+        Some(if self.is_highlight() {
+            format!("(@{})", self.count())
+        } else {
+            format!("({})", self.count())
+        })
+    }
+}
+
+impl std::ops::Add for Unread {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            notifications: self.notifications.saturating_add(other.notifications),
+            highlights: self.highlights.saturating_add(other.highlights),
+        }
+    }
+}
+
+impl std::iter::Sum for Unread {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |total, next| total + next)
+    }
+}
+
 /// A single tiled view.
 #[derive(Debug, Clone)]
 pub struct Pane {
@@ -90,8 +169,7 @@ pub struct Tab {
     /// Index into `panes`. Kept in range by every mutating method.
     focused: usize,
     pub is_encrypted: bool,
-    pub notification_count: u64,
-    pub highlight_count: u64,
+    pub unread: Unread,
 }
 
 impl Tab {
@@ -102,8 +180,7 @@ impl Tab {
             panes: Vec::new(),
             focused: 0,
             is_encrypted: false,
-            notification_count: 0,
-            highlight_count: 0,
+            unread: Unread::default(),
         }
     }
 
@@ -226,6 +303,14 @@ impl Workspace {
     pub fn count_in(&self, state: AgentState) -> usize {
         self.tabs.iter().map(|t| t.count_in(state)).sum()
     }
+
+    /// Unread rolled up from every tab.
+    ///
+    /// Without this a workspace you are not looking at is indistinguishable from an
+    /// empty one, which is how a room can go unnoticed for a day.
+    pub fn unread(&self) -> Unread {
+        self.tabs.iter().map(|t| t.unread).sum()
+    }
 }
 
 /// The whole workspace bar.
@@ -305,6 +390,11 @@ impl Workspaces {
         self.items.iter().map(|w| w.count_in(state)).sum()
     }
 
+    /// Unread rolled up across every workspace.
+    pub fn unread(&self) -> Unread {
+        self.items.iter().map(Workspace::unread).sum()
+    }
+
     /// Order workspaces so the ones needing attention come first, then alphabetically.
     ///
     /// Stable within a priority band, so the bar does not shuffle under the cursor
@@ -350,6 +440,60 @@ mod tests {
         tab.push_pane(pane(3, AgentState::Working));
         assert_eq!(tab.state(), AgentState::Blocked);
         assert_eq!(tab.count_in(AgentState::Working), 1);
+    }
+
+    #[test]
+    fn unread_labels_distinguish_a_mention_from_mere_traffic() {
+        assert_eq!(Unread::default().label(), None);
+        assert_eq!(Unread::new(4, 0).label().as_deref(), Some("(4)"));
+        assert_eq!(Unread::new(4, 1).label().as_deref(), Some("(@4)"));
+    }
+
+    #[test]
+    fn a_highlight_without_a_notification_still_counts() {
+        // Some push rules raise a highlight without incrementing the notification
+        // counter. Trusting `notifications` alone would print `(@0)`.
+        let unread = Unread::new(0, 2);
+        assert!(unread.any());
+        assert_eq!(unread.count(), 2);
+        assert_eq!(unread.label().as_deref(), Some("(@2)"));
+    }
+
+    #[test]
+    fn unread_rolls_up_from_tabs_to_the_whole_bar() {
+        let mut ws = Workspaces::new();
+
+        let quiet = ws.entry("!a:x", "alpha");
+        let mut tab = Tab::new("!r1:x", "r1");
+        tab.unread = Unread::new(3, 0);
+        quiet.tabs.push(tab);
+
+        let loud = ws.entry("!b:x", "bravo");
+        let mut one = Tab::new("!r2:x", "r2");
+        one.unread = Unread::new(5, 1);
+        let mut two = Tab::new("!r3:x", "r3");
+        two.unread = Unread::new(2, 0);
+        loud.tabs.push(one);
+        loud.tabs.push(two);
+
+        assert_eq!(ws.items[0].unread(), Unread::new(3, 0));
+        assert_eq!(ws.items[1].unread(), Unread::new(7, 1));
+        assert_eq!(ws.unread(), Unread::new(10, 1));
+        assert!(ws.unread().is_highlight());
+    }
+
+    #[test]
+    fn an_unread_workspace_is_not_silent_just_because_no_agent_is_running() {
+        // The bug this exists to prevent: a room arriving in a workspace nobody is
+        // looking at, with no agent attached, and nothing on screen to say so.
+        let mut ws = Workspaces::new();
+        let w = ws.entry("~", ORPHAN_WORKSPACE);
+        let mut tab = Tab::new("!r:x", "Another");
+        tab.unread = Unread::new(1, 0);
+        w.tabs.push(tab);
+
+        assert_eq!(ws.state(), AgentState::Idle);
+        assert!(ws.unread().any(), "unread must survive an idle agent state");
     }
 
     #[test]

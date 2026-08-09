@@ -61,6 +61,22 @@ impl Theme {
         }
     }
 
+    /// Style for a tab or workspace carrying unread messages.
+    ///
+    /// A mention is the only unread worth pulling the eye across the screen, so it
+    /// alone is accented and emboldened. Plain unread does nothing more than stop the
+    /// label being dim, which is enough to tell it apart from a quiet workspace
+    /// without competing with a blocked agent for attention.
+    pub fn unread(&self, highlight: bool) -> Style {
+        if highlight {
+            Style::default()
+                .fg(self.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(self.text)
+        }
+    }
+
     /// Style for a tool card header.
     pub fn tool(&self, status: ToolStatus) -> Style {
         match status {
@@ -136,6 +152,24 @@ mod tests {
         for state in [AgentState::Working, AgentState::Done, AgentState::Idle] {
             assert!(!t.state(state).add_modifier.contains(Modifier::BOLD));
         }
+    }
+
+    #[test]
+    fn plain_unread_is_visible_but_a_mention_is_loud() {
+        let t = Theme::default();
+
+        let plain = t.unread(false);
+        assert_eq!(
+            plain.fg,
+            Some(t.text),
+            "plain unread must at least stop the label being dim"
+        );
+        assert_ne!(plain.fg, Some(t.dim));
+        assert!(!plain.add_modifier.contains(Modifier::BOLD));
+
+        let mention = t.unread(true);
+        assert_eq!(mention.fg, Some(t.accent));
+        assert!(mention.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
