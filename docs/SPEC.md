@@ -265,7 +265,7 @@ and maintained by one author; the wrapper keeps a fork or replacement to a singl
 | `matrix-sdk-ui` | `SyncService`, `RoomListService`, `Timeline` |
 | `matrix-sdk-sqlite` | state + crypto persistence |
 | `ratatui`, `crossterm` | rendering, input |
-| `ratatui-hypertile`, `-extras` | BSP tiling, workspace tabs, command palette |
+| `ratatui-hypertile` (`serde`) | BSP tiling, and the tree layout persistence stores |
 | `ratatui-image` | sixel / kitty / iTerm2 image protocols |
 | `tui-markdown` (`highlight-code`) | markdown + syntect highlighting |
 | `similar` | diff computation for `tool.result` |

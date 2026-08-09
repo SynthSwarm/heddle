@@ -113,15 +113,27 @@ stop, and smearing it across other milestones would let it be quietly skipped.
 
 **Goal:** the herdr feel.
 
-- [ ] `heddle-layout` trait wrapping `ratatui-hypertile`
-- [ ] Space → workspace, Room → tab, Thread → pane
-- [ ] Splits, focus movement, resize, zoom, close; mouse drag and click-to-focus
-- [ ] Workspace bar with rolled-up badges; tab bar with per-room badges
-- [ ] Layout persistence across restarts, per profile
-- [ ] Fuzzy jump across workspace / room / thread / agent
-- [ ] Command palette
+- [x] `heddle-layout` trait wrapping `ratatui-hypertile`
+- [x] Space → workspace, Room → tab, Thread → pane
+- [x] Splits, focus movement, resize, zoom, close; mouse drag and click-to-focus
+- [x] Workspace bar with rolled-up badges; tab bar with per-room badges
+- [x] Layout persistence across restarts, per profile
+- [x] Command palette
+- [ ] Fuzzy jump across workspace / room / thread / agent — deferred to M6
 
 **Exit:** four agent threads visible at once, layout restored on relaunch.
+
+Most of the tiling arrived early, during M1 and M2, because panes were the only way to
+render a thread at all. What was missing was everything around it: a room in a workspace
+nobody was looking at had no badge, so an encrypted room went unnoticed for most of M3;
+the arrangement was thrown away on every quit, which made the tiling only as useful as a
+single session; and `:` had been answering "not implemented yet" since it was bound.
+
+Fuzzy jump appeared here *and* in M2's deferred list, which cannot both be true. It
+stays in M6 with the rest of the convenience work: it earns its keep across many rooms
+in many Spaces, and until then `<prefix> w`, `<prefix> n` and the palette reach
+everything. Badge roll-up for *agent* state is built and tested but cannot be exercised
+end to end until Hermes is emitting the events in M5; only the unread half is live.
 
 ---
 
@@ -167,6 +179,7 @@ Work in a fork of `hermes-agent`, not the installed checkout.
 - [ ] `--check` doctor command (homeserver capabilities, terminal protocols, store health)
 - [ ] Packaging: crates.io, AUR, nix
 - [ ] README with asciinema
+- [ ] Fuzzy jump across workspace, room, thread and agent, deferred from M2 and M4
 
 Chat-client parity, moved down from M2 because the agent path does not depend on it:
 
@@ -183,7 +196,7 @@ Chat-client parity, moved down from M2 because the agent path does not depend on
 | Homeserver lacks MSC4186 | Fatal | Verify before UI work | ✅ retired in M0 |
 | E2EE verification UX complexity | High | Isolated as M3; `Recovery` API covers backup/reset | Open |
 | Hermes patch diverges from upstream | Medium | Minimal, additive, feature-flagged; fallback parser means heddle degrades rather than breaks | Open |
-| `ratatui-hypertile` is v0.4, single maintainer | Medium | Wrapped behind `heddle-layout` trait; fork is a one-file change | Open |
+| `ratatui-hypertile` is v0.4, single maintainer | Medium | Wrapped behind `heddle-layout` trait; fork is a one-file change. M4 leaned on it harder: layout persistence stores the crate's own `Node` tree, so a fork must keep that type or the saved layouts of every user are discarded on upgrade — which they are designed to survive, but only once | Open |
 | Terminal image protocol probing is unreliable | Low | `ratatui-image` handles detection; block fallback always available | Open |
 | `unicode-width` and the terminal disagree on emoji width | Medium | Emoji with East Asian Width `Neutral` (U+1F54A DOVE, U+1F441 EYE, U+1F5E1 DAGGER) measure as one cell and paint as two, so layout drifts by a column wherever one appears. A right-hand gutter keeps the overflow off the pane border and a forced repaint on focus change clears stranded cells, but text alignment is still approximate. A real fix means measuring widths ourselves and wrapping without `ratatui::Wrap` | Mitigated |
 | Render stalls during sync bursts | Medium | All SDK I/O off the render thread; `WorkerEvent` drained with a per-frame budget | Designed for |
