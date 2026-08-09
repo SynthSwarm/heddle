@@ -227,7 +227,20 @@ impl Worker {
             Command::Paginate { view, count } => {
                 let timeline = self.timeline(&view)?;
                 let count = if count == 0 { PAGINATE_BATCH } else { count };
-                timeline.paginate_backwards(count).await?;
+                let result = timeline.paginate_backwards(count).await;
+                // A pagination that adds nothing produces no diff, so the subscriber
+                // stays silent -- and the app clears its in-flight flag on snapshots.
+                // Left to that alone the flag leaks, and because the flag is what
+                // suppresses duplicate requests, every later pagination for the view is
+                // silently dropped: scrolling up stops loading history until some
+                // unrelated event happens to produce a snapshot. Emit one ourselves,
+                // including on failure, so the flag always clears.
+                let entries = convert(timeline.items().await.iter());
+                let _ = self
+                    .events
+                    .send(WorkerEvent::Timeline { view, entries })
+                    .await;
+                result?;
             }
 
             Command::SendMessage { view, body } => {

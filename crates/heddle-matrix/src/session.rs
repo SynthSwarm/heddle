@@ -4,7 +4,9 @@
 //! crypto state live together in the SDK's SQLite store under `$XDG_DATA_HOME/heddle`,
 //! and the store directory is created with restrictive permissions.
 
-use matrix_sdk::{authentication::matrix::MatrixSession, store::RoomLoadSettings, Client};
+use matrix_sdk::{
+    authentication::matrix::MatrixSession, store::RoomLoadSettings, Client, ThreadingSupport,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -114,12 +116,27 @@ pub struct SavedSession {
 ///
 /// `handle_refresh_tokens` is enabled so a homeserver issuing short-lived tokens does
 /// not force a re-login mid-session.
+///
+/// Threading support is off by default in the SDK, and without it the event cache never
+/// files an incoming threaded event under its thread: `post_process_new_events` only
+/// populates `new_events_by_thread` when `enabled_thread_support` is set. Thread-focused
+/// timelines subscribe to exactly that mapping, so with it off a thread pane shows the
+/// backfilled history and our own local echoes, and silently misses every reply that
+/// arrives over sync. Reactions and redactions still land, because aggregations against
+/// an event already in the timeline take a different path -- which is what made this look
+/// like an agent that reacts but never answers.
+///
+/// `with_subscriptions` stays false: MSC4306/MSC4308 subscriptions are a separate feature
+/// needing server support, and routing is all we are after.
 pub async fn build_client(homeserver: &str, paths: &Paths) -> Result<Client, SessionError> {
     paths.ensure()?;
     let client = Client::builder()
         .server_name_or_homeserver_url(homeserver)
         .sqlite_store(&paths.store, None)
         .handle_refresh_tokens()
+        .with_threading_support(ThreadingSupport::Enabled {
+            with_subscriptions: false,
+        })
         .build()
         .await?;
     Ok(client)

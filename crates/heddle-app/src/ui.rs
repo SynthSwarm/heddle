@@ -7,6 +7,7 @@ use crate::app::{App, Hit, Pending};
 use crate::composer::Composer;
 use crate::keymap::{self, Mode};
 use heddle_matrix::{SyncState, View};
+use heddle_render::transcript::Anchor;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -201,6 +202,43 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     // Blank the cells underneath: the overlay is opaque, not a tint.
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// Re-express anchors in the units the scroll offset counts.
+///
+/// The renderer numbers each anchor by its line in the unwrapped transcript, because it
+/// does not know how wide the pane will be. `scroll` and `rendered_lines` count *wrapped*
+/// lines. The two agree only while nothing wraps; every wrapped line above an anchor
+/// pushes the real row further down than its recorded one, so scroll-to-selection
+/// undershoots by the accumulated difference and, for a selection already inside the
+/// stale window, decides no scrolling is needed at all.
+///
+/// Measuring one line at a time is what makes this exact under ratatui's word wrapping,
+/// which no arithmetic on string widths reproduces. It costs a measurement per line of
+/// the focused pane per frame; worth revisiting if transcripts get long enough to notice.
+fn wrapped_anchors(lines: &[Line<'static>], anchors: &[Anchor], width: u16) -> Vec<Anchor> {
+    if width == 0 || anchors.is_empty() {
+        return anchors.to_vec();
+    }
+
+    let mut offsets = Vec::with_capacity(lines.len() + 1);
+    let mut total: u16 = 0;
+    for line in lines {
+        offsets.push(total);
+        let height = Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width) as u16;
+        total = total.saturating_add(height.max(1));
+    }
+    offsets.push(total);
+
+    anchors
+        .iter()
+        .map(|anchor| Anchor {
+            event_id: anchor.event_id.clone(),
+            row: *offsets.get(anchor.row as usize).unwrap_or(&total),
+        })
+        .collect()
 }
 
 /// Build a strip of tab-like cells.
@@ -431,11 +469,11 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
     if let Some((_, _, _, inner, rendered, _)) =
         drawn.iter().find(|(placement, ..)| placement.is_focused)
     {
+        let width = inner.width.saturating_sub(TRANSCRIPT_GUTTER);
         let paragraph = Paragraph::new(rendered.lines.clone()).wrap(Wrap { trim: false });
-        app.rendered_lines =
-            paragraph.line_count(inner.width.saturating_sub(TRANSCRIPT_GUTTER)) as u16;
+        app.rendered_lines = paragraph.line_count(width) as u16;
         app.viewport_height = inner.height;
-        app.anchors.clone_from(&rendered.anchors);
+        app.anchors = wrapped_anchors(&rendered.lines, &rendered.anchors, width);
     }
 
     for (placement, header, state, inner, rendered, scroll) in drawn {
@@ -646,4 +684,50 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         ..area
     };
     frame.render_widget(Paragraph::new(Line::from(spans)), right);
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    use super::*;
+
+    fn anchor(event_id: &str, row: u16) -> Anchor {
+        Anchor {
+            event_id: event_id.into(),
+            row,
+        }
+    }
+
+    #[test]
+    fn anchors_move_down_by_the_wrapping_above_them() {
+        // The middle line needs three rows at this width, so anything below it sits
+        // lower than its unwrapped row claims. Getting this wrong is invisible in a
+        // narrow test and obvious in a real pane, where most messages wrap.
+        let lines = vec![
+            Line::from("short"),
+            Line::from("a considerably longer line that has to wrap several times over"),
+            Line::from("also short"),
+        ];
+        let anchors = vec![anchor("$a", 0), anchor("$b", 1), anchor("$c", 2)];
+
+        let mapped = wrapped_anchors(&lines, &anchors, 10);
+
+        assert_eq!(mapped[0].row, 0, "nothing wraps above the first line");
+        assert_eq!(mapped[1].row, 1, "one unwrapped line above");
+        assert!(
+            mapped[2].row > 2,
+            "the wrapped line must push the last anchor down, got {}",
+            mapped[2].row
+        );
+    }
+
+    #[test]
+    fn anchors_are_left_alone_when_the_width_is_unknown() {
+        // Width zero happens on the first frame, before layout has run. Measuring
+        // against it would collapse every anchor onto row zero.
+        let lines = vec![Line::from("anything")];
+        let anchors = vec![anchor("$a", 7)];
+
+        assert_eq!(wrapped_anchors(&lines, &anchors, 0), anchors);
+    }
 }

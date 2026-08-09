@@ -232,19 +232,20 @@ impl App {
         }
     }
 
-    /// Event ids in the focused view that can be selected, oldest first.
+    /// Event ids of the selectable messages in the focused view, oldest first.
     ///
-    /// Entries that render nothing are excluded: selecting one would put the marker on
-    /// a row that does not exist.
+    /// Messages only. Notices carry an event id and render a row, so they used to be
+    /// selectable, which put the marker on membership changes and redactions -- and
+    /// since those cluster at the end of a transcript, walking down appeared to run past
+    /// the last message onto rows nothing can be done with. Every action reachable from
+    /// the selection (reply, edit, redact, open thread) needs a message anyway.
     fn selectable(&self) -> Vec<String> {
         self.focused_view()
             .and_then(|v| self.timelines.get(&v))
             .map(|entries| {
                 entries
                     .iter()
-                    .filter(
-                        |e| !matches!(&e.kind, heddle_matrix::EntryKind::Notice(t) if t.is_empty()),
-                    )
+                    .filter(|e| matches!(&e.kind, heddle_matrix::EntryKind::Message(_)))
                     .filter_map(|e| e.event_id.clone())
                     .collect()
             })
@@ -283,8 +284,21 @@ impl App {
             None => ids.len() - 1,
             Some(i) => (i as i32 + delta).clamp(0, ids.len() as i32 - 1) as usize,
         };
-        self.selected.insert(view, ids[next].clone());
+        self.selected.insert(view.clone(), ids[next].clone());
         self.scroll_to_selection();
+
+        // At the ends, "keep the selection on screen" is not enough. The newest message
+        // is usually followed by notices, so stopping the moment it is merely visible
+        // leaves those below it and the pane looks stuck short of the bottom; and the
+        // oldest loaded message is the point at which more history is wanted, exactly as
+        // it is when scrolling there by hand.
+        if next + 1 == ids.len() {
+            self.scroll.insert(view.clone(), 0);
+        } else if next == 0 {
+            let scroll = self.max_scroll();
+            self.scroll.insert(view.clone(), scroll);
+            self.paginate_if_near_top(&view, scroll);
+        }
     }
 
     /// Scroll so the selected message is on screen.
@@ -1950,6 +1964,73 @@ mod tests {
             "moving within the message must not recall history"
         );
         assert_eq!(app.composer().expect("composer").wrapped(200).caret.0, 0);
+    }
+
+    #[test]
+    fn selection_ignores_notices_and_stops_at_the_newest_message() {
+        // Notices carry an event id and render a row. Membership changes and redactions
+        // arrive after the message that provoked them, so a selection that accepted them
+        // walked off the end of the conversation onto rows nothing can be done with.
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: vec![
+                their_message("$theirs", "hello there"),
+                my_message("$mine", "my own words"),
+                Entry {
+                    id: "$notice".into(),
+                    event_id: Some("$notice".into()),
+                    kind: EntryKind::Notice("· m.room.member".into()),
+                },
+            ],
+        });
+        let _ = app.take_commands();
+
+        app.apply_action(Action::SelectNewer);
+        assert_eq!(app.selected_event(), Some("$mine"));
+
+        // Pressing on must not step onto the notice, nor off the end.
+        app.apply_action(Action::SelectNewer);
+        app.apply_action(Action::SelectNewer);
+        assert_eq!(app.selected_event(), Some("$mine"));
+    }
+
+    #[test]
+    fn selecting_the_newest_message_pins_the_transcript_to_the_bottom() {
+        let mut app = app_with_messages();
+        app.rendered_lines = 200;
+        app.viewport_height = 20;
+        let view = app.focused_view().expect("view");
+        app.scroll.insert(view.clone(), 120);
+
+        app.apply_action(Action::SelectNewer);
+
+        assert_eq!(app.selected_event(), Some("$mine"));
+        assert_eq!(
+            *app.scroll.get(&view).unwrap_or(&0),
+            0,
+            "the newest message means the bottom of the pane, not merely on screen"
+        );
+    }
+
+    #[test]
+    fn selecting_the_oldest_message_scrolls_to_the_top_and_asks_for_more() {
+        let mut app = app_with_messages();
+        app.rendered_lines = 200;
+        app.viewport_height = 20;
+        let view = app.focused_view().expect("view");
+
+        app.apply_action(Action::SelectOlder);
+        app.apply_action(Action::SelectOlder);
+
+        assert_eq!(app.selected_event(), Some("$theirs"));
+        assert_eq!(*app.scroll.get(&view).unwrap_or(&0), app.max_scroll());
+        assert!(
+            app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::Paginate { view: v, .. } if v == &view)),
+            "reaching the oldest loaded message is a request for history"
+        );
     }
 
     /// A plain message from someone else.
