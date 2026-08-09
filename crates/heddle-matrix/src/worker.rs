@@ -388,7 +388,16 @@ impl Worker {
                 // into stable item identities -- so rebuilding the view is cheap
                 // relative to reimplementing VectorDiff application, and cannot drift.
                 let items = forward_timeline.items().await;
-                emit(convert(items.iter())).await;
+                let entries = convert(items.iter());
+                // The only way to tell "nothing arrived" from "something arrived and
+                // was dropped in conversion".
+                tracing::debug!(
+                    view = ?forward_view,
+                    items = items.len(),
+                    entries = entries.len(),
+                    "timeline snapshot"
+                );
+                emit(entries).await;
             }
         });
 
@@ -521,13 +530,38 @@ fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem) -> Entry {
             None => match &msg_like.kind {
                 MsgLikeKind::UnableToDecrypt(_) => EntryKind::UnableToDecrypt,
                 MsgLikeKind::Redacted => EntryKind::Notice("message deleted".into()),
-                _ => EntryKind::Notice(String::new()),
+                _ => unrendered(event, "message-like"),
             },
         },
-        _ => EntryKind::Notice(String::new()),
+        _ => unrendered(event, "event"),
     };
 
     Entry { id, event_id, kind }
+}
+
+/// Placeholder for a timeline item heddle does not know how to draw.
+///
+/// Silently rendering nothing is the worst option: the event is on the wire, the user
+/// can see the room has moved on, and heddle shows a gap. A dim line naming the type
+/// makes an unsupported event diagnosable instead of invisible.
+fn unrendered(event: &matrix_sdk_ui::timeline::EventTimelineItem, what: &str) -> EntryKind {
+    let kind = event_type(event);
+    tracing::debug!(event_type = %kind, sender = %event.sender(), "unrendered {what}");
+    EntryKind::Notice(format!("· {kind}"))
+}
+
+/// The `type` field of the underlying event.
+fn event_type(event: &matrix_sdk_ui::timeline::EventTimelineItem) -> String {
+    event
+        .latest_json()
+        .and_then(|raw| raw.deserialize_as::<serde_json::Value>().ok())
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "unknown event".to_owned())
 }
 
 /// Pull agent structure out of an event's raw JSON.
