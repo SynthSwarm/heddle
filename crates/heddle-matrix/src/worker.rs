@@ -491,7 +491,28 @@ impl Worker {
                 if key.is_empty() {
                     anyhow::bail!("no recovery key given");
                 }
-                self.client.encryption().recovery().recover(key).await?;
+                // Not `?`: a wrong key is an ordinary answer to a question we asked,
+                // not a command that failed, and the prompt needs to hear about it
+                // specifically so it can ask again.
+                let recovery = self.client.encryption().recovery();
+                match recovery.recover(key).await {
+                    Ok(()) => {
+                        // Reported explicitly rather than left to the state stream. If
+                        // the state was already what it ends up as, the stream has no
+                        // change to publish, and the prompt would wait for an event that
+                        // is never coming.
+                        let _ = self
+                            .events
+                            .send(WorkerEvent::Recovery(map_recovery(recovery.state())))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = self
+                            .events
+                            .send(WorkerEvent::RecoveryFailed(e.to_string()))
+                            .await;
+                    }
+                }
             }
 
             Command::CancelVerification => {
@@ -625,27 +646,21 @@ impl Worker {
 
     /// Watch whether this account's secrets are recoverable.
     fn watch_recovery_state(&mut self) {
-        use matrix_sdk::encryption::recovery::RecoveryState as SdkRecoveryState;
-
         let client = self.client.clone();
         let events = self.events.clone();
         self.recovery_watch = Some(DriverTask(tokio::spawn(async move {
             let recovery = client.encryption().recovery();
-            let map = |state| match state {
-                SdkRecoveryState::Enabled => RecoveryState::Enabled,
-                SdkRecoveryState::Disabled => RecoveryState::Disabled,
-                SdkRecoveryState::Incomplete => RecoveryState::Incomplete,
-                SdkRecoveryState::Unknown => RecoveryState::Unknown,
-            };
 
             let _ = events
-                .send(WorkerEvent::Recovery(map(recovery.state())))
+                .send(WorkerEvent::Recovery(map_recovery(recovery.state())))
                 .await;
 
             let states = recovery.state_stream();
             pin_mut!(states);
             while let Some(state) = states.next().await {
-                let _ = events.send(WorkerEvent::Recovery(map(state))).await;
+                let _ = events
+                    .send(WorkerEvent::Recovery(map_recovery(state)))
+                    .await;
             }
         })));
     }
@@ -1083,6 +1098,17 @@ async fn drive_sas(
         }
 
         state = changes.next().await;
+    }
+}
+
+/// Translate the SDK's recovery state into ours.
+fn map_recovery(state: matrix_sdk::encryption::recovery::RecoveryState) -> RecoveryState {
+    use matrix_sdk::encryption::recovery::RecoveryState as Sdk;
+    match state {
+        Sdk::Enabled => RecoveryState::Enabled,
+        Sdk::Disabled => RecoveryState::Disabled,
+        Sdk::Incomplete => RecoveryState::Incomplete,
+        Sdk::Unknown => RecoveryState::Unknown,
     }
 }
 

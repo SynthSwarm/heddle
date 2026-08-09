@@ -300,6 +300,9 @@ pub enum WorkerEvent {
     DeviceVerified(Option<bool>),
     /// Whether this account's secrets can be recovered, re-sent whenever it changes.
     Recovery(RecoveryState),
+    /// A recovery attempt failed, with the reason. Distinct from a plain warning so the
+    /// prompt can offer the key again rather than sitting on "unlocking…" for ever.
+    RecoveryFailed(String),
 }
 
 #[cfg(test)]

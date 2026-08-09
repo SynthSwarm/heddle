@@ -117,6 +117,8 @@ pub struct RecoveryPrompt {
     /// Set once the key has been handed to the worker, so the panel can say it is
     /// working rather than appearing to have ignored the keypress.
     pub submitted: bool,
+    /// Why the last attempt failed, if one did.
+    pub error: Option<String>,
 }
 
 pub struct App {
@@ -896,7 +898,33 @@ impl App {
                 }
             }
 
-            WorkerEvent::Recovery(state) => self.recovery = state,
+            WorkerEvent::Recovery(state) => {
+                self.recovery = state;
+                // The prompt has no other way to learn it succeeded. Left to itself it
+                // sits on "unlocking…" for ever, over a screen full of messages that
+                // plainly did decrypt -- which tells the user the client has hung at the
+                // exact moment it actually worked.
+                if state == RecoveryState::Enabled
+                    && self.recovery_prompt.as_ref().is_some_and(|p| p.submitted)
+                {
+                    self.recovery_prompt = None;
+                    self.mode = Mode::Normal;
+                    self.status = Some("recovery unlocked; older messages will decrypt".into());
+                    self.needs_redraw = true;
+                }
+            }
+
+            WorkerEvent::RecoveryFailed(reason) => {
+                // Kept open, emptied, and told why: a mistyped recovery key is worth a
+                // second attempt, and closing the prompt would make the user find the
+                // key again from the start.
+                if let Some(prompt) = &mut self.recovery_prompt {
+                    prompt.submitted = false;
+                    prompt.key.clear();
+                    prompt.error = Some(reason.clone());
+                }
+                self.status = Some(format!("recovery failed: {reason}"));
+            }
 
             WorkerEvent::DeviceVerified(verified) => {
                 // `None` means the crypto layer has not decided yet; keeping the last
@@ -1094,15 +1122,18 @@ impl App {
                 // Dropped rather than kept for later. A half-typed recovery key lingering
                 // in memory behind a closed dialog is a liability with no upside.
                 self.recovery_prompt = None;
+                self.mode = Mode::Normal;
             }
             Action::Submit | Action::Accept => {
                 let key = std::mem::take(&mut prompt.key);
                 if key.trim().is_empty() {
                     self.status = Some("no recovery key entered".into());
                     self.recovery_prompt = None;
+                    self.mode = Mode::Normal;
                     return;
                 }
                 prompt.submitted = true;
+                prompt.error = None;
                 self.status = Some("unlocking secret storage…".into());
                 self.queue(Command::RecoverWithKey(key));
             }
@@ -3133,6 +3164,49 @@ mod tests {
 
         assert!(app.recovery_prompt.is_none());
         assert!(app.take_commands().is_empty());
+    }
+
+    #[test]
+    fn unlocking_closes_the_prompt() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Incomplete));
+        app.apply_action(Action::OpenRecovery);
+        for c in "key".chars() {
+            app.apply_action(Action::Insert(c));
+        }
+        app.apply_action(Action::Submit);
+        assert!(app.recovery_prompt.as_ref().is_some_and(|p| p.submitted));
+
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Enabled));
+
+        assert!(
+            app.recovery_prompt.is_none(),
+            "the panel must not sit on `unlocking…` over a screen of decrypted messages"
+        );
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "typing must go back to the transcript"
+        );
+    }
+
+    #[test]
+    fn a_wrong_key_can_be_typed_again() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Incomplete));
+        app.apply_action(Action::OpenRecovery);
+        for c in "wrong".chars() {
+            app.apply_action(Action::Insert(c));
+        }
+        app.apply_action(Action::Submit);
+        let _ = app.take_commands();
+
+        app.apply_worker_event(WorkerEvent::RecoveryFailed("MAC check failed".into()));
+
+        let prompt = app.recovery_prompt.as_ref().expect("prompt stays open");
+        assert!(!prompt.submitted, "it must stop claiming to be working");
+        assert_eq!(prompt.key, "", "the failed key must not be left to re-send");
+        assert!(prompt.error.as_deref().is_some_and(|e| e.contains("MAC")));
     }
 
     /// A plain message from someone else.

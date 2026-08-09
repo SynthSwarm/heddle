@@ -104,6 +104,14 @@ fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
             app.theme.dim_style(),
         )));
     } else {
+        if let Some(error) = &prompt.error {
+            lines.push(Line::from(Span::styled(
+                format!("that key did not work: {error}"),
+                app.theme.accent_style(),
+            )));
+            lines.push(Line::from(""));
+        }
+
         let masked = "•".repeat(prompt.key.chars().count());
         lines.push(Line::from(vec![
             Span::styled(masked, app.theme.accent_style()),
