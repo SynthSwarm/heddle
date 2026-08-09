@@ -4,6 +4,7 @@
 //! turns state into cells.
 
 use crate::app::{App, Hit};
+use crate::composer::Composer;
 use crate::keymap::{self, Mode};
 use heddle_matrix::SyncState;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -13,8 +14,12 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-/// Height of the composer, including its border.
-const COMPOSER_HEIGHT: u16 = 3;
+/// Composer height, including its border, when it holds a single line.
+const COMPOSER_MIN_HEIGHT: u16 = 3;
+
+/// Most lines the composer will grow to before it scrolls internally. Beyond this the
+/// transcript is being squeezed for a message nobody reads while typing.
+const COMPOSER_MAX_LINES: u16 = 8;
 
 /// Floor width for a tab label, so short room names still occupy a tab-sized slot.
 const MIN_TAB_WIDTH: usize = 10;
@@ -38,7 +43,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Constraint::Length(1), // workspace bar
             Constraint::Length(1), // tab bar
             Constraint::Min(3),    // panes
-            Constraint::Length(COMPOSER_HEIGHT),
+            Constraint::Length(composer_height(app)),
             Constraint::Length(1), // status
         ])
         .split(frame.area());
@@ -53,6 +58,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.help {
         draw_help(frame, app, frame.area());
     }
+}
+
+/// How tall the composer needs to be, borders included.
+///
+/// Grows with the message so a multi-line paragraph is visible while it is written,
+/// rather than scrolling out of a one-line slot.
+fn composer_height(app: &App) -> u16 {
+    let lines = app.composer().map_or(1, Composer::line_count);
+    COMPOSER_MIN_HEIGHT + lines.clamp(1, COMPOSER_MAX_LINES) - 1
 }
 
 /// The `<prefix> ?` key overlay.
@@ -375,18 +389,27 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let text = if app.composer.is_empty() && app.mode != Mode::Insert {
-        Span::styled("press i to write".to_owned(), app.theme.dim_style())
+    let text = app.composer().map(Composer::text).unwrap_or("");
+
+    if text.is_empty() && app.mode != Mode::Insert {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "press i to write".to_owned(),
+                app.theme.dim_style(),
+            )),
+            inner,
+        );
     } else {
-        Span::raw(app.composer.clone())
-    };
-    frame.render_widget(Paragraph::new(Line::from(text)), inner);
+        let lines: Vec<Line> = text.split('\n').map(|l| Line::raw(l.to_owned())).collect();
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
 
     if app.mode == Mode::Insert {
-        // Place the caret at the end of the last line of the composer.
-        let last = app.composer.lines().last().unwrap_or_default();
-        let x = inner.x + last.chars().count() as u16;
-        let y = inner.y + app.composer.matches('\n').count() as u16;
+        // The composer reports the caret in display columns, so it lands in the right
+        // cell after a wide glyph rather than however many `char`s preceded it.
+        let (row, column) = app.composer().map_or((0, 0), Composer::caret);
+        let x = inner.x + column;
+        let y = inner.y + row;
         if x < inner.right() && y < inner.bottom() {
             frame.set_cursor_position((x, y));
         }

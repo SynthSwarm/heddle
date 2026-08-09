@@ -63,20 +63,27 @@ roll-up, keypress approvals.
 
 ---
 
-## M2 — Full chat client
+## M2 — Composer and conversation
 
-**Goal:** parity with iamb minus vim depth. Usable as a daily Matrix client.
+**Goal:** make heddle usable for real conversation, and make an agent thread reachable.
 
-- [ ] Composer with multi-line, history, and draft-per-room
-- [ ] Send, edit (`m.replace`), redact, react, reply
-- [ ] Thread awareness: thread list per room, open a thread as its own view
-- [ ] Room join / leave / invite / accept; Space enumeration
-- [ ] Typing notifications in and out
-- [ ] Image rendering via `ratatui-image` with protocol probing and block fallback
-- [ ] Attachment upload and download
-- [ ] Fuzzy room switcher
+Scoped deliberately to what M5 depends on. The original M2 was "parity with iamb",
+which is the wrong target: heddle is not a general chat client that happens to show
+agents, it is an agent client that happens to speak Matrix. Attachment upload would
+have landed before it was possible to open a single Hermes thread.
 
-**Exit:** heddle replaces gomuks for ordinary Matrix use.
+- [ ] Composer: multi-line, cursor movement, per-room drafts, sent-message history
+- [ ] Edit (`m.replace`), redact, reply
+- [ ] Thread list per room; open a thread as its own pane
+- [ ] Typing notifications out — inbound already drives agent state
+- [ ] Space enumeration via `m.space.child`, so workspaces stop being a single `~`
+- [ ] Fuzzy jump across workspace, room and thread
+
+**Exit:** an agent thread can be found, opened, read and replied to without leaving
+heddle.
+
+Deferred to M6 as chat-client parity the agent path does not need: image rendering,
+attachment upload and download, room join / leave / invite.
 
 ---
 
@@ -156,6 +163,12 @@ Work in a fork of `hermes-agent`, not the installed checkout.
 - [ ] `--check` doctor command (homeserver capabilities, terminal protocols, store health)
 - [ ] Packaging: crates.io, AUR, nix
 - [ ] README with asciinema
+
+Chat-client parity, moved down from M2 because the agent path does not depend on it:
+
+- [ ] Image rendering via `ratatui-image` with protocol probing and block fallback
+- [ ] Attachment upload and download
+- [ ] Room join / leave / invite / accept
 
 ---
 

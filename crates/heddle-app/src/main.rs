@@ -7,6 +7,7 @@
 #![recursion_limit = "512"]
 
 mod app;
+mod composer;
 mod config;
 mod keymap;
 mod ui;

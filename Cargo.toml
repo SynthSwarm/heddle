@@ -47,6 +47,7 @@ ratatui-hypertile-extras = "0.4.1"
 ratatui-image = "11.0.6"
 tui-markdown = { version = "0.3.9", features = ["highlight-code"] }
 unicode-width = "0.2.2"
+unicode-segmentation = "1.12.0"
 
 # Core
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }

@@ -3,6 +3,7 @@
 //! Deliberately separated from terminal I/O so the interesting transitions — focus
 //! movement, composer editing, approval resolution — are testable without a terminal.
 
+use crate::composer::Composer;
 use crate::config::Config;
 use crate::keymap::{Action, Mode, Prefix};
 use heddle_agent::{AgentState, AgentStore};
@@ -69,7 +70,9 @@ pub struct App {
 
     pub mode: Mode,
     pub prefix: Prefix,
-    pub composer: String,
+    /// One composer per view, so a half-written message survives switching room and
+    /// coming back. Created on demand.
+    composers: HashMap<View, Composer>,
     pub scroll: HashMap<View, u16>,
     pub sync: SyncState,
     pub status: Option<String>,
@@ -124,7 +127,7 @@ impl App {
             agents: AgentStore::new(),
             mode: Mode::Normal,
             prefix,
-            composer: String::new(),
+            composers: HashMap::new(),
             scroll: HashMap::new(),
             sync: SyncState::Idle,
             status: None,
@@ -163,6 +166,37 @@ impl App {
             .and_then(|v| self.timelines.get(&v))
             .map(Vec::as_slice)
             .unwrap_or_default()
+    }
+
+    /// The focused view's composer, for drawing. Empty when nothing is focused.
+    pub fn composer(&self) -> Option<&Composer> {
+        self.composers.get(&self.focused_view()?)
+    }
+
+    /// The focused view's composer, creating it on first keystroke.
+    fn composer_mut(&mut self) -> Option<&mut Composer> {
+        let view = self.focused_view()?;
+        Some(self.composers.entry(view).or_default())
+    }
+
+    /// Move the caret up, falling back to recalling an older sent message.
+    ///
+    /// Matches every chat client: up is "the line above" when there is one and "the
+    /// thing I said before" when there is not.
+    fn composer_up(&mut self) {
+        if let Some(composer) = self.composer_mut() {
+            if !composer.up() {
+                composer.history_prev();
+            }
+        }
+    }
+
+    fn composer_down(&mut self) {
+        if let Some(composer) = self.composer_mut() {
+            if !composer.down() {
+                composer.history_next();
+            }
+        }
     }
 
     // ---------------------------------------------------------------- worker events
@@ -327,11 +361,58 @@ impl App {
             Action::EnterInsert => self.mode = Mode::Insert,
             Action::EnterNormal => self.mode = Mode::Normal,
 
-            Action::Insert(c) => self.composer.push(c),
-            Action::Backspace => {
-                self.composer.pop();
+            Action::Insert(c) => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.insert(c);
+                }
             }
-            Action::Newline => self.composer.push('\n'),
+            Action::Backspace => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.backspace();
+                }
+            }
+            Action::Delete => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.delete();
+                }
+            }
+            Action::DeleteWord => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.delete_word();
+                }
+            }
+            Action::DeleteToLineStart => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.delete_to_line_start();
+                }
+            }
+            Action::Newline => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.insert_newline();
+                }
+            }
+            Action::CaretLeft => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.left();
+                }
+            }
+            Action::CaretRight => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.right();
+                }
+            }
+            Action::CaretHome => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.home();
+                }
+            }
+            Action::CaretEnd => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.end();
+                }
+            }
+            Action::CaretUp => self.composer_up(),
+            Action::CaretDown => self.composer_down(),
             Action::Submit => self.submit(),
 
             Action::Split(dir) => self.split(dir),
@@ -382,15 +463,14 @@ impl App {
     }
 
     fn submit(&mut self) {
-        let body = self.composer.trim().to_owned();
-        if body.is_empty() {
-            return;
-        }
         let Some(view) = self.focused_view() else {
             self.status = Some("no pane focused".into());
             return;
         };
-        self.composer.clear();
+        // `take` clears the buffer and records the message in this view's history.
+        let Some(body) = self.composers.entry(view.clone()).or_default().take() else {
+            return;
+        };
         self.queue(Command::SendMessage { view, body });
     }
 
@@ -896,13 +976,25 @@ mod tests {
         );
     }
 
+    /// Type into the focused view's composer.
+    fn type_into(app: &mut App, text: &str) {
+        app.mode = Mode::Insert;
+        for c in text.chars() {
+            if c == '\n' {
+                app.apply_action(Action::Newline);
+            } else {
+                app.apply_action(Action::Insert(c));
+            }
+        }
+    }
+
     #[test]
     fn submitting_sends_and_clears_the_composer() {
         let mut app = app();
-        app.composer = "  hello  ".into();
+        type_into(&mut app, "  hello  ");
         app.apply_action(Action::Submit);
 
-        assert!(app.composer.is_empty());
+        assert!(app.composer().expect("composer").text().is_empty());
         let commands = app.take_commands();
         match commands.as_slice() {
             [Command::SendMessage { view, body }] => {
@@ -916,7 +1008,7 @@ mod tests {
     #[test]
     fn submitting_an_empty_composer_sends_nothing() {
         let mut app = app();
-        app.composer = "   \n ".into();
+        type_into(&mut app, "   \n ");
         app.apply_action(Action::Submit);
         assert!(app.take_commands().is_empty());
     }
@@ -1322,6 +1414,74 @@ mod tests {
                 .any(|c| matches!(c, Command::MarkRead { .. })),
             "moving to a tab is looking at it"
         );
+    }
+
+    #[test]
+    fn drafts_survive_switching_room() {
+        let mut app = app_with_two_rooms();
+        type_into(&mut app, "half a thought");
+
+        app.apply_action(Action::NextTab);
+        assert_eq!(
+            app.composer().map(Composer::text).unwrap_or(""),
+            "",
+            "the other room starts blank"
+        );
+
+        type_into(&mut app, "different room");
+        app.apply_action(Action::PrevTab);
+        assert_eq!(
+            app.composer().expect("composer").text(),
+            "half a thought",
+            "coming back must restore the draft, not discard it"
+        );
+    }
+
+    #[test]
+    fn history_is_per_room() {
+        let mut app = app_with_two_rooms();
+        type_into(&mut app, "said in the first room");
+        app.apply_action(Action::Submit);
+
+        app.apply_action(Action::NextTab);
+        app.apply_action(Action::CaretUp);
+        assert_eq!(
+            app.composer().map(Composer::text).unwrap_or(""),
+            "",
+            "another room's history must not leak in"
+        );
+    }
+
+    #[test]
+    fn up_recalls_the_last_message_once_the_composer_is_flat() {
+        let mut app = app();
+        type_into(&mut app, "first thing");
+        app.apply_action(Action::Submit);
+        let _ = app.take_commands();
+
+        app.apply_action(Action::CaretUp);
+        assert_eq!(app.composer().expect("composer").text(), "first thing");
+
+        // Down returns to the empty draft that was parked.
+        app.apply_action(Action::CaretDown);
+        assert_eq!(app.composer().expect("composer").text(), "");
+    }
+
+    #[test]
+    fn up_moves_between_lines_before_it_touches_history() {
+        let mut app = app();
+        type_into(&mut app, "sent");
+        app.apply_action(Action::Submit);
+        let _ = app.take_commands();
+
+        type_into(&mut app, "one\ntwo");
+        app.apply_action(Action::CaretUp);
+        assert_eq!(
+            app.composer().expect("composer").text(),
+            "one\ntwo",
+            "moving within the message must not recall history"
+        );
+        assert_eq!(app.composer().expect("composer").caret().0, 0);
     }
 
     #[test]

@@ -64,8 +64,17 @@ pub enum Action {
     // Composer
     Insert(char),
     Backspace,
+    Delete,
+    DeleteWord,
+    DeleteToLineStart,
     Submit,
     Newline,
+    CaretLeft,
+    CaretRight,
+    CaretUp,
+    CaretDown,
+    CaretHome,
+    CaretEnd,
 
     Quit,
     /// A key that means nothing in this mode. Swallowed.
@@ -205,6 +214,9 @@ pub const BINDINGS: &[Binding] = &[
     b("g / G", "top / bottom", false),
     b(":", "command palette", false),
     b("^l", "redraw the screen", false),
+    b("left / right", "move the caret", false),
+    b("up / down", "line, then history", false),
+    b("^w / ^u", "delete word / to line start", false),
     b("n / p", "next / prev tab", true),
     b("| / -", "split right / down", true),
     b("h j k l", "focus pane", true),
@@ -309,20 +321,35 @@ fn map_normal(key: KeyEvent) -> (Action, Mode) {
 }
 
 fn map_insert(key: KeyEvent) -> (Action, Mode) {
-    match key.code {
-        KeyCode::Esc => (Action::EnterNormal, Mode::Normal),
-        KeyCode::Backspace => (Action::Backspace, Mode::Insert),
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let action = match key.code {
+        KeyCode::Esc => return (Action::EnterNormal, Mode::Normal),
+
+        KeyCode::Backspace => Action::Backspace,
+        KeyCode::Delete => Action::Delete,
+        // Readline's editing pair. ctrl+a and ctrl+e are deliberately absent: ctrl+a is
+        // the default prefix, and binding half the pair would be worse than neither.
+        KeyCode::Char('w') if ctrl => Action::DeleteWord,
+        KeyCode::Char('u') if ctrl => Action::DeleteToLineStart,
+
+        KeyCode::Left => Action::CaretLeft,
+        KeyCode::Right => Action::CaretRight,
+        // Up and down move within a multi-line message and fall through to history at
+        // the edges; the composer decides which, since only it knows the line count.
+        KeyCode::Up => Action::CaretUp,
+        KeyCode::Down => Action::CaretDown,
+        KeyCode::Home => Action::CaretHome,
+        KeyCode::End => Action::CaretEnd,
+
         // Shift+Enter inserts a newline; plain Enter sends. Matches every chat client
         // and every coding agent REPL.
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            (Action::Newline, Mode::Insert)
-        }
-        KeyCode::Enter => (Action::Submit, Mode::Insert),
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            (Action::Insert(c), Mode::Insert)
-        }
-        _ => (Action::None, Mode::Insert),
-    }
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => Action::Newline,
+        KeyCode::Enter => Action::Submit,
+
+        KeyCode::Char(c) if !ctrl => Action::Insert(c),
+        _ => Action::None,
+    };
+    (action, Mode::Insert)
 }
 
 #[cfg(test)]
