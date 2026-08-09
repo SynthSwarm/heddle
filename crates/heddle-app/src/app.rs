@@ -876,7 +876,13 @@ impl App {
                 }
             }
 
-            WorkerEvent::DeviceVerified(verified) => self.device_verified = Some(verified),
+            WorkerEvent::DeviceVerified(verified) => {
+                // `None` means the crypto layer has not decided yet; keeping the last
+                // known answer avoids flickering the shield off and on during startup.
+                if verified.is_some() {
+                    self.device_verified = verified;
+                }
+            }
 
             WorkerEvent::Fatal(text) => {
                 self.status = Some(format!("fatal: {text}"));
@@ -2915,7 +2921,7 @@ mod tests {
     #[test]
     fn verifying_an_already_verified_device_asks_for_nothing() {
         let mut app = app();
-        app.apply_worker_event(WorkerEvent::DeviceVerified(true));
+        app.apply_worker_event(WorkerEvent::DeviceVerified(Some(true)));
         app.apply_action(Action::StartVerification);
 
         assert!(app.take_commands().is_empty());
@@ -2925,13 +2931,41 @@ mod tests {
     #[test]
     fn an_unverified_device_can_ask_to_be_verified() {
         let mut app = app();
-        app.apply_worker_event(WorkerEvent::DeviceVerified(false));
+        app.apply_worker_event(WorkerEvent::DeviceVerified(Some(false)));
         app.apply_action(Action::StartVerification);
 
         assert!(matches!(
             app.take_commands().as_slice(),
             [Command::StartVerification]
         ));
+    }
+
+    #[test]
+    fn not_knowing_yet_does_not_block_verifying() {
+        let mut app = app();
+        // "unknown" is not "verified". Conflating them is what made heddle announce
+        // "this device is already verified" and refuse to start the flow, for a device
+        // the server held no signature for at all.
+        app.apply_worker_event(WorkerEvent::DeviceVerified(None));
+        app.apply_action(Action::StartVerification);
+
+        assert!(matches!(
+            app.take_commands().as_slice(),
+            [Command::StartVerification]
+        ));
+    }
+
+    #[test]
+    fn an_unknown_answer_does_not_erase_a_known_one() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::DeviceVerified(Some(true)));
+        app.apply_worker_event(WorkerEvent::DeviceVerified(None));
+
+        assert_eq!(
+            app.device_verified,
+            Some(true),
+            "a shield must not flicker off because the store went quiet"
+        );
     }
 
     /// A plain message from someone else.

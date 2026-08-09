@@ -272,11 +272,12 @@ pub enum WorkerEvent {
     Fatal(String),
     /// An interactive verification changed state.
     Verification(Verification),
-    /// Whether this device is verified, re-sent whenever it changes.
+    /// Whether this device has been signed by the account's own identity.
     ///
-    /// Separate from [`WorkerEvent::Verification`], which is about one flow in progress:
-    /// this is the standing fact a shield in the UI is drawn from.
-    DeviceVerified(bool),
+    /// `None` means the crypto layer cannot answer yet, which is not the same as "no".
+    /// Drawing a warning shield at a user whose device is merely unexamined would train
+    /// them to ignore the shield that matters.
+    DeviceVerified(Option<bool>),
 }
 
 #[cfg(test)]

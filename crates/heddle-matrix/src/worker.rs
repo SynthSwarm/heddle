@@ -117,6 +117,7 @@ pub async fn spawn(client: Client) -> Result<Handle, matrix_sdk_ui::sync_service
             events: event_tx,
             verification: None,
             verification_driver: None,
+            verified_watch: None,
         };
         if let Err(e) = worker.run(command_rx).await {
             tracing::error!(error = %e, "matrix worker stopped");
@@ -152,6 +153,8 @@ struct Worker {
     /// to act on; the flow itself is followed on `verification_driver`.
     verification: Option<VerificationRequest>,
     verification_driver: Option<DriverTask>,
+    /// Watches this device's cross-signing verification state.
+    verified_watch: Option<DriverTask>,
 }
 
 /// A spawned verification driver, aborted when replaced or dropped.
@@ -208,7 +211,21 @@ impl Worker {
             }
         });
 
-        self.report_device_verified().await;
+        self.watch_verification_state();
+
+        // Late-arriving room keys. Without this the "unable to decrypt" placeholder is
+        // terminal: the key turns up, the store accepts it, and the row keeps saying it
+        // cannot be read until heddle is restarted. That is the failure that makes
+        // verification and key backup look broken when they are working -- the fix
+        // arrives and the screen goes on lying about it.
+        let mut room_keys = match self.client.encryption().room_keys_received_stream().await {
+            Some(stream) => Box::pin(stream),
+            None => {
+                tracing::warn!("no olm machine; late room keys will not be retried");
+                Box::pin(futures_util::stream::empty())
+                    as std::pin::Pin<Box<dyn futures_util::Stream<Item = _> + Send>>
+            }
+        };
 
         loop {
             tokio::select! {
@@ -232,6 +249,25 @@ impl Worker {
                 Some(request) = verify_rx.recv() => {
                     tracing::info!(from = %request.other_user_id(), "verification requested");
                     self.drive_verification(request);
+                }
+
+                Some(update) = room_keys.next() => {
+                    match update {
+                        Ok(keys) => {
+                            let pairs = keys
+                                .into_iter()
+                                .map(|k| (k.room_id.to_string(), k.session_id))
+                                .collect();
+                            self.retry_decryption(pairs).await;
+                        }
+                        // Lagging only means we missed which keys arrived, not that they
+                        // did not. There is no public way to ask for a blanket retry, so
+                        // say so rather than silently doing nothing.
+                        Err(skipped) => {
+                            tracing::warn!(?skipped, "lagged behind room key updates");
+                            self.report_lost_key_updates().await;
+                        }
+                    }
                 }
 
                 Some(_diff) = room_stream.next() => {
@@ -264,18 +300,34 @@ impl Worker {
         Ok(())
     }
 
-    /// Tell the app whether this device is verified.
+    /// Tell the app whether this device is verified, and keep telling it.
     ///
-    /// Best effort: before the first sync the store may not know its own device yet, and
-    /// an unanswered question is better left unanswered than reported as "unverified",
-    /// which would flash a warning shield at a user who has done nothing wrong.
-    async fn report_device_verified(&self) {
-        if let Ok(Some(device)) = self.client.encryption().get_own_device().await {
-            let _ = self
-                .events
-                .send(WorkerEvent::DeviceVerified(device.is_verified()))
-                .await;
-        }
+    /// `Device::is_verified` is the wrong question to ask about our own device: it is
+    /// `is_locally_trusted() || is_cross_signing_trusted()`, and a device always trusts
+    /// itself locally, so it answers `true` for this device no matter what. Asking it
+    /// produced a heddle that announced "already verified" while the server held no
+    /// signature for the device at all, and refused to start the very flow that would
+    /// have fixed that.
+    ///
+    /// `verification_state()` asks the question that matters -- has our own user identity
+    /// signed this device -- and is a stream, so the answer stays current when a
+    /// verification completes elsewhere.
+    fn watch_verification_state(&mut self) {
+        use matrix_sdk::encryption::VerificationState;
+
+        let client = self.client.clone();
+        let events = self.events.clone();
+        self.verified_watch = Some(DriverTask(tokio::spawn(async move {
+            let mut states = client.encryption().verification_state();
+            while let Some(state) = states.next().await {
+                let verified = match state {
+                    VerificationState::Verified => Some(true),
+                    VerificationState::Unverified => Some(false),
+                    VerificationState::Unknown => None,
+                };
+                let _ = events.send(WorkerEvent::DeviceVerified(verified)).await;
+            }
+        })));
     }
 
     async fn handle(&mut self, command: Command) -> anyhow::Result<()> {
@@ -512,6 +564,47 @@ impl Worker {
             Some(matrix_sdk::encryption::verification::Verification::SasV1(sas)) => Ok(sas),
             _ => anyhow::bail!("the emoji are not ready yet"),
         }
+    }
+
+    /// Re-decrypt what a batch of newly arrived room keys unlocks.
+    ///
+    /// Only the timelines for the rooms those keys belong to are touched, and only with
+    /// the session ids that actually arrived. Retrying every open timeline on every key
+    /// would mean re-running decryption across the whole app each time a single message
+    /// is sent to us in any room.
+    /// `keys` is (room id, session id) pairs; the SDK's own `RoomKeyInfo` is not
+    /// re-exported at a public path, and naming it is not worth reaching through
+    /// `matrix_sdk_base` for.
+    async fn retry_decryption(&self, keys: Vec<(String, String)>) {
+        let mut by_room: HashMap<String, Vec<String>> = HashMap::new();
+        for (room_id, session_id) in keys {
+            by_room.entry(room_id).or_default().push(session_id);
+        }
+
+        for (room_id, sessions) in by_room {
+            for (view, open) in &self.views {
+                if view.room_id == room_id {
+                    tracing::debug!(%room_id, count = sessions.len(), "retrying decryption");
+                    open.timeline.retry_decryption(sessions.clone()).await;
+                }
+            }
+        }
+    }
+
+    /// Retry every open timeline, for when we no longer know which keys arrived.
+    ///
+    /// There is no public "retry everything": `retry_decryption` takes session ids, and
+    /// an empty list retries nothing at all. So this reports the gap rather than
+    /// pretending to close it. Lagging means the broadcast buffer overflowed, which
+    /// takes a flood of keys, and saying so plainly is better than a silent no-op that
+    /// leaves the user wondering why a message never came back.
+    async fn report_lost_key_updates(&self) {
+        let _ = self
+            .events
+            .send(WorkerEvent::Warning(
+                "missed some key updates; reopen the room if a message still cannot be read".into(),
+            ))
+            .await;
     }
 
     fn timeline(&self, view: &View) -> anyhow::Result<Arc<Timeline>> {
@@ -935,7 +1028,6 @@ async fn drive_sas(
             }
             SasState::Done { .. } => {
                 emit(Verification::Done).await;
-                let _ = events.send(WorkerEvent::DeviceVerified(true)).await;
                 return;
             }
             SasState::Cancelled(info) => {
