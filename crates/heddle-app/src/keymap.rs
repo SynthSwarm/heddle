@@ -168,147 +168,64 @@ impl Prefix {
 
 /// One documented binding.
 ///
-/// The status-bar hints and the `<prefix> ?` overlay both read this table, so they
-/// cannot drift from each other. Keeping it beside `map_prefix` and `map_normal` is
-/// what stops it drifting from the bindings themselves.
+/// The `<prefix> ?` overlay and the status-bar hints both read these tables, which sit
+/// beside `map_prefix` and `map_normal` so they cannot quietly drift from the bindings
+/// themselves.
 pub struct Binding {
     /// Keys, without the prefix.
     pub keys: &'static str,
     pub action: &'static str,
     /// Whether the prefix must be pressed first.
     pub prefixed: bool,
-    /// Also shown in the status bar, space permitting.
-    pub hint: bool,
+}
+
+/// Shorthand for a table entry.
+const fn b(keys: &'static str, action: &'static str, prefixed: bool) -> Binding {
+    Binding {
+        keys,
+        action,
+        prefixed,
+    }
 }
 
 /// Every binding worth documenting, in the order the overlay lists them.
 pub const BINDINGS: &[Binding] = &[
-    Binding {
-        keys: "i",
-        action: "write a message",
-        prefixed: false,
-        hint: true,
-    },
-    Binding {
-        keys: "enter",
-        action: "send",
-        prefixed: false,
-        hint: false,
-    },
-    Binding {
-        keys: "shift+enter",
-        action: "newline",
-        prefixed: false,
-        hint: false,
-    },
-    Binding {
-        keys: "esc",
-        action: "normal mode",
-        prefixed: false,
-        hint: false,
-    },
-    Binding {
-        keys: "y / n",
-        action: "approve / deny",
-        prefixed: false,
-        hint: false,
-    },
-    Binding {
-        keys: "tab",
-        action: "toggle tool card",
-        prefixed: false,
-        hint: false,
-    },
-    Binding {
-        keys: "j / k",
-        action: "scroll",
-        prefixed: false,
-        hint: false,
-    },
-    Binding {
-        keys: "^u / ^d",
-        action: "half-page scroll",
-        prefixed: false,
-        hint: false,
-    },
-    Binding {
-        keys: "g / G",
-        action: "top / bottom",
-        prefixed: false,
-        hint: false,
-    },
-    Binding {
-        keys: ":",
-        action: "command palette",
-        prefixed: false,
-        hint: false,
-    },
-    Binding {
-        keys: "n / p",
-        action: "next / prev tab",
-        prefixed: true,
-        hint: true,
-    },
-    Binding {
-        keys: "| / -",
-        action: "split right / down",
-        prefixed: true,
-        hint: true,
-    },
-    Binding {
-        keys: "h j k l",
-        action: "focus pane",
-        prefixed: true,
-        hint: false,
-    },
-    Binding {
-        keys: "H J K L",
-        action: "resize pane",
-        prefixed: true,
-        hint: false,
-    },
-    Binding {
-        keys: "z",
-        action: "zoom pane",
-        prefixed: true,
-        hint: false,
-    },
-    Binding {
-        keys: "x",
-        action: "close pane",
-        prefixed: true,
-        hint: false,
-    },
-    Binding {
-        keys: "c",
-        action: "new thread",
-        prefixed: true,
-        hint: false,
-    },
-    Binding {
-        keys: "w",
-        action: "workspace switcher",
-        prefixed: true,
-        hint: false,
-    },
-    Binding {
-        keys: "f",
-        action: "fuzzy jump",
-        prefixed: true,
-        hint: true,
-    },
-    Binding {
-        keys: "?",
-        action: "this help",
-        prefixed: true,
-        hint: true,
-    },
-    Binding {
-        keys: "q",
-        action: "quit",
-        prefixed: true,
-        hint: false,
-    },
+    b("i", "write a message", false),
+    b("enter", "send", false),
+    b("shift+enter", "newline", false),
+    b("esc", "normal mode", false),
+    b("y / n", "approve / deny", false),
+    b("tab", "toggle tool card", false),
+    b("j / k", "scroll", false),
+    b("^u / ^d", "half-page scroll", false),
+    b("g / G", "top / bottom", false),
+    b(":", "command palette", false),
+    b("n / p", "next / prev tab", true),
+    b("| / -", "split right / down", true),
+    b("h j k l", "focus pane", true),
+    b("H J K L", "resize pane", true),
+    b("z", "zoom pane", true),
+    b("x", "close pane", true),
+    b("c", "new thread", true),
+    b("w", "workspace switcher", true),
+    b("f", "fuzzy jump", true),
+    b("?", "this help", true),
+    b("q", "quit", true),
+];
+
+/// The handful of bindings terse enough for the status bar, most useful first.
+///
+/// Separate from [`BINDINGS`] because a status bar and a reference table want different
+/// prose: `next / prev tab` reads correctly in the overlay and is far too wide for one
+/// line beside four others. The overlay documents everything; this is the teaser.
+///
+/// Ordered by usefulness, because a narrow terminal drops them from the end.
+pub const HINTS: &[Binding] = &[
+    b("i", "write", false),
+    b("n", "tab", true),
+    b("?", "help", true),
+    b("|", "split", true),
+    b("f", "jump", true),
 ];
 
 /// Translate a key press into an [`Action`], given the current mode.
@@ -583,10 +500,10 @@ mod tests {
 
     #[test]
     fn every_documented_binding_is_actually_bound() {
-        // The overlay and the status hints read BINDINGS. A row here that no key
+        // The overlay and the status hints read these tables. A row that no key
         // produces would be a lie told in the UI.
         let p = Prefix::default();
-        for binding in BINDINGS {
+        for binding in BINDINGS.iter().chain(HINTS) {
             // Only single-key prefixed rows are mechanically checkable; the rest
             // document chords and ranges.
             if !binding.prefixed || binding.keys.chars().count() != 1 {
@@ -596,8 +513,26 @@ mod tests {
             assert_ne!(
                 map(key(c), Mode::Prefix, p).0,
                 Action::None,
-                "BINDINGS documents `{c}` but map_prefix ignores it"
+                "a table documents `{c}` but map_prefix ignores it"
             );
         }
+    }
+
+    #[test]
+    fn status_hints_stay_short_enough_to_fit() {
+        // Five hints on one line beside the sync glyph. The overlay carries the prose;
+        // if these grow, the status bar silently sheds them instead.
+        assert!(HINTS.len() <= 5, "the status bar is not a reference table");
+        for hint in HINTS {
+            assert!(
+                hint.action.len() <= 6,
+                "`{}` is overlay prose, not a status hint",
+                hint.action
+            );
+        }
+        assert!(
+            HINTS.iter().any(|h| h.keys == "?"),
+            "the discoverability hint must itself be discoverable"
+        );
     }
 }

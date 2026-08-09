@@ -313,7 +313,6 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
             .border_style(app.theme.border_style(placement.is_focused))
             .title(Span::styled(header, app.theme.state(state)));
         let inner = block.inner(placement.rect);
-        frame.render_widget(block, placement.rect);
 
         // Only the focused pane shows the loaded transcript for now; per-pane
         // transcripts arrive with the M4 workspace work.
@@ -337,6 +336,13 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
             let offset = max_scroll.saturating_sub(scroll.min(max_scroll));
             frame.render_widget(paragraph.scroll((offset, 0)), inner);
         }
+
+        // Border last, deliberately. Transcript content can reach the final inner
+        // column, and a double-width glyph landing there spills one cell into the
+        // border and punches a hole in it — which is why the right edge only went
+        // dashed once scrolling changed which glyphs sat at that column. Painting the
+        // chrome after the content makes the border immune to whatever it contains.
+        frame.render_widget(block, placement.rect);
     }
 }
 
@@ -399,12 +405,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     }
     frame.render_widget(Paragraph::new(Line::from(left)), area);
 
-    // Key hints, evenly spaced and flush right. Drawn from the same table as the
-    // `<prefix> ?` overlay, so the two cannot disagree.
+    // Key hints, evenly spaced and flush right. Drawn from the same module as the
+    // bindings themselves, so they cannot advertise a key that does nothing.
     let prefix = app.prefix.label();
-    let hints: Vec<(String, &str)> = keymap::BINDINGS
+    let mut hints: Vec<(String, &str)> = keymap::HINTS
         .iter()
-        .filter(|b| b.hint)
         .map(|b| {
             let keys = if b.prefixed {
                 format!("{prefix} {}", b.keys)
@@ -414,25 +419,27 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             (keys, b.action)
         })
         .collect();
-    if hints.is_empty() {
-        return;
-    }
 
-    // One width for every cell, so the row reads as a rank rather than a ragged list.
-    let cell = hints
-        .iter()
-        .map(|(key, label)| {
-            UnicodeWidthStr::width(key.as_str()) + 1 + UnicodeWidthStr::width(*label)
-        })
-        .max()
-        .unwrap_or(0)
-        + HINT_GAP;
-
-    let total = (cell * hints.len()) as u16;
-    // Drop the hints entirely rather than letting them collide with the status text.
-    if area.width < total + left_width as u16 {
-        return;
-    }
+    // Shed hints from the least useful end until the row fits, rather than dropping the
+    // lot. A narrow terminal should still get `i write`.
+    let (cell, total) = loop {
+        if hints.is_empty() {
+            return;
+        }
+        let cell = hints
+            .iter()
+            .map(|(key, label)| {
+                UnicodeWidthStr::width(key.as_str()) + 1 + UnicodeWidthStr::width(*label)
+            })
+            .max()
+            .unwrap_or(0)
+            + HINT_GAP;
+        let total = (cell * hints.len()) as u16;
+        if area.width >= total + left_width as u16 {
+            break (cell, total);
+        }
+        hints.pop();
+    };
 
     let mut spans = Vec::with_capacity(hints.len() * 4);
     for (key, label) in &hints {
