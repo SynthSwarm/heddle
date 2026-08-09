@@ -315,6 +315,10 @@ pub enum Command {
     /// Unlock this account's secret storage with a recovery key, importing the secrets
     /// and, with them, the ability to read history from backup.
     RecoverWithKey(String),
+    /// Set up secret storage and a key backup for an account that has neither.
+    EnableRecovery,
+    /// Replace the recovery key, leaving the old one useless.
+    ResetRecoveryKey,
     Shutdown,
 }
 
@@ -356,6 +360,9 @@ pub enum WorkerEvent {
     /// A recovery attempt failed, with the reason. Distinct from a plain warning so the
     /// prompt can offer the key again rather than sitting on "unlocking…" for ever.
     RecoveryFailed(String),
+    /// A new recovery key. The server keeps no copy and it cannot be shown again, so
+    /// this reaches the user exactly once or not at all.
+    RecoveryKeyCreated(String),
 }
 
 #[cfg(test)]

@@ -515,6 +515,36 @@ impl Worker {
                 }
             }
 
+            Command::EnableRecovery => {
+                let recovery = self.client.encryption().recovery();
+                match recovery.enable().await {
+                    Ok(key) => {
+                        let _ = self.events.send(WorkerEvent::RecoveryKeyCreated(key)).await;
+                    }
+                    Err(e) => {
+                        let _ = self
+                            .events
+                            .send(WorkerEvent::RecoveryFailed(e.to_string()))
+                            .await;
+                    }
+                }
+            }
+
+            Command::ResetRecoveryKey => {
+                let recovery = self.client.encryption().recovery();
+                match recovery.reset_key().await {
+                    Ok(key) => {
+                        let _ = self.events.send(WorkerEvent::RecoveryKeyCreated(key)).await;
+                    }
+                    Err(e) => {
+                        let _ = self
+                            .events
+                            .send(WorkerEvent::RecoveryFailed(e.to_string()))
+                            .await;
+                    }
+                }
+            }
+
             Command::CancelVerification => {
                 if let Some(request) = self.verification.take() {
                     let _ = request.cancel().await;

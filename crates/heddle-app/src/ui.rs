@@ -3,7 +3,7 @@
 //! Pure layout and painting. All decisions live in [`crate::app`]; this module only
 //! turns state into cells.
 
-use crate::app::{App, Hit, Pending};
+use crate::app::{App, Hit, Pending, RecoveryPanel};
 use crate::composer::Composer;
 use crate::keymap::{self, Mode};
 use heddle_matrix::{SyncState, View};
@@ -77,77 +77,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.recovery_prompt.is_some() {
         draw_recovery(frame, app, frame.area());
     }
-}
-
-/// The recovery-key prompt.
-///
-/// The key is masked. It is a long, high-entropy secret that unlocks every message the
-/// account has ever received, and a terminal is a shoulder-surfable, screen-shareable,
-/// scrollback-recording place to paint one in clear text. The length is shown so that a
-/// paste can be seen to have arrived.
-fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(prompt) = &app.recovery_prompt else {
-        return;
-    };
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "Enter your recovery key".to_owned(),
-            Style::default(),
-        )),
-        Line::from(""),
-    ];
-
-    if prompt.submitted {
-        lines.push(Line::from(Span::styled(
-            "unlocking…".to_owned(),
-            app.theme.dim_style(),
-        )));
-    } else {
-        if let Some(error) = &prompt.error {
-            lines.push(Line::from(Span::styled(
-                format!("that key did not work: {error}"),
-                app.theme.accent_style(),
-            )));
-            lines.push(Line::from(""));
-        }
-
-        let masked = "•".repeat(prompt.key.chars().count());
-        lines.push(Line::from(vec![
-            Span::styled(masked, app.theme.accent_style()),
-            Span::styled("\u{2588}".to_owned(), app.theme.dim_style()),
-        ]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!("{} characters", prompt.key.chars().count()),
-            app.theme.dim_style(),
-        )));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "enter unlock   esc cancel".to_owned(),
-            app.theme.dim_style(),
-        )));
-    }
-
-    let width = 44.min(area.width);
-    let height = (lines.len() as u16 + 2).min(area.height);
-    let popup = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
-
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(app.theme.accent_style())
-                .title(" recovery "),
-        ),
-        popup,
-    );
 }
 
 /// The interactive verification panel.
@@ -261,6 +190,176 @@ fn draw_verification(frame: &mut Frame, app: &App, area: Rect) {
         ),
         popup,
     );
+}
+
+/// The recovery panel.
+///
+/// The key being *asked for* is masked; the key being *given out* is not. They are
+/// opposite situations: one is a secret the user already holds and is re-entering, where
+/// echoing it only helps a shoulder, and the other is a secret they have never seen and
+/// must copy down exactly, where hiding it would defeat the entire exercise.
+fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(panel) = &app.recovery_prompt else {
+        return;
+    };
+
+    let (title, lines, width) = match panel {
+        RecoveryPanel::AskKey {
+            key,
+            submitted,
+            error,
+        } => {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "Enter your recovery key".to_owned(),
+                    Style::default(),
+                )),
+                Line::from(""),
+            ];
+            if *submitted {
+                lines.push(Line::from(Span::styled(
+                    "unlocking…".to_owned(),
+                    app.theme.dim_style(),
+                )));
+            } else {
+                if let Some(error) = error {
+                    lines.push(Line::from(Span::styled(
+                        format!("that key did not work: {error}"),
+                        app.theme.error_style(),
+                    )));
+                    lines.push(Line::from(""));
+                }
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "\u{2022}".repeat(key.chars().count()),
+                        app.theme.accent_style(),
+                    ),
+                    Span::styled("\u{2588}".to_owned(), app.theme.dim_style()),
+                ]));
+                lines.push(Line::from(""));
+                // The count is what makes a paste visibly land, given the masking.
+                lines.push(Line::from(Span::styled(
+                    format!("{} characters", key.chars().count()),
+                    app.theme.dim_style(),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "enter unlock   esc cancel".to_owned(),
+                    app.theme.dim_style(),
+                )));
+            }
+            (" recovery ", lines, 44)
+        }
+
+        RecoveryPanel::OfferEnable => (
+            " set up recovery ",
+            vec![
+                Line::from(Span::styled(
+                    "This account has no recovery set up.".to_owned(),
+                    Style::default(),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Without it, messages you can read today become unreadable if you \
+                     lose every device you own."
+                        .to_owned(),
+                    app.theme.dim_style(),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "You will be shown a recovery key once. Keep it somewhere safe.".to_owned(),
+                    app.theme.dim_style(),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "y set it up   n not now".to_owned(),
+                    app.theme.dim_style(),
+                )),
+            ],
+            60,
+        ),
+
+        RecoveryPanel::ConfirmReset => (
+            " replace recovery key ",
+            vec![
+                Line::from(Span::styled(
+                    "Recovery is already set up and unlocked here.".to_owned(),
+                    Style::default(),
+                )),
+                Line::from(""),
+                // Said plainly and in the warning colour, because the cost lands on
+                // devices that are not in front of the user to be reassured.
+                Line::from(Span::styled(
+                    "Replacing the key makes your current one useless. Any device \
+                     holding it will need the new one."
+                        .to_owned(),
+                    app.theme.error_style(),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "y replace it   n keep the one I have".to_owned(),
+                    app.theme.dim_style(),
+                )),
+            ],
+            60,
+        ),
+
+        RecoveryPanel::Busy(what) => (
+            " recovery ",
+            vec![Line::from(Span::styled(
+                (*what).to_owned(),
+                app.theme.dim_style(),
+            ))],
+            44,
+        ),
+
+        RecoveryPanel::ShowKey { key } => (
+            " your recovery key ",
+            vec![
+                Line::from(Span::styled(
+                    "Write this down now. It is not shown again and the server \
+                     keeps no copy."
+                        .to_owned(),
+                    app.theme.error_style(),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(key.clone(), app.theme.accent_style())),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "enter I have saved it".to_owned(),
+                    app.theme.dim_style(),
+                )),
+            ],
+            72,
+        ),
+    };
+
+    let width = (width as u16).min(area.width);
+    // Wrapped, so a long sentence in a narrow terminal is not simply cut off mid-warning.
+    let paragraph = Paragraph::new(lines)
+        .wrap(ratatui::widgets::Wrap { trim: true })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.accent_style())
+                .title(title),
+        );
+    let height = paragraph
+        .line_count(width.saturating_sub(2))
+        .try_into()
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(area.height);
+
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(paragraph, popup);
 }
 
 /// The `<prefix> t` thread picker.

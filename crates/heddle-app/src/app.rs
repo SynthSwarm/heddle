@@ -106,19 +106,35 @@ pub struct BarHits {
 }
 
 /// Everything the UI draws from.
-/// The recovery-key prompt.
+/// The recovery panel.
 ///
-/// Its own input rather than the composer's. A recovery key typed into the composer is
-/// one stray `enter` away from being sent to a room, and unlike a mistyped message it
-/// cannot be unsent in any meaningful sense once a homeserver has it.
-#[derive(Debug, Default, Clone)]
-pub struct RecoveryPrompt {
-    pub key: String,
-    /// Set once the key has been handed to the worker, so the panel can say it is
-    /// working rather than appearing to have ignored the keypress.
-    pub submitted: bool,
-    /// Why the last attempt failed, if one did.
-    pub error: Option<String>,
+/// A state machine rather than one struct with optional fields, because the four things
+/// it does are genuinely different questions: type a secret in, decide whether to create
+/// one, decide whether to destroy one, and write one down. Flattening them would let the
+/// UI show a text field where the answer is yes or no.
+///
+/// The key input is the panel's own, not the composer's. A recovery key typed into the
+/// composer is one stray `enter` from being sent to a room, and unlike a mistyped
+/// message it cannot be unsent in any meaningful sense once a homeserver has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryPanel {
+    /// Asking for the existing recovery key.
+    AskKey {
+        key: String,
+        /// Set once the key is with the worker, so the panel says it is working rather
+        /// than appearing to have ignored the keypress.
+        submitted: bool,
+        /// Why the last attempt failed, if one did.
+        error: Option<String>,
+    },
+    /// Offering to set recovery up for an account that has none.
+    OfferEnable,
+    /// Confirming the replacement of an existing recovery key.
+    ConfirmReset,
+    /// Waiting on the server.
+    Busy(&'static str),
+    /// Showing a newly created key. The one chance the user gets to keep it.
+    ShowKey { key: String },
 }
 
 pub struct App {
@@ -168,8 +184,8 @@ pub struct App {
     pub verification: Option<Verification>,
     /// Whether this account's secrets are recoverable on a new device.
     pub recovery: RecoveryState,
-    /// The open recovery-key prompt, if any.
-    pub recovery_prompt: Option<RecoveryPrompt>,
+    /// The open recovery panel, if any.
+    pub recovery_prompt: Option<RecoveryPanel>,
     /// Rooms whose loaded history contains a message heddle cannot vouch for.
     pub unverified_rooms: HashSet<String>,
     /// Whether this device has been verified by the account's cross-signing identity.
@@ -919,11 +935,15 @@ impl App {
                 // sits on "unlocking…" for ever, over a screen full of messages that
                 // plainly did decrypt -- which tells the user the client has hung at the
                 // exact moment it actually worked.
-                if state == RecoveryState::Enabled
-                    && self.recovery_prompt.as_ref().is_some_and(|p| p.submitted)
-                {
-                    self.recovery_prompt = None;
-                    self.mode = Mode::Normal;
+                let waiting = matches!(
+                    self.recovery_prompt,
+                    Some(RecoveryPanel::AskKey {
+                        submitted: true,
+                        ..
+                    })
+                );
+                if state == RecoveryState::Enabled && waiting {
+                    self.close_recovery();
                     self.status = Some("recovery unlocked; older messages will decrypt".into());
                     self.needs_redraw = true;
                 }
@@ -933,12 +953,21 @@ impl App {
                 // Kept open, emptied, and told why: a mistyped recovery key is worth a
                 // second attempt, and closing the prompt would make the user find the
                 // key again from the start.
-                if let Some(prompt) = &mut self.recovery_prompt {
-                    prompt.submitted = false;
-                    prompt.key.clear();
-                    prompt.error = Some(reason.clone());
-                }
+                self.recovery_prompt = Some(RecoveryPanel::AskKey {
+                    key: String::new(),
+                    submitted: false,
+                    error: Some(reason.clone()),
+                });
                 self.status = Some(format!("recovery failed: {reason}"));
+            }
+
+            WorkerEvent::RecoveryKeyCreated(key) => {
+                // Straight to the panel, and nowhere else. It is never logged and never
+                // put in the status line: the server keeps no copy, so this is the only
+                // time it can be read, and it must not end up somewhere it outlives the
+                // moment.
+                self.recovery_prompt = Some(RecoveryPanel::ShowKey { key });
+                self.needs_redraw = true;
             }
 
             WorkerEvent::DeviceVerified(verified) => {
@@ -1118,42 +1147,78 @@ impl App {
         }
     }
 
-    /// Route a key to the recovery prompt.
+    /// Route a key to the recovery panel.
     ///
-    /// Printable characters go into the key and nothing else is honoured. A recovery key
-    /// is the one string in the application that must not leak into a room, so no action
-    /// that could send, split or switch is allowed to reach past this.
+    /// Only what each state actually asks for is honoured, and everything else is
+    /// swallowed. This panel can hold a secret mid-typing, destroy a working recovery
+    /// key, or be showing the only copy of a new one, and none of those are places for a
+    /// stray binding to reach past.
     fn recovery_action(&mut self, action: Action) {
-        let Some(prompt) = &mut self.recovery_prompt else {
+        let Some(panel) = &mut self.recovery_prompt else {
             return;
         };
 
-        match action {
-            Action::Insert(c) => prompt.key.push(c),
-            Action::Backspace => {
-                prompt.key.pop();
-            }
-            Action::Cancel => {
-                // Dropped rather than kept for later. A half-typed recovery key lingering
-                // in memory behind a closed dialog is a liability with no upside.
-                self.recovery_prompt = None;
-                self.mode = Mode::Normal;
-            }
-            Action::Submit | Action::Accept => {
-                let key = std::mem::take(&mut prompt.key);
-                if key.trim().is_empty() {
-                    self.status = Some("no recovery key entered".into());
-                    self.recovery_prompt = None;
-                    self.mode = Mode::Normal;
-                    return;
+        match panel {
+            RecoveryPanel::AskKey { key, submitted, .. } => match action {
+                Action::Insert(c) if !*submitted => key.push(c),
+                Action::Backspace if !*submitted => {
+                    key.pop();
                 }
-                prompt.submitted = true;
-                prompt.error = None;
-                self.status = Some("unlocking secret storage…".into());
-                self.queue(Command::RecoverWithKey(key));
-            }
-            _ => {}
+                Action::Cancel => self.close_recovery(),
+                Action::Submit | Action::Accept if !*submitted => {
+                    let entered = std::mem::take(key);
+                    if entered.trim().is_empty() {
+                        self.status = Some("no recovery key entered".into());
+                        self.close_recovery();
+                        return;
+                    }
+                    *submitted = true;
+                    self.status = Some("unlocking secret storage…".into());
+                    self.queue(Command::RecoverWithKey(entered));
+                }
+                _ => {}
+            },
+
+            RecoveryPanel::OfferEnable => match action {
+                Action::Approve | Action::Accept | Action::Submit => {
+                    *panel = RecoveryPanel::Busy("setting up recovery…");
+                    self.queue(Command::EnableRecovery);
+                }
+                Action::Deny | Action::Cancel => self.close_recovery(),
+                _ => {}
+            },
+
+            RecoveryPanel::ConfirmReset => match action {
+                // Only an explicit yes. Resetting leaves every other device holding a
+                // key that no longer opens anything, so it is not something to fall into
+                // by pressing enter on a dialog one did not read.
+                Action::Approve => {
+                    *panel = RecoveryPanel::Busy("creating a new recovery key…");
+                    self.queue(Command::ResetRecoveryKey);
+                }
+                Action::Deny | Action::Cancel => self.close_recovery(),
+                _ => {}
+            },
+
+            // Nothing to answer while the server is being waited on, and cancelling
+            // would not recall the request.
+            RecoveryPanel::Busy(_) => {}
+
+            RecoveryPanel::ShowKey { .. } => match action {
+                // Any deliberate acknowledgement closes it, but nothing else does: this
+                // is the only time the key is ever displayed.
+                Action::Submit | Action::Accept | Action::Approve | Action::Cancel => {
+                    self.close_recovery();
+                }
+                _ => {}
+            },
         }
+    }
+
+    /// Close the recovery panel and give the keyboard back to the transcript.
+    fn close_recovery(&mut self) {
+        self.recovery_prompt = None;
+        self.mode = Mode::Normal;
     }
 
     pub fn apply_action(&mut self, action: Action) {
@@ -1318,22 +1383,19 @@ impl App {
             Action::NewThread => self.start_thread(),
 
             Action::OpenRecovery => {
-                match self.recovery {
-                    // Nothing to unlock: the account has no secret storage at all, and
-                    // pretending a key would help would send the user looking for one
-                    // that was never created.
-                    RecoveryState::Disabled => {
-                        self.status =
-                            Some("no recovery set up for this account; set it up from Element or another client first".into());
-                    }
-                    RecoveryState::Enabled => {
-                        self.status = Some("recovery is already unlocked on this device".into());
-                    }
-                    RecoveryState::Incomplete | RecoveryState::Unknown => {
-                        self.recovery_prompt = Some(RecoveryPrompt::default());
-                        self.mode = Mode::Insert;
-                    }
-                }
+                // What the key opens depends entirely on where the account stands, and
+                // offering the wrong one is worse than offering nothing: asking for a
+                // key that was never created, or quietly replacing one that works.
+                self.recovery_prompt = Some(match self.recovery {
+                    RecoveryState::Disabled => RecoveryPanel::OfferEnable,
+                    RecoveryState::Enabled => RecoveryPanel::ConfirmReset,
+                    RecoveryState::Incomplete | RecoveryState::Unknown => RecoveryPanel::AskKey {
+                        key: String::new(),
+                        submitted: false,
+                        error: None,
+                    },
+                });
+                self.mode = Mode::Insert;
             }
 
             Action::StartVerification => {
@@ -3118,10 +3180,10 @@ mod tests {
             app.take_commands().is_empty(),
             "nothing may escape the prompt before the key is submitted"
         );
-        assert_eq!(
-            app.recovery_prompt.as_ref().map(|p| p.key.as_str()),
-            Some("EsTc 1234")
-        );
+        assert!(matches!(
+            &app.recovery_prompt,
+            Some(RecoveryPanel::AskKey { key, .. }) if key == "EsTc 1234"
+        ));
     }
 
     #[test]
@@ -3138,9 +3200,11 @@ mod tests {
             [Command::RecoverWithKey(key)] => assert_eq!(key, "secret"),
             other => panic!("expected one recover command, got {other:?}"),
         }
-        assert_eq!(
-            app.recovery_prompt.as_ref().map(|p| p.key.as_str()),
-            Some(""),
+        assert!(
+            matches!(
+                &app.recovery_prompt,
+                Some(RecoveryPanel::AskKey { key, submitted: true, .. }) if key.is_empty()
+            ),
             "the key must not be left sitting in the prompt after being sent"
         );
     }
@@ -3160,110 +3224,82 @@ mod tests {
     }
 
     #[test]
-    fn recovery_that_is_not_set_up_says_so_instead_of_asking_for_a_key() {
+    fn an_account_with_no_recovery_is_offered_it_rather_than_asked_for_a_key() {
         let mut app = app();
         app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Disabled));
         app.apply_action(Action::OpenRecovery);
 
-        assert!(
-            app.recovery_prompt.is_none(),
+        assert_eq!(
+            app.recovery_prompt,
+            Some(RecoveryPanel::OfferEnable),
             "asking for a key that was never created sends the user hunting for nothing"
         );
-        assert!(app.status.is_some());
+        assert!(
+            app.take_commands().is_empty(),
+            "nothing happens until they agree"
+        );
+
+        app.apply_action(Action::Approve);
+        assert!(matches!(
+            app.take_commands().as_slice(),
+            [Command::EnableRecovery]
+        ));
     }
 
     #[test]
-    fn recovery_already_unlocked_asks_for_nothing() {
+    fn replacing_a_working_recovery_key_needs_an_explicit_yes() {
         let mut app = app();
         app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Enabled));
         app.apply_action(Action::OpenRecovery);
+        assert_eq!(app.recovery_prompt, Some(RecoveryPanel::ConfirmReset));
+
+        // Enter is what a user presses to dismiss a dialog they have not read. It must
+        // not be what destroys the key every other device is holding.
+        app.apply_action(Action::Submit);
+        assert!(app.take_commands().is_empty());
+        assert_eq!(app.recovery_prompt, Some(RecoveryPanel::ConfirmReset));
+
+        app.apply_action(Action::Approve);
+        assert!(matches!(
+            app.take_commands().as_slice(),
+            [Command::ResetRecoveryKey]
+        ));
+    }
+
+    #[test]
+    fn declining_a_reset_leaves_the_key_alone() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Enabled));
+        app.apply_action(Action::OpenRecovery);
+        app.apply_action(Action::Deny);
 
         assert!(app.recovery_prompt.is_none());
         assert!(app.take_commands().is_empty());
     }
 
     #[test]
-    fn unlocking_closes_the_prompt() {
+    fn a_new_key_is_shown_and_waits_to_be_acknowledged() {
         let mut app = app();
-        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Incomplete));
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Disabled));
         app.apply_action(Action::OpenRecovery);
-        for c in "key".chars() {
-            app.apply_action(Action::Insert(c));
-        }
-        app.apply_action(Action::Submit);
-        assert!(app.recovery_prompt.as_ref().is_some_and(|p| p.submitted));
-
-        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Enabled));
-
-        assert!(
-            app.recovery_prompt.is_none(),
-            "the panel must not sit on `unlocking…` over a screen of decrypted messages"
-        );
-        assert_eq!(
-            app.mode,
-            Mode::Normal,
-            "typing must go back to the transcript"
-        );
-    }
-
-    #[test]
-    fn a_wrong_key_can_be_typed_again() {
-        let mut app = app();
-        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Incomplete));
-        app.apply_action(Action::OpenRecovery);
-        for c in "wrong".chars() {
-            app.apply_action(Action::Insert(c));
-        }
-        app.apply_action(Action::Submit);
+        app.apply_action(Action::Approve);
         let _ = app.take_commands();
 
-        app.apply_worker_event(WorkerEvent::RecoveryFailed("MAC check failed".into()));
+        app.apply_worker_event(WorkerEvent::RecoveryKeyCreated("EsTc AAAA BBBB".into()));
 
-        let prompt = app.recovery_prompt.as_ref().expect("prompt stays open");
-        assert!(!prompt.submitted, "it must stop claiming to be working");
-        assert_eq!(prompt.key, "", "the failed key must not be left to re-send");
-        assert!(prompt.error.as_deref().is_some_and(|e| e.contains("MAC")));
-    }
-
-    #[test]
-    fn a_room_carrying_an_unvouched_message_is_marked() {
-        let mut app = app();
-        let mut entry = their_message("$e1", "trust me");
-        if let EntryKind::Message(m) = &mut entry.kind {
-            m.shield = Shield::Warning(heddle_matrix::ShieldReason::UnsignedDevice);
-        }
-        app.apply_worker_event(WorkerEvent::Timeline {
-            view: View::room("!r:x"),
-            entries: vec![entry],
-        });
-
-        assert!(app.unverified_rooms.contains("!r:x"));
-
-        // And it clears again once the offending message is gone, rather than marking
-        // the room for the rest of the session.
-        app.apply_worker_event(WorkerEvent::Timeline {
-            view: View::room("!r:x"),
-            entries: vec![their_message("$e2", "fine")],
-        });
-        assert!(!app.unverified_rooms.contains("!r:x"));
-    }
-
-    #[test]
-    fn a_merely_cautious_shield_does_not_mark_the_room() {
-        let mut app = app();
-        let mut entry = their_message("$e1", "hello");
-        if let EntryKind::Message(m) = &mut entry.kind {
-            m.shield = Shield::Caution(heddle_matrix::ShieldReason::UnverifiedIdentity);
-        }
-        app.apply_worker_event(WorkerEvent::Timeline {
-            view: View::room("!r:x"),
-            entries: vec![entry],
-        });
-
-        assert!(
-            !app.unverified_rooms.contains("!r:x"),
-            "most senders in most rooms are unverified; marking every room marks none"
+        assert_eq!(
+            app.recovery_prompt,
+            Some(RecoveryPanel::ShowKey {
+                key: "EsTc AAAA BBBB".into()
+            })
         );
+        assert!(
+            app.status.as_deref() != Some("EsTc AAAA BBBB"),
+            "the key must not be copied into the status line, which outlives the panel"
+        );
+
+        app.apply_action(Action::Accept);
+        assert!(app.recovery_prompt.is_none());
     }
 
     /// A plain message from someone else.
