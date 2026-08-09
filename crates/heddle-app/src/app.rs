@@ -9,7 +9,8 @@ use crate::keymap::{Action, Mode, Prefix};
 use crate::palette::Palette;
 use heddle_agent::{AgentState, AgentStore};
 use heddle_layout::{
-    Dir, Layout, Pane, PaneId, PaneKind, Tab, Tiling, Unread, Workspaces, ORPHAN_WORKSPACE,
+    Dir, Layout, Pane, PaneId, PaneKind, SplitHandle, Tab, Tiling, Unread, Workspaces,
+    ORPHAN_WORKSPACE,
 };
 use heddle_matrix::{
     Command, Entry, EntryKind, RecoveryState, RoomSummary, Shield, SyncState, ThreadSummary,
@@ -185,6 +186,11 @@ pub struct App {
     pub emoji: Option<crate::emoji::Picker>,
     /// The open command palette, if any.
     pub palette: Option<Palette>,
+    /// The split border the mouse currently has hold of, and the room it belongs to.
+    ///
+    /// The room is part of it because a drag is only meaningful in the tab it started
+    /// in, and a tab can be switched from under it by an arriving keypress.
+    dragging: Option<(String, SplitHandle)>,
     /// The interactive verification in progress, if any.
     pub verification: Option<Verification>,
     /// Whether this account's secrets are recoverable on a new device.
@@ -273,6 +279,7 @@ impl App {
             threads: None,
             emoji: None,
             palette: None,
+            dragging: None,
             verification: None,
             device_verified: None,
             recovery: RecoveryState::Unknown,
@@ -1719,6 +1726,57 @@ impl App {
         self.touch_layout();
     }
 
+    /// Take hold of the split border under the pointer, if there is one.
+    ///
+    /// Returns whether a drag began, so the caller knows not to treat the same press as
+    /// a click into a pane. Grabbing a border does not move focus: the pane you are
+    /// reading should not change because you widened the one beside it.
+    pub fn begin_drag(&mut self, column: u16, row: u16) -> bool {
+        let Some(room_id) = self
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map(|t| t.room_id.clone())
+        else {
+            return false;
+        };
+        let Some(handle) = self
+            .tilings
+            .get(&room_id)
+            .and_then(|t| t.split_at(column, row))
+        else {
+            return false;
+        };
+        self.dragging = Some((room_id, handle));
+        true
+    }
+
+    /// Move a held border to the pointer.
+    pub fn drag_to(&mut self, column: u16, row: u16) {
+        let Some((room_id, handle)) = &self.dragging else {
+            return;
+        };
+        let Some(tiling) = self.tilings.get_mut(room_id) else {
+            return;
+        };
+        if tiling.drag(handle, column, row) {
+            // Panes have moved under text ratatui believes is already correct, and the
+            // same stale-cell problem that follows a focus change follows this.
+            self.needs_redraw = true;
+            self.layout_dirty = true;
+        }
+    }
+
+    /// Let go of the border, if one was held.
+    pub fn end_drag(&mut self) {
+        self.dragging = None;
+    }
+
+    /// Whether a border is currently being dragged.
+    pub fn is_dragging(&self) -> bool {
+        self.dragging.is_some()
+    }
+
     /// Focus a pane by its tiling id, for click-to-focus.
     pub fn focus_pane_id(&mut self, id: PaneId) {
         if let Some(tiling) = self.focused_tiling_mut() {
@@ -2499,6 +2557,98 @@ mod tests {
         // SPEC.md §2 names it `~`; a word here reads as a section heading instead.
         assert_eq!(app.workspaces.items[0].id, ORPHAN_WORKSPACE);
         assert_eq!(app.workspaces.items[0].title, ORPHAN_WORKSPACE);
+    }
+
+    // --------------------------------------------------------------- mouse resize
+
+    const PANE_AREA: ratatui::layout::Rect = ratatui::layout::Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    };
+
+    /// An app with two panes side by side, laid out as the renderer would leave them.
+    fn split_app() -> (App, u16) {
+        let mut app = app();
+        app.apply_action(Action::Split(Dir::Right));
+        let tiling = app.tilings.get_mut("!r:x").expect("tiling");
+        let placements = tiling.layout(PANE_AREA);
+        let seam = placements[0].rect.right();
+        (app, seam)
+    }
+
+    #[test]
+    fn dragging_a_border_resizes_without_moving_focus() {
+        let (mut app, seam) = split_app();
+        let focused_before = app
+            .tilings
+            .get("!r:x")
+            .and_then(heddle_layout::Tiling::focused);
+        let width_before = app
+            .tilings
+            .get_mut("!r:x")
+            .expect("tiling")
+            .layout(PANE_AREA)[0]
+            .rect
+            .width;
+
+        assert!(app.begin_drag(seam, 5), "the seam must be grabbable");
+        app.drag_to(PANE_AREA.width / 4, 5);
+        app.end_drag();
+
+        let width_after = app
+            .tilings
+            .get_mut("!r:x")
+            .expect("tiling")
+            .layout(PANE_AREA)[0]
+            .rect
+            .width;
+        assert!(width_after < width_before);
+        assert_eq!(
+            app.tilings
+                .get("!r:x")
+                .and_then(heddle_layout::Tiling::focused),
+            focused_before,
+            "widening a pane is not a request to read it"
+        );
+        assert!(app.layout_dirty, "a resize is worth remembering");
+        assert!(!app.is_dragging(), "the border must be let go of");
+    }
+
+    #[test]
+    fn a_press_in_a_transcript_is_not_a_resize() {
+        let (mut app, _) = split_app();
+        assert!(!app.begin_drag(PANE_AREA.width / 4, PANE_AREA.height / 2));
+        assert!(!app.is_dragging());
+    }
+
+    #[test]
+    fn moving_the_mouse_without_a_border_held_changes_nothing() {
+        // Every drag event arrives whether or not the press that started it grabbed
+        // anything, so this is the common case, not an edge one.
+        let (mut app, _) = split_app();
+        app.layout_dirty = false;
+        app.drag_to(10, 10);
+        assert!(!app.layout_dirty);
+    }
+
+    #[test]
+    fn a_drag_survives_the_pointer_leaving_the_pane() {
+        // Terminals keep reporting drag events past the edge of the split, and the
+        // ratio is clamped rather than the drag being dropped.
+        let (mut app, seam) = split_app();
+        assert!(app.begin_drag(seam, 5));
+        app.drag_to(0, 0);
+        app.drag_to(PANE_AREA.width * 3, PANE_AREA.height * 3);
+
+        let placements = app
+            .tilings
+            .get_mut("!r:x")
+            .expect("tiling")
+            .layout(PANE_AREA);
+        assert!(placements.iter().all(|p| p.rect.width > 0));
+        assert!(app.is_dragging(), "the border is still held");
     }
 
     // ------------------------------------------------------------------- palette

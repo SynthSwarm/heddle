@@ -41,6 +41,42 @@ pub struct Placement {
     pub is_focused: bool,
 }
 
+/// How near the pointer must be to a border to grab it, in cells.
+///
+/// Two adjacent panes each draw their own border, so the seam between them is two
+/// columns wide; one cell of slack covers both without reaching into the transcript.
+pub const GRAB_TOLERANCE: u16 = 1;
+
+/// A split border the pointer has hold of.
+///
+/// Captured once when the drag begins and then reused, because the area a split divides
+/// is fixed by its ancestors and does not move while its own ratio changes. Re-finding
+/// the border on every mouse event would instead let the drag hop to a neighbouring
+/// split as soon as the pointer outran the redraw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitHandle {
+    path: Vec<usize>,
+    /// The area the split divides, not the border itself.
+    rect: Rect,
+    /// True when the children sit side by side, so the border moves along x.
+    along_x: bool,
+}
+
+impl SplitHandle {
+    /// The ratio that would put this border under `(column, row)`.
+    fn ratio_at(&self, column: u16, row: u16) -> f32 {
+        let (offset, extent) = if self.along_x {
+            (column.saturating_sub(self.rect.x), self.rect.width)
+        } else {
+            (row.saturating_sub(self.rect.y), self.rect.height)
+        };
+        if extent == 0 {
+            return 0.5;
+        }
+        (f32::from(offset) / f32::from(extent)).clamp(MIN_RATIO, MAX_RATIO)
+    }
+}
+
 /// BSP tiling for one tab.
 pub struct Tiling {
     inner: Hypertile,
@@ -260,6 +296,29 @@ impl Tiling {
         self.inner.pane_at(column, row)
     }
 
+    /// The split border under a terminal cell, for drag-to-resize.
+    ///
+    /// `None` while zoomed: one pane fills the tab, so the borders on screen are its
+    /// own and belong to no split the user could usefully move.
+    pub fn split_at(&self, column: u16, row: u16) -> Option<SplitHandle> {
+        if self.zoomed.is_some() {
+            return None;
+        }
+        let split = self.inner.split_at(column, row, GRAB_TOLERANCE)?;
+        Some(SplitHandle {
+            path: split.path,
+            rect: split.rect,
+            along_x: split.direction == Direction::Horizontal,
+        })
+    }
+
+    /// Move a held border to the pointer. Returns whether anything moved.
+    pub fn drag(&mut self, handle: &SplitHandle, column: u16, row: u16) -> bool {
+        self.inner
+            .try_set_split_ratio(&handle.path, handle.ratio_at(column, row))
+            .unwrap_or(false)
+    }
+
     /// Every pane in the tree, whether or not a layout has been computed.
     ///
     /// Distinct from the ids [`Tiling::layout`] returns: those come from the layout
@@ -397,5 +456,94 @@ mod tests {
         let target = placements[0];
         let hit = t.pane_at(target.rect.x + 1, target.rect.y + 1);
         assert_eq!(hit, Some(target.id));
+    }
+
+    #[test]
+    fn a_border_can_be_grabbed_and_dragged() {
+        let mut t = Tiling::new();
+        t.split(Dir::Right);
+        let before = t.layout(AREA);
+        let seam = before[0].rect.right();
+
+        let handle = t
+            .split_at(seam, AREA.height / 2)
+            .expect("the seam between two panes is grabbable");
+        assert!(t.drag(&handle, AREA.width / 4, AREA.height / 2));
+
+        let after = t.layout(AREA);
+        assert!(
+            after[0].rect.width < before[0].rect.width,
+            "dragging left must shrink the left pane"
+        );
+        assert_eq!(
+            after[0].rect.width + after[1].rect.width,
+            AREA.width,
+            "the panes must still tile the area exactly"
+        );
+    }
+
+    #[test]
+    fn a_dragged_border_stops_before_either_pane_vanishes() {
+        let mut t = Tiling::new();
+        t.split(Dir::Right);
+        let before = t.layout(AREA);
+        let handle = t.split_at(before[0].rect.right(), 1).expect("handle");
+
+        // Drag far past the left edge, and then far past the right.
+        t.drag(&handle, 0, 1);
+        let squeezed = t.layout(AREA);
+        assert!(squeezed[0].rect.width > 0 && squeezed[1].rect.width > 0);
+
+        t.drag(&handle, AREA.width * 2, 1);
+        let stretched = t.layout(AREA);
+        assert!(stretched[0].rect.width > 0 && stretched[1].rect.width > 0);
+    }
+
+    #[test]
+    fn a_horizontal_split_is_dragged_along_the_other_axis() {
+        let mut t = Tiling::new();
+        t.split(Dir::Down);
+        let before = t.layout(AREA);
+        let handle = t
+            .split_at(AREA.width / 2, before[0].rect.bottom())
+            .expect("handle");
+
+        assert!(t.drag(&handle, AREA.width / 2, AREA.height / 4));
+        let after = t.layout(AREA);
+        assert!(after[0].rect.height < before[0].rect.height);
+    }
+
+    #[test]
+    fn the_middle_of_a_pane_is_not_a_border() {
+        // Otherwise every click in a transcript would start a resize.
+        let mut t = Tiling::new();
+        t.split(Dir::Right);
+        let placements = t.layout(AREA);
+        let centre = placements[0].rect;
+        assert!(t
+            .split_at(centre.x + centre.width / 2, centre.y + centre.height / 2)
+            .is_none());
+    }
+
+    #[test]
+    fn a_single_pane_has_no_border_to_drag() {
+        let mut t = Tiling::new();
+        t.layout(AREA);
+        assert!(t.split_at(AREA.width / 2, AREA.height / 2).is_none());
+    }
+
+    #[test]
+    fn a_zoomed_tab_offers_no_borders() {
+        // The borders on screen belong to the zoomed pane, not to a split, and moving
+        // one would resize something the user cannot see.
+        let mut t = Tiling::new();
+        t.split(Dir::Right);
+        let placements = t.layout(AREA);
+        let seam = placements[0].rect.right();
+        assert!(t.split_at(seam, 1).is_some());
+
+        t.toggle_zoom();
+        t.layout(AREA);
+        assert!(t.split_at(seam, 1).is_none());
     }
 }

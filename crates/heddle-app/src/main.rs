@@ -366,6 +366,11 @@ fn handle_input(app: &mut App, event: Event) {
                 if app.click_bar(mouse.column, mouse.row) {
                     return;
                 }
+                // Then borders. A press on the seam between two panes is the start of a
+                // resize, not a click into whichever pane happens to own that cell.
+                if app.begin_drag(mouse.column, mouse.row) {
+                    return;
+                }
                 let room = app
                     .workspaces
                     .focused()
@@ -378,8 +383,16 @@ fn handle_input(app: &mut App, event: Event) {
                     app.focus_pane_id(id);
                 }
             }
-            MouseEventKind::ScrollUp => app.apply_action(keymap::Action::ScrollUp(3)),
-            MouseEventKind::ScrollDown => app.apply_action(keymap::Action::ScrollDown(3)),
+            MouseEventKind::Drag(MouseButton::Left) => app.drag_to(mouse.column, mouse.row),
+            MouseEventKind::Up(MouseButton::Left) => app.end_drag(),
+            // Scrolling mid-drag would fight the resize, and a wheel event is not a
+            // reason to let go of the border either.
+            MouseEventKind::ScrollUp if !app.is_dragging() => {
+                app.apply_action(keymap::Action::ScrollUp(3));
+            }
+            MouseEventKind::ScrollDown if !app.is_dragging() => {
+                app.apply_action(keymap::Action::ScrollDown(3));
+            }
             _ => {}
         },
         Event::Resize(..) => {}
