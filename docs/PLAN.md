@@ -97,7 +97,7 @@ attachment upload and download, room join / leave / invite.
 
 - [x] Crypto store wired to SQLite; device ID persisted across restarts
 - [ ] Encrypted send and receive; UTD (unable-to-decrypt) placeholder with retry
-- [ ] Interactive SAS emoji verification, both initiating and accepting
+- [x] Interactive SAS emoji verification, both initiating and accepting
 - [x] Cross-signing bootstrap on first login
 - [ ] `Recovery` — key backup enable, restore from recovery key, reset flow
 - [ ] Unverified-device shield warning surfaced at room and message level
