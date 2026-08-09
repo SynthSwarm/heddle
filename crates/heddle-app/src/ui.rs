@@ -3,7 +3,7 @@
 //! Pure layout and painting. All decisions live in [`crate::app`]; this module only
 //! turns state into cells.
 
-use crate::app::{App, Hit};
+use crate::app::{App, Hit, Pending};
 use crate::composer::Composer;
 use crate::keymap::{self, Mode};
 use heddle_matrix::SyncState;
@@ -54,10 +54,76 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_composer(frame, app, chunks[3]);
     draw_status(frame, app, chunks[4]);
 
+    if app.threads.is_some() {
+        draw_threads(frame, app, frame.area());
+    }
+
     // Last, so it sits above everything.
     if app.help {
         draw_help(frame, app, frame.area());
     }
+}
+
+/// The `<prefix> t` thread picker.
+///
+/// For a Hermes room this is the list of agent sessions, which is why it exists before
+/// any of the other overlays.
+fn draw_threads(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(picker) = &app.threads else {
+        return;
+    };
+
+    let width = (area.width * 3 / 4).clamp(20, area.width);
+    let height = ((picker.threads.len() + 2) as u16).clamp(4, area.height.min(20));
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let lines: Vec<Line> = if picker.loading {
+        vec![Line::from(Span::styled(
+            " listing threads…".to_owned(),
+            app.theme.dim_style(),
+        ))]
+    } else if picker.threads.is_empty() {
+        vec![Line::from(Span::styled(
+            " no threads in this room".to_owned(),
+            app.theme.dim_style(),
+        ))]
+    } else {
+        picker
+            .threads
+            .iter()
+            .enumerate()
+            .map(|(i, thread)| {
+                let marker = if i == picker.selected {
+                    "\u{258e}"
+                } else {
+                    " "
+                };
+                let style = if i == picker.selected {
+                    app.theme.accent_style()
+                } else {
+                    app.theme.dim_style()
+                };
+                Line::from(vec![
+                    Span::styled(marker.to_owned(), app.theme.accent_style()),
+                    Span::styled(format!("{:<12}", thread.sender_display), style),
+                    Span::styled(thread.preview.clone(), app.theme.dim_style()),
+                ])
+            })
+            .collect()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style(true))
+        .title(Span::styled(" threads ", app.theme.accent_style()));
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 /// How tall the composer needs to be, borders included.
@@ -316,12 +382,18 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let entries = app.focused_entries().to_vec();
-    let lines = heddle_render::transcript::render(
+    let selected = app.selected_event().map(ToOwned::to_owned);
+    let rendered = heddle_render::transcript::render(
         &entries,
         &app.theme,
         &app.render_options,
         &app.overrides,
+        selected.as_deref(),
     );
+    // Hand the anchors back so selection can scroll itself into view; only the renderer
+    // knows which row an event landed on.
+    app.anchors = rendered.anchors;
+    let lines = rendered.lines;
     let scroll = app
         .focused_view()
         .and_then(|v| app.scroll.get(&v).copied())
@@ -375,10 +447,14 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
-    let (label, style) = match app.mode {
-        Mode::Insert => ("insert", app.theme.accent_style()),
-        Mode::Prefix => ("prefix", app.theme.state(heddle_agent::AgentState::Blocked)),
-        Mode::Normal => ("normal", app.theme.dim_style()),
+    // What the composer is about to do outranks which mode it is in: sending an edit
+    // when you meant to send a message is not recoverable.
+    let (label, style) = match (&app.composing, app.mode) {
+        (Some(Pending::Reply(_)), _) => ("reply", app.theme.accent_style()),
+        (Some(Pending::Edit(_)), _) => ("edit", app.theme.state(heddle_agent::AgentState::Blocked)),
+        (None, Mode::Insert) => ("insert", app.theme.accent_style()),
+        (None, Mode::Prefix) => ("prefix", app.theme.state(heddle_agent::AgentState::Blocked)),
+        (None, Mode::Normal) => ("normal", app.theme.dim_style()),
     };
 
     let block = Block::default()

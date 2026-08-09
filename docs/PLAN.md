@@ -72,9 +72,9 @@ which is the wrong target: heddle is not a general chat client that happens to s
 agents, it is an agent client that happens to speak Matrix. Attachment upload would
 have landed before it was possible to open a single Hermes thread.
 
-- [ ] Composer: multi-line, cursor movement, per-room drafts, sent-message history
-- [ ] Edit (`m.replace`), redact, reply
-- [ ] Thread list per room; open a thread as its own pane
+- [x] Composer: multi-line, cursor movement, per-room drafts, sent-message history
+- [x] Edit (`m.replace`), redact, reply
+- [x] Thread list per room; open a thread as its own pane
 - [ ] Typing notifications out — inbound already drives agent state
 - [ ] Space enumeration via `m.space.child`, so workspaces stop being a single `~`
 - [ ] Fuzzy jump across workspace, room and thread

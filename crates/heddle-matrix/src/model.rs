@@ -129,6 +129,17 @@ impl View {
     }
 }
 
+/// One thread root, as listed in the thread picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadSummary {
+    /// Event ID of the root. This is the agent session key.
+    pub root_event_id: String,
+    pub sender_display: String,
+    /// First line of the root message.
+    pub preview: String,
+    pub timestamp: u64,
+}
+
 /// Sent from the app to the worker.
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -145,6 +156,27 @@ pub enum Command {
     SendMessage {
         view: View,
         body: String,
+    },
+    /// Send a message as a reply to an event.
+    SendReply {
+        view: View,
+        in_reply_to: String,
+        body: String,
+    },
+    /// Replace an event's content. Only own, editable events.
+    Edit {
+        view: View,
+        event_id: String,
+        body: String,
+    },
+    /// Redact an event.
+    Redact {
+        view: View,
+        event_id: String,
+    },
+    /// Ask for the room's thread roots.
+    ListThreads {
+        room_id: String,
     },
     /// React to an event. Used for approvals and the model picker as well as ordinary
     /// reactions, since that is how Hermes drives them.
@@ -178,6 +210,11 @@ pub enum WorkerEvent {
     Typing {
         room_id: String,
         users: Vec<String>,
+    },
+    /// A room's thread roots, newest first.
+    Threads {
+        room_id: String,
+        threads: Vec<ThreadSummary>,
     },
     /// Non-fatal; shown in the status line.
     Warning(String),

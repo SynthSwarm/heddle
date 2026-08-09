@@ -25,7 +25,6 @@ pub enum Mode {
 pub enum Action {
     // Modes
     EnterInsert,
-    EnterNormal,
 
     // Panes
     Split(Dir),
@@ -49,13 +48,24 @@ pub enum Action {
     ScrollBottom,
     ToggleCard,
 
+    // Messages
+    SelectOlder,
+    SelectNewer,
+    Reply,
+    EditMessage,
+    RedactMessage,
+    OpenThreads,
+    /// Confirm the highlighted item in whatever overlay is open.
+    Accept,
+    /// Abandon a reply, an edit, an armed redaction, or an overlay.
+    Cancel,
+
     // Prompts
     Approve,
     Deny,
 
     // Overlays
     ToggleHelp,
-    CloseHelp,
 
     /// Force a full repaint. The conventional terminal escape hatch for a screen that
     /// has been corrupted by something outside the application's control.
@@ -207,6 +217,11 @@ pub const BINDINGS: &[Binding] = &[
     b("enter", "send", false),
     b("shift+enter", "newline", false),
     b("esc", "normal mode", false),
+    b("K / J", "select older / newer message", false),
+    b("r", "reply to the selection", false),
+    b("e", "edit the selection", false),
+    b("D", "delete the selection (twice)", false),
+    b("enter", "open the highlighted item", false),
     b("y / n", "approve / deny", false),
     b("tab", "toggle tool card", false),
     b("j / k", "scroll", false),
@@ -224,6 +239,7 @@ pub const BINDINGS: &[Binding] = &[
     b("z", "zoom pane", true),
     b("x", "close pane", true),
     b("c", "new thread", true),
+    b("t", "thread picker", true),
     b("w", "workspace switcher", true),
     b("f", "fuzzy jump", true),
     b("?", "this help", true),
@@ -283,6 +299,7 @@ fn map_prefix(key: KeyEvent) -> Action {
 
         KeyCode::Char('n') => Action::NextTab,
         KeyCode::Char('p') => Action::PrevTab,
+        KeyCode::Char('t') => Action::OpenThreads,
         KeyCode::Char('w') => Action::WorkspaceSwitcher,
         KeyCode::Char('f') => Action::FuzzyJump,
         KeyCode::Char('?') | KeyCode::Char('/') => Action::ToggleHelp,
@@ -295,10 +312,17 @@ fn map_prefix(key: KeyEvent) -> Action {
 fn map_normal(key: KeyEvent) -> (Action, Mode) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        // Escape closes the help overlay. Harmless when nothing is open.
-        KeyCode::Esc => (Action::CloseHelp, Mode::Normal),
+        // Escape backs out of whatever is open. Harmless when nothing is.
+        KeyCode::Esc => (Action::Cancel, Mode::Normal),
         KeyCode::Char('i') => (Action::EnterInsert, Mode::Insert),
         KeyCode::Char(':') => (Action::CommandPalette, Mode::Normal),
+
+        KeyCode::Char('K') => (Action::SelectOlder, Mode::Normal),
+        KeyCode::Char('J') => (Action::SelectNewer, Mode::Normal),
+        KeyCode::Char('r') => (Action::Reply, Mode::Insert),
+        KeyCode::Char('e') => (Action::EditMessage, Mode::Insert),
+        KeyCode::Char('D') => (Action::RedactMessage, Mode::Normal),
+        KeyCode::Enter => (Action::Accept, Mode::Normal),
 
         KeyCode::Char('y') => (Action::Approve, Mode::Normal),
         KeyCode::Char('n') => (Action::Deny, Mode::Normal),
@@ -323,7 +347,7 @@ fn map_normal(key: KeyEvent) -> (Action, Mode) {
 fn map_insert(key: KeyEvent) -> (Action, Mode) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let action = match key.code {
-        KeyCode::Esc => return (Action::EnterNormal, Mode::Normal),
+        KeyCode::Esc => return (Action::Cancel, Mode::Normal),
 
         KeyCode::Backspace => Action::Backspace,
         KeyCode::Delete => Action::Delete,
@@ -475,7 +499,7 @@ mod tests {
             Mode::Insert,
             p,
         );
-        assert_eq!(action, Action::EnterNormal);
+        assert_eq!(action, Action::Cancel, "escape backs out of everything");
         assert_eq!(mode, Mode::Normal);
     }
 
@@ -527,7 +551,7 @@ mod tests {
                 p
             )
             .0,
-            Action::CloseHelp
+            Action::Cancel
         );
     }
 

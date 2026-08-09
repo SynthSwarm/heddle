@@ -33,6 +33,16 @@ impl Composer {
         &self.text
     }
 
+    /// Replace the whole buffer, putting the caret at the end.
+    ///
+    /// Used when an edit loads an existing message in for revision.
+    pub fn set_text(&mut self, text: &str) {
+        self.text = text.to_owned();
+        self.cursor = self.text.len();
+        self.browsing = None;
+        self.stashed = None;
+    }
+
     /// Caret position as (row, column), both measured for display.
     ///
     /// The column is a display width, not a character count, so the caret lands in the

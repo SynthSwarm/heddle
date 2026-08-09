@@ -18,7 +18,8 @@ pub mod session;
 pub mod worker;
 
 pub use model::{
-    AgentPayload, Command, Entry, EntryKind, Message, RoomSummary, SyncState, View, WorkerEvent,
+    AgentPayload, Command, Entry, EntryKind, Message, RoomSummary, SyncState, ThreadSummary, View,
+    WorkerEvent,
 };
 pub use session::{Paths, SavedSession, SessionError};
 pub use worker::{spawn, Handle};

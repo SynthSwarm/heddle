@@ -240,6 +240,66 @@ impl Worker {
                     .await?;
             }
 
+            Command::SendReply {
+                view,
+                in_reply_to,
+                body,
+            } => {
+                let timeline = self.timeline(&view)?;
+                let event_id = EventId::parse(in_reply_to.as_str())?;
+                timeline
+                    .send_reply(
+                        RoomMessageEventContent::text_markdown(&body).into(),
+                        event_id.to_owned(),
+                    )
+                    .await?;
+            }
+
+            Command::Edit {
+                view,
+                event_id,
+                body,
+            } => {
+                use matrix_sdk::room::edit::EditedContent;
+                let timeline = self.timeline(&view)?;
+                let event_id = EventId::parse(event_id.as_str())?;
+                let item = timeline
+                    .item_by_event_id(&event_id)
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("event {event_id} not in timeline"))?;
+                // The SDK rejects uneditable events, but failing here keeps the message
+                // in the composer rather than losing it to a round trip.
+                if !item.is_editable() {
+                    anyhow::bail!("that message cannot be edited");
+                }
+                timeline
+                    .edit(
+                        &item.identifier(),
+                        EditedContent::RoomMessage(
+                            RoomMessageEventContent::text_markdown(&body).into(),
+                        ),
+                    )
+                    .await?;
+            }
+
+            Command::Redact { view, event_id } => {
+                let timeline = self.timeline(&view)?;
+                let event_id = EventId::parse(event_id.as_str())?;
+                let item = timeline
+                    .item_by_event_id(&event_id)
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("event {event_id} not in timeline"))?;
+                timeline.redact(&item.identifier(), None).await?;
+            }
+
+            Command::ListThreads { room_id } => {
+                let threads = collect_threads(&self.room(&room_id)?).await?;
+                let _ = self
+                    .events
+                    .send(WorkerEvent::Threads { room_id, threads })
+                    .await;
+            }
+
             Command::ToggleReaction {
                 view,
                 event_id,
@@ -335,6 +395,44 @@ impl Worker {
         self.views.insert(view, OpenView { timeline, forward });
         Ok(())
     }
+}
+
+/// Fetch the room's thread roots for the picker.
+///
+/// The room timeline hides threaded events, so threads are invisible from it by design.
+/// This is the only way to discover them, and for a Hermes room it is the list of agent
+/// sessions.
+async fn collect_threads(room: &Room) -> anyhow::Result<Vec<ThreadSummary>> {
+    use matrix_sdk::room::ListThreadsOptions;
+    use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
+
+    let roots = room.list_threads(ListThreadsOptions::default()).await?;
+
+    let mut out = Vec::with_capacity(roots.chunk.len());
+    for event in roots.chunk {
+        let Ok(parsed) = event.raw().deserialize() else {
+            continue;
+        };
+        let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(message)) =
+            parsed
+        else {
+            continue;
+        };
+        let Some(original) = message.as_original() else {
+            continue;
+        };
+
+        let sender = message.sender().to_owned();
+        let body = original.content.body();
+        out.push(ThreadSummary {
+            root_event_id: message.event_id().to_string(),
+            sender_display: sender.localpart().to_owned(),
+            // One line: the picker is a list, not a transcript.
+            preview: body.lines().next().unwrap_or_default().trim().to_owned(),
+            timestamp: u64::from(message.origin_server_ts().0),
+        });
+    }
+    Ok(out)
 }
 
 /// Build the room list the app renders.

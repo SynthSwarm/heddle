@@ -33,16 +33,68 @@ impl Default for Options {
     }
 }
 
+/// Where an event begins in the rendered output.
+///
+/// Selection and scroll-to-selection need to map an event id to a row, and only the
+/// renderer knows how many rows anything occupied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchor {
+    pub event_id: String,
+    /// Row of the event's first line, before wrapping.
+    pub row: u16,
+}
+
+/// A rendered transcript, plus the index needed to navigate it.
+#[derive(Debug, Clone, Default)]
+pub struct Rendered {
+    pub lines: Vec<Line<'static>>,
+    pub anchors: Vec<Anchor>,
+}
+
+/// Marker drawn in the left gutter of the selected event.
+const SELECTION_MARK: &str = "\u{258e}";
+
 /// Render a whole transcript.
+///
+/// Every line carries a one-column gutter, marked on the selected event. A gutter on
+/// every line rather than an indent on one keeps the text aligned regardless of what is
+/// selected, so selecting does not reflow the transcript.
 pub fn render(
     entries: &[Entry],
     theme: &Theme,
     options: &Options,
     overrides: &Overrides,
-) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
+    selected: Option<&str>,
+) -> Rendered {
+    let mut out = Rendered::default();
     for entry in entries {
-        out.extend(render_entry(entry, theme, options, overrides));
+        let is_selected = entry
+            .event_id
+            .as_deref()
+            .is_some_and(|id| Some(id) == selected);
+        let body = render_entry(entry, theme, options, overrides);
+        if body.is_empty() {
+            continue;
+        }
+
+        if let Some(event_id) = &entry.event_id {
+            out.anchors.push(Anchor {
+                event_id: event_id.clone(),
+                row: out.lines.len() as u16,
+            });
+        }
+
+        let gutter = if is_selected {
+            Span::styled(SELECTION_MARK.to_owned(), theme.accent_style())
+        } else {
+            Span::raw(" ")
+        };
+        for line in body {
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            spans.push(gutter.clone());
+            spans.extend(line.spans);
+            out.lines.push(Line::from(spans));
+        }
     }
     out
 }
@@ -262,8 +314,9 @@ mod tests {
     use super::*;
     use heddle_agent::{Tool, ToolStatus};
 
-    fn text_of(lines: &[Line<'static>]) -> String {
-        lines
+    fn text_of(rendered: &Rendered) -> String {
+        rendered
+            .lines
             .iter()
             .map(|l| {
                 l.spans
@@ -300,6 +353,7 @@ mod tests {
             &Theme::default(),
             &Options::default(),
             &Overrides::new(),
+            None,
         );
         let text = text_of(&out);
         assert!(text.contains("hermes"), "{text}");
@@ -338,6 +392,7 @@ mod tests {
             &Theme::default(),
             &Options::default(),
             &Overrides::new(),
+            None,
         );
         let text = text_of(&out);
         assert!(text.contains("bash"), "{text}");
@@ -382,12 +437,13 @@ mod tests {
             &theme,
             &Options::default(),
             &Overrides::new(),
+            None,
         );
         assert!(!text_of(&collapsed).contains("the body"));
 
         let mut overrides = Overrides::new();
         overrides.insert(("$e1".into(), 0), true);
-        let expanded = render(&[entry], &theme, &Options::default(), &overrides);
+        let expanded = render(&[entry], &theme, &Options::default(), &overrides, None);
         assert!(text_of(&expanded).contains("the body"));
     }
 
@@ -413,6 +469,7 @@ mod tests {
             &Theme::default(),
             &Options::default(),
             &Overrides::new(),
+            None,
         );
         let text = text_of(&out);
         assert!(text.contains('~'), "degradation must be visible: {text}");
@@ -444,6 +501,7 @@ mod tests {
             &theme,
             &Options::default(),
             &Overrides::new(),
+            None,
         );
         assert!(text_of(&shown).contains("thinking about it"));
 
@@ -455,6 +513,7 @@ mod tests {
                 ..Options::default()
             },
             &Overrides::new(),
+            None,
         );
         assert!(!text_of(&hidden).contains("thinking about it"));
     }
@@ -471,6 +530,7 @@ mod tests {
             &Theme::default(),
             &Options::default(),
             &Overrides::new(),
+            None,
         );
         assert!(text_of(&out).contains("unable to decrypt"));
     }
@@ -487,10 +547,68 @@ mod tests {
     }
 
     #[test]
-    fn empty_notices_produce_no_rows() {
+    fn events_are_anchored_to_their_first_row() {
+        let entries = vec![message(AgentPayload::None), {
+            let mut e = message(AgentPayload::None);
+            e.event_id = Some("$e2".into());
+            e
+        }];
+        let out = render(
+            &entries,
+            &Theme::default(),
+            &Options::default(),
+            &Overrides::new(),
+            None,
+        );
+        assert_eq!(out.anchors.len(), 2);
+        assert_eq!(out.anchors[0].row, 0);
+        assert!(
+            out.anchors[1].row > 0,
+            "the second event must start below the first"
+        );
+        assert_eq!(out.anchors[1].event_id, "$e2");
+    }
+
+    #[test]
+    fn selection_marks_the_gutter_without_reflowing_text() {
+        let entry = message(AgentPayload::None);
+        let theme = Theme::default();
+
+        let plain = render(
+            std::slice::from_ref(&entry),
+            &theme,
+            &Options::default(),
+            &Overrides::new(),
+            None,
+        );
+        let picked = render(
+            &[entry],
+            &theme,
+            &Options::default(),
+            &Overrides::new(),
+            Some("$e1"),
+        );
+
+        assert_eq!(
+            plain.lines.len(),
+            picked.lines.len(),
+            "selecting must not change the line count"
+        );
+        // Every line carries a gutter, so the body starts in the same column either way.
+        for (a, b) in plain.lines.iter().zip(&picked.lines) {
+            assert_eq!(a.spans.len(), b.spans.len());
+        }
+        assert!(text_of(&picked).contains(SELECTION_MARK));
+        assert!(!text_of(&plain).contains(SELECTION_MARK));
+    }
+
+    #[test]
+    fn entries_that_render_nothing_are_not_anchored() {
+        // An empty notice produces no rows, so selecting it would move the caret to a
+        // row that does not exist.
         let entry = Entry {
             id: "i".into(),
-            event_id: None,
+            event_id: Some("$empty".into()),
             kind: EntryKind::Notice(String::new()),
         };
         let out = render(
@@ -498,7 +616,8 @@ mod tests {
             &Theme::default(),
             &Options::default(),
             &Overrides::new(),
+            None,
         );
-        assert!(out.is_empty());
+        assert!(out.anchors.is_empty());
     }
 }

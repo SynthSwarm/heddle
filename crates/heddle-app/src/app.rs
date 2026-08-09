@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::keymap::{Action, Mode, Prefix};
 use heddle_agent::{AgentState, AgentStore};
 use heddle_layout::{Dir, Pane, PaneId, PaneKind, Tab, Tiling, Workspaces, ORPHAN_WORKSPACE};
-use heddle_matrix::{Command, Entry, RoomSummary, SyncState, View, WorkerEvent};
+use heddle_matrix::{Command, Entry, RoomSummary, SyncState, ThreadSummary, View, WorkerEvent};
 use heddle_render::{Options, Overrides, Theme};
 use std::collections::{HashMap, HashSet};
 
@@ -23,6 +23,31 @@ const PAGINATE_MARGIN: u16 = 20;
 /// Maximum worker events folded into state per frame. Beyond this the rest wait for the
 /// next frame, so a sync burst cannot stall input.
 pub const EVENT_BUDGET: usize = 128;
+
+/// What the composer is about to do, when it is not sending a new message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pending {
+    /// Submit will reply to this event.
+    Reply(String),
+    /// Submit will replace this event's content.
+    Edit(String),
+}
+
+/// The open thread picker.
+#[derive(Debug, Clone, Default)]
+pub struct ThreadPicker {
+    pub room_id: String,
+    pub threads: Vec<ThreadSummary>,
+    pub selected: usize,
+    /// True until the worker answers, so the overlay can say so.
+    pub loading: bool,
+}
+
+impl ThreadPicker {
+    pub fn selected(&self) -> Option<&ThreadSummary> {
+        self.threads.get(self.selected)
+    }
+}
 
 /// A clickable cell on one of the bars, in absolute terminal columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +114,16 @@ pub struct App {
     pub bars: BarHits,
     /// Whether the `<prefix> ?` key overlay is showing.
     pub help: bool,
+    /// Selected message per view, by event id. Reply, edit and redact all act on it.
+    pub selected: HashMap<View, String>,
+    /// What the composer will do on submit, when it is not simply sending.
+    pub composing: Option<Pending>,
+    /// The room whose thread picker is open, if any.
+    pub threads: Option<ThreadPicker>,
+    /// Event armed for redaction, awaiting a confirming second keypress.
+    confirm_redact: Option<String>,
+    /// Row of each event in the focused transcript, recorded by the renderer.
+    pub anchors: Vec<heddle_render::transcript::Anchor>,
     /// Set when the terminal must be fully repainted rather than diffed.
     ///
     /// ratatui only rewrites cells it believes have changed. A glyph that paints wider
@@ -135,6 +170,11 @@ impl App {
             rendered_lines: 0,
             viewport_height: 0,
             bars: BarHits::default(),
+            selected: HashMap::new(),
+            composing: None,
+            threads: None,
+            confirm_redact: None,
+            anchors: Vec::new(),
             help: false,
             needs_redraw: false,
             should_quit: false,
@@ -199,6 +239,239 @@ impl App {
         }
     }
 
+    /// Event ids in the focused view that can be selected, oldest first.
+    ///
+    /// Entries that render nothing are excluded: selecting one would put the marker on
+    /// a row that does not exist.
+    fn selectable(&self) -> Vec<String> {
+        self.focused_view()
+            .and_then(|v| self.timelines.get(&v))
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(
+                        |e| !matches!(&e.kind, heddle_matrix::EntryKind::Notice(t) if t.is_empty()),
+                    )
+                    .filter_map(|e| e.event_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The selected event in the focused view.
+    pub fn selected_event(&self) -> Option<&str> {
+        let view = self.focused_view()?;
+        self.selected.get(&view).map(String::as_str)
+    }
+
+    /// Move the selection. `delta` is in messages; negative is towards older.
+    ///
+    /// With nothing selected, the first move selects the newest message, which is what
+    /// someone pressing "up" in a chat client means.
+    fn select_by(&mut self, delta: i32) {
+        let ids = self.selectable();
+        if ids.is_empty() {
+            return;
+        }
+        let Some(view) = self.focused_view() else {
+            return;
+        };
+
+        let current = self
+            .selected
+            .get(&view)
+            .and_then(|id| ids.iter().position(|c| c == id));
+
+        let next = match current {
+            None => ids.len() - 1,
+            Some(i) => (i as i32 + delta).clamp(0, ids.len() as i32 - 1) as usize,
+        };
+        self.selected.insert(view, ids[next].clone());
+        self.scroll_to_selection();
+    }
+
+    /// Scroll so the selected message is on screen.
+    ///
+    /// Uses the anchors the renderer recorded last frame; only it knows which row an
+    /// event landed on.
+    fn scroll_to_selection(&mut self) {
+        let Some(view) = self.focused_view() else {
+            return;
+        };
+        let Some(id) = self.selected.get(&view) else {
+            return;
+        };
+        let Some(row) = self
+            .anchors
+            .iter()
+            .find(|a| &a.event_id == id)
+            .map(|a| a.row)
+        else {
+            return;
+        };
+
+        let height = self.viewport_height.max(1);
+        let max = self.max_scroll();
+        let offset = max.saturating_sub(*self.scroll.get(&view).unwrap_or(&0));
+
+        // `scroll` counts from the bottom while anchors count from the top, so the
+        // conversion goes through `max`.
+        let wanted = if row < offset {
+            max.saturating_sub(row)
+        } else if row >= offset + height {
+            max.saturating_sub(row.saturating_sub(height - 1))
+        } else {
+            return;
+        };
+        self.scroll.insert(view, wanted.min(max));
+    }
+
+    /// Body of the selected message, for pre-filling the composer on edit.
+    fn selected_body(&self) -> Option<(String, bool)> {
+        let view = self.focused_view()?;
+        let id = self.selected.get(&view)?;
+        let entry = self
+            .timelines
+            .get(&view)?
+            .iter()
+            .find(|e| e.event_id.as_deref() == Some(id.as_str()))?;
+        match &entry.kind {
+            heddle_matrix::EntryKind::Message(m) => Some((m.body.clone(), m.is_own)),
+            _ => None,
+        }
+    }
+
+    /// Begin a reply to the selected message.
+    fn begin_reply(&mut self) {
+        let Some(id) = self.selected_event().map(ToOwned::to_owned) else {
+            self.status = Some("select a message first".into());
+            return;
+        };
+        self.composing = Some(Pending::Reply(id));
+        self.mode = Mode::Insert;
+    }
+
+    /// Begin editing the selected message, loading it into the composer.
+    fn begin_edit(&mut self) {
+        let Some(id) = self.selected_event().map(ToOwned::to_owned) else {
+            self.status = Some("select a message first".into());
+            return;
+        };
+        let Some((body, is_own)) = self.selected_body() else {
+            self.status = Some("that is not an editable message".into());
+            return;
+        };
+        // The server would reject it anyway; saying so now is cheaper and clearer.
+        if !is_own {
+            self.status = Some("you can only edit your own messages".into());
+            return;
+        }
+
+        if let Some(composer) = self.composer_mut() {
+            composer.set_text(&body);
+        }
+        self.composing = Some(Pending::Edit(id));
+        self.mode = Mode::Insert;
+    }
+
+    /// Redact the selected message. The first press arms, the second confirms.
+    fn redact_selected(&mut self) {
+        let Some(id) = self.selected_event().map(ToOwned::to_owned) else {
+            self.status = Some("select a message first".into());
+            return;
+        };
+        let Some(view) = self.focused_view() else {
+            return;
+        };
+
+        if self.confirm_redact.as_deref() == Some(id.as_str()) {
+            self.confirm_redact = None;
+            self.queue(Command::Redact { view, event_id: id });
+            self.status = Some("deleted".into());
+        } else {
+            // Redaction cannot be undone, so it does not get to be one keypress.
+            self.confirm_redact = Some(id);
+            self.status = Some("press D again to delete".into());
+        }
+    }
+
+    /// Abandon a reply, edit or arming redaction.
+    fn cancel_pending(&mut self) {
+        if self.composing.take().is_some() {
+            if let Some(composer) = self.composer_mut() {
+                composer.set_text("");
+            }
+        }
+        self.confirm_redact = None;
+    }
+
+    // ------------------------------------------------------------------- threads
+
+    /// Open the thread picker for the focused room and ask the worker to fill it.
+    fn open_thread_picker(&mut self) {
+        let Some(room_id) = self
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map(|t| t.room_id.clone())
+        else {
+            return;
+        };
+        self.threads = Some(ThreadPicker {
+            room_id: room_id.clone(),
+            threads: Vec::new(),
+            selected: 0,
+            loading: true,
+        });
+        self.queue(Command::ListThreads { room_id });
+    }
+
+    /// Open the highlighted thread as a pane beside the current one.
+    fn open_selected_thread(&mut self) {
+        let Some(picker) = &self.threads else {
+            return;
+        };
+        let Some(thread) = picker.selected() else {
+            self.status = Some("no thread selected".into());
+            return;
+        };
+        let root = thread.root_event_id.clone();
+        let title = if thread.preview.is_empty() {
+            thread.sender_display.clone()
+        } else {
+            thread.preview.clone()
+        };
+        self.threads = None;
+
+        let Some(room_id) = self
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map(|t| t.room_id.clone())
+        else {
+            return;
+        };
+
+        // A thread is a pane, so opening one is a split. That is the whole conceptual
+        // model: Space -> workspace, Room -> tab, Thread -> pane.
+        let Some(id) = self
+            .tilings
+            .entry(room_id.clone())
+            .or_default()
+            .split(Dir::Right)
+        else {
+            return;
+        };
+        if let Some(tab) = self
+            .workspaces
+            .focused_mut()
+            .and_then(Workspace_focused_tab_mut)
+        {
+            tab.push_pane(Pane::new(id, PaneKind::Thread { room_id, root }, title));
+        }
+        self.focus_moved();
+    }
+
     // ---------------------------------------------------------------- worker events
 
     pub fn apply_worker_event(&mut self, event: WorkerEvent) {
@@ -232,6 +505,18 @@ impl App {
                     }
                 }
                 self.refresh_pane_states();
+            }
+
+            WorkerEvent::Threads { room_id, threads } => {
+                // Ignore a late answer for a picker the user has already closed or
+                // reopened elsewhere.
+                if let Some(picker) = &mut self.threads {
+                    if picker.room_id == room_id {
+                        picker.threads = threads;
+                        picker.selected = 0;
+                        picker.loading = false;
+                    }
+                }
             }
 
             WorkerEvent::Warning(text) => self.status = Some(text),
@@ -354,12 +639,52 @@ impl App {
     // ---------------------------------------------------------------------- actions
 
     pub fn apply_action(&mut self, action: Action) {
+        // The thread picker owns navigation while it is open, so the same j/k that
+        // scroll a transcript walk the list instead of doing both at once.
+        if self.threads.is_some() {
+            match action {
+                Action::ScrollUp(_) | Action::SelectOlder => {
+                    if let Some(p) = &mut self.threads {
+                        p.selected = p.selected.saturating_sub(1);
+                    }
+                    return;
+                }
+                Action::ScrollDown(_) | Action::SelectNewer => {
+                    if let Some(p) = &mut self.threads {
+                        p.selected = (p.selected + 1).min(p.threads.len().saturating_sub(1));
+                    }
+                    return;
+                }
+                Action::Accept => {
+                    self.open_selected_thread();
+                    return;
+                }
+                Action::Cancel | Action::OpenThreads => {
+                    self.threads = None;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match action {
             Action::None => {}
             Action::Quit => self.should_quit = true,
 
             Action::EnterInsert => self.mode = Mode::Insert,
-            Action::EnterNormal => self.mode = Mode::Normal,
+
+            Action::SelectOlder => self.select_by(-1),
+            Action::SelectNewer => self.select_by(1),
+            Action::Reply => self.begin_reply(),
+            Action::EditMessage => self.begin_edit(),
+            Action::RedactMessage => self.redact_selected(),
+            Action::OpenThreads => self.open_thread_picker(),
+            Action::Accept => {}
+            Action::Cancel => {
+                self.help = false;
+                self.cancel_pending();
+                self.mode = Mode::Normal;
+            }
 
             Action::Insert(c) => {
                 if let Some(composer) = self.composer_mut() {
@@ -452,7 +777,6 @@ impl App {
             Action::Deny => self.resolve_prompt(false),
 
             Action::ToggleHelp => self.help = !self.help,
-            Action::CloseHelp => self.help = false,
             Action::Redraw => self.needs_redraw = true,
 
             Action::WorkspaceSwitcher | Action::FuzzyJump | Action::CommandPalette => {
@@ -471,7 +795,21 @@ impl App {
         let Some(body) = self.composers.entry(view.clone()).or_default().take() else {
             return;
         };
-        self.queue(Command::SendMessage { view, body });
+
+        let command = match self.composing.take() {
+            Some(Pending::Reply(in_reply_to)) => Command::SendReply {
+                view,
+                in_reply_to,
+                body,
+            },
+            Some(Pending::Edit(event_id)) => Command::Edit {
+                view,
+                event_id,
+                body,
+            },
+            None => Command::SendMessage { view, body },
+        };
+        self.queue(command);
     }
 
     fn focused_tiling_mut(&mut self) -> Option<&mut Tiling> {
@@ -1484,6 +1822,245 @@ mod tests {
         assert_eq!(app.composer().expect("composer").caret().0, 0);
     }
 
+    /// A plain message from someone else.
+    fn their_message(event_id: &str, body: &str) -> Entry {
+        Entry {
+            id: event_id.into(),
+            event_id: Some(event_id.into()),
+            kind: EntryKind::Message(Message {
+                sender: "@someone:x".into(),
+                sender_display: "someone".into(),
+                body: body.into(),
+                timestamp: 0,
+                is_own: false,
+                is_edited: false,
+                thread_root: None,
+                reactions: Vec::new(),
+                agent: AgentPayload::None,
+            }),
+        }
+    }
+
+    /// A plain message from the local user.
+    fn my_message(event_id: &str, body: &str) -> Entry {
+        let mut entry = their_message(event_id, body);
+        if let EntryKind::Message(m) = &mut entry.kind {
+            m.is_own = true;
+            m.sender_display = "quintin".into();
+        }
+        entry
+    }
+
+    /// An app with two messages loaded in the focused room.
+    fn app_with_messages() -> App {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: vec![
+                their_message("$theirs", "hello there"),
+                my_message("$mine", "my own words"),
+            ],
+        });
+        let _ = app.take_commands();
+        app
+    }
+
+    #[test]
+    fn selection_starts_at_the_newest_message_and_walks_back() {
+        let mut app = app_with_messages();
+        assert_eq!(app.selected_event(), None);
+
+        app.apply_action(Action::SelectOlder);
+        assert_eq!(
+            app.selected_event(),
+            Some("$mine"),
+            "the first move selects the newest, which is what `up` means in a chat"
+        );
+
+        app.apply_action(Action::SelectOlder);
+        assert_eq!(app.selected_event(), Some("$theirs"));
+
+        app.apply_action(Action::SelectOlder);
+        assert_eq!(
+            app.selected_event(),
+            Some("$theirs"),
+            "selection must clamp at the oldest rather than wrap"
+        );
+
+        app.apply_action(Action::SelectNewer);
+        assert_eq!(app.selected_event(), Some("$mine"));
+    }
+
+    #[test]
+    fn replying_sends_a_reply_not_a_message() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectOlder);
+        app.apply_action(Action::Reply);
+        assert_eq!(app.composing, Some(Pending::Reply("$mine".into())));
+
+        type_into(&mut app, "quite so");
+        app.apply_action(Action::Submit);
+
+        match app.take_commands().as_slice() {
+            [Command::SendReply {
+                in_reply_to, body, ..
+            }] => {
+                assert_eq!(in_reply_to, "$mine");
+                assert_eq!(body, "quite so");
+            }
+            other => panic!("expected SendReply, got {other:?}"),
+        }
+        assert_eq!(app.composing, None, "the reply target must not persist");
+    }
+
+    #[test]
+    fn editing_loads_the_message_and_sends_a_replacement() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectOlder);
+        app.apply_action(Action::EditMessage);
+
+        assert_eq!(
+            app.composer().expect("composer").text(),
+            "my own words",
+            "editing must load the existing text, not start blank"
+        );
+
+        type_into(&mut app, "!");
+        app.apply_action(Action::Submit);
+        match app.take_commands().as_slice() {
+            [Command::Edit { event_id, body, .. }] => {
+                assert_eq!(event_id, "$mine");
+                assert_eq!(body, "my own words!");
+            }
+            other => panic!("expected Edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_peoples_messages_cannot_be_edited() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectOlder);
+        app.apply_action(Action::SelectOlder);
+        assert_eq!(app.selected_event(), Some("$theirs"));
+
+        app.apply_action(Action::EditMessage);
+        assert_eq!(app.composing, None, "no edit may be armed");
+        assert!(app.status.as_deref().is_some_and(|s| s.contains("own")));
+        assert!(app.composer().map(Composer::text).unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn redaction_needs_confirming() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectOlder);
+
+        app.apply_action(Action::RedactMessage);
+        assert!(
+            app.take_commands().is_empty(),
+            "one keypress must not delete anything"
+        );
+
+        app.apply_action(Action::RedactMessage);
+        match app.take_commands().as_slice() {
+            [Command::Redact { event_id, .. }] => assert_eq!(event_id, "$mine"),
+            other => panic!("expected Redact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn escape_disarms_a_redaction() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectOlder);
+        app.apply_action(Action::RedactMessage);
+        app.apply_action(Action::Cancel);
+
+        app.apply_action(Action::RedactMessage);
+        assert!(
+            app.take_commands().is_empty(),
+            "cancelling must reset the confirmation, not leave it armed"
+        );
+    }
+
+    #[test]
+    fn escape_abandons_a_reply_and_clears_the_draft() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectOlder);
+        app.apply_action(Action::Reply);
+        type_into(&mut app, "never mind");
+
+        app.apply_action(Action::Cancel);
+        assert_eq!(app.composing, None);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.composer().map(Composer::text).unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn the_thread_picker_asks_the_worker_and_opens_a_pane() {
+        let mut app = app();
+        app.apply_action(Action::OpenThreads);
+        match app.take_commands().as_slice() {
+            [Command::ListThreads { room_id }] => assert_eq!(room_id, "!r:x"),
+            other => panic!("expected ListThreads, got {other:?}"),
+        }
+        assert!(app.threads.as_ref().expect("picker").loading);
+
+        app.apply_worker_event(WorkerEvent::Threads {
+            room_id: "!r:x".into(),
+            threads: vec![ThreadSummary {
+                root_event_id: "$root".into(),
+                sender_display: "hermes".into(),
+                preview: "fix auth".into(),
+                timestamp: 0,
+            }],
+        });
+        assert!(!app.threads.as_ref().expect("picker").loading);
+
+        let panes_before = app
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map_or(0, |t| t.panes.len());
+
+        app.apply_action(Action::Accept);
+        assert!(app.threads.is_none(), "opening must close the picker");
+
+        let tab = app
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab");
+        assert_eq!(tab.panes.len(), panes_before + 1);
+        assert_eq!(
+            app.focused_view(),
+            Some(View::thread("!r:x", "$root")),
+            "a thread opens as its own pane, focused"
+        );
+    }
+
+    #[test]
+    fn a_stale_thread_answer_is_ignored() {
+        let mut app = app();
+        app.apply_action(Action::OpenThreads);
+        let _ = app.take_commands();
+
+        app.apply_worker_event(WorkerEvent::Threads {
+            room_id: "!somewhere-else:x".into(),
+            threads: vec![ThreadSummary {
+                root_event_id: "$x".into(),
+                sender_display: "x".into(),
+                preview: "x".into(),
+                timestamp: 0,
+            }],
+        });
+        let picker = app.threads.as_ref().expect("picker");
+        assert!(picker.threads.is_empty());
+        assert!(
+            picker.loading,
+            "a late answer for another room must not land"
+        );
+    }
+
     #[test]
     fn a_fatal_worker_error_quits() {
         let mut app = app();
@@ -1582,7 +2159,7 @@ mod tests {
         assert!(!app.help);
 
         app.apply_action(Action::ToggleHelp);
-        app.apply_action(Action::CloseHelp);
+        app.apply_action(Action::Cancel);
         assert!(!app.help, "escape must close the overlay");
     }
 
