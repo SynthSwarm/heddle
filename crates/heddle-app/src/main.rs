@@ -259,8 +259,22 @@ async fn event_loop(
         // A full clear discards ratatui's diff state, forcing every cell to be written
         // again. Needed when the screen and ratatui's model of it have diverged; see
         // App::focus_moved.
+        //
+        // Deliberately not `Terminal::clear`, which first reads the cursor position back
+        // from the terminal: it writes `ESC[6n` and waits for the reply to arrive on
+        // stdin. heddle's own `EventStream` owns stdin, so it swallows that reply as an
+        // ordinary input event, crossterm times out after two seconds and the error
+        // takes the whole app down. The round trip buys nothing here -- the next line
+        // redraws every cell and `ui::draw` places the cursor itself -- so the buffer is
+        // reset directly and the clear is issued as a plain escape sequence.
         if app.needs_redraw {
-            terminal.clear()?;
+            crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+            )?;
+            // Resets the "previous" buffer, so the next draw diffs against a blank slate
+            // and rewrites every cell.
+            terminal.swap_buffers();
             app.needs_redraw = false;
         }
         terminal.draw(|frame| ui::draw(frame, app))?;
