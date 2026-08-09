@@ -638,7 +638,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             // A padlock says "encrypted", which is not the same as "trustworthy", and
             // a room can be both encrypted and carrying messages we cannot vouch for.
             if app.unverified_rooms.contains(&tab.room_id) {
-                label.push_str(" !");
+                label.push_str(" ⛔");
             }
             if tab.highlight_count > 0 {
                 label.push_str(&format!(" ({})", tab.highlight_count));

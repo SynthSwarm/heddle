@@ -282,7 +282,25 @@ fn sender_line(message: &Message, theme: &Theme, mark_degraded: bool) -> Line<'s
         theme.accent_style()
     };
 
-    let mut spans = vec![Span::styled(message.sender_display.clone(), style)];
+    // Who is speaking, at a glance. In a client where half the participants are agents,
+    // the distinction is worth more than a name alone: it is the difference between a
+    // colleague and a process, and the eye finds a glyph before it reads a word.
+    //
+    // Every emoji here is East_Asian_Width=Wide. That is not decoration policy, it is a
+    // correctness requirement: `unicode-width` reports Neutral emoji as one cell while
+    // terminals paint two, and a sender line that measures short leaves stale cells the
+    // renderer believes are already correct. The obvious glyphs for this job -- ⚠ and
+    // 🛡 -- are both Neutral, and both would rot the transcript.
+    let who = if message.agent.is_agent() {
+        "🤖"
+    } else {
+        "👤"
+    };
+
+    let mut spans = vec![
+        Span::styled(format!("{who} "), theme.dim_style()),
+        Span::styled(message.sender_display.clone(), style),
+    ];
     if mark_degraded {
         spans.push(Span::styled(" ~".to_owned(), theme.dim_style()));
     }
@@ -290,18 +308,16 @@ fn sender_line(message: &Message, theme: &Theme, mark_degraded: bool) -> Line<'s
         spans.push(Span::styled(" (edited)".to_owned(), theme.dim_style()));
     }
     // Beside the name, because a shield is a statement about who sent this, and the name
-    // is the claim it qualifies. The reason is spelled out rather than left to a glyph:
-    // a symbol the user has to remember the meaning of is a symbol they will read as
-    // decoration. `!` and `?` rather than coloured shields, so the distinction survives
-    // a monochrome terminal.
+    // is the claim it qualifies. The reason stays spelled out: a glyph alone gets read as
+    // decoration, and the user is owed the specific meaning of "unverified".
     match message.shield {
         Shield::None => {}
         Shield::Warning(reason) => spans.push(Span::styled(
-            format!("  ! {}", reason.describe()),
+            format!("  ⛔ {}", reason.describe()),
             theme.error_style(),
         )),
         Shield::Caution(reason) => spans.push(Span::styled(
-            format!("  ? {}", reason.describe()),
+            format!("  ❓ {}", reason.describe()),
             theme.dim_style(),
         )),
     }
@@ -574,6 +590,61 @@ mod tests {
             None,
         );
         assert!(!text_of(&hidden).contains("thinking about it"));
+    }
+
+    #[test]
+    fn every_glyph_the_transcript_prints_is_measured_as_it_is_painted() {
+        use unicode_width::UnicodeWidthStr;
+
+        // `unicode-width` reports East_Asian_Width=Neutral emoji as one cell while every
+        // terminal heddle targets paints them as two. A glyph that measures short leaves
+        // cells the renderer believes are already correct, so they are never repainted
+        // and the transcript rots as it scrolls.
+        //
+        // The tempting glyphs for a security warning -- ⚠ and 🛡 -- are both Neutral.
+        // This test exists because the next person to reach for one will not know that.
+        for glyph in ["👤", "🤖", "⛔", "❓", "🔒"] {
+            assert_eq!(
+                UnicodeWidthStr::width(glyph),
+                2,
+                "{glyph} is not measured as two cells; it will desynchronise the renderer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shield_names_its_reason_rather_than_relying_on_the_glyph() {
+        let mut entry = message(AgentPayload::None);
+        if let EntryKind::Message(m) = &mut entry.kind {
+            m.shield = Shield::Warning(heddle_matrix::ShieldReason::UnsignedDevice);
+        }
+        let out = render(
+            std::slice::from_ref(&entry),
+            &Theme::default(),
+            &Options::default(),
+            &Overrides::new(),
+            None,
+        );
+        let text = text_of(&out);
+
+        assert!(text.contains("⛔"));
+        assert!(
+            text.contains("unverified device"),
+            "a glyph on its own gets read as decoration"
+        );
+    }
+
+    #[test]
+    fn a_human_and_an_agent_are_told_apart_at_a_glance() {
+        let human = message(AgentPayload::None);
+        let out = render(
+            std::slice::from_ref(&human),
+            &Theme::default(),
+            &Options::default(),
+            &Overrides::new(),
+            None,
+        );
+        assert!(text_of(&out).contains("👤"));
     }
 
     #[test]
