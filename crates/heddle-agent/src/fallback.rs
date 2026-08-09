@@ -40,8 +40,12 @@ pub struct Parsed {
 
 impl Parsed {
     /// Whether anything agent-shaped was recovered.
+    ///
+    /// Tool chrome only. A fenced code block is not evidence of an agent — humans post
+    /// code too — and treating one as evidence routed ordinary messages down the lossy
+    /// path and stamped them with the `~` degraded marker.
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty() && self.blocks.is_empty()
+        self.tools.is_empty()
     }
 }
 

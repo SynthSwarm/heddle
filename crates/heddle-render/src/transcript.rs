@@ -162,11 +162,25 @@ fn render_message(
                 out.push(sender_line(message, theme, options.mark_degraded));
                 out.extend(markdown(&parsed.prose));
             }
+            // The parser lifts fenced blocks out of the prose. Putting them back is not
+            // optional: an agent reply is mostly code, so dropping the blocks dropped
+            // most of the message.
+            for block in &parsed.blocks {
+                out.extend(code_block(block));
+            }
         }
         AgentPayload::None => {
             out.push(sender_line(message, theme, false));
             out.extend(markdown(&message.body));
         }
+    }
+
+    // Never render a message as nothing. Any path that yields no lines — an event kind
+    // we do not draw, a parse that swallowed the text — would drop the message from the
+    // transcript silently, which reads as the agent having said nothing at all.
+    if out.is_empty() && !message.body.trim().is_empty() {
+        out.push(sender_line(message, theme, false));
+        out.extend(markdown(&message.body));
     }
 
     if !message.reactions.is_empty() {
@@ -284,6 +298,12 @@ fn reaction_line(message: &Message, theme: &Theme) -> Line<'static> {
         spans.push(Span::styled(format!("{key} {count}  "), theme.dim_style()));
     }
     Line::from(spans)
+}
+
+/// Render a recovered code block, re-fenced so it is highlighted like any other.
+fn code_block(block: &heddle_agent::fallback::CodeBlock) -> Vec<Line<'static>> {
+    let lang = block.lang.clone().unwrap_or_default();
+    markdown(&format!("```{lang}\n{}\n```", block.body))
 }
 
 /// Render markdown to styled lines.
@@ -624,6 +644,77 @@ mod tests {
     }
 
     #[test]
+    fn code_blocks_survive_the_fallback_parser() {
+        // The parser lifts fenced blocks out of the prose. They were then never drawn,
+        // so an agent reply that was mostly code arrived almost empty.
+        let mut parsed = heddle_agent::fallback::Parsed {
+            prose: "here is the fix".into(),
+            ..Default::default()
+        };
+        parsed.tools.push(Tool {
+            name: "edit".into(),
+            index: 0,
+            args: None,
+            preview: Some("x.rs".into()),
+            status: ToolStatus::Ok,
+            duration_ms: None,
+            mime: None,
+            body: None,
+            truncated: false,
+        });
+        parsed.blocks.push(heddle_agent::fallback::CodeBlock {
+            lang: Some("rust".into()),
+            body: "fn verify() {}".into(),
+        });
+
+        let out = render(
+            &[message(AgentPayload::Degraded(parsed))],
+            &Theme::default(),
+            &Options::default(),
+            &Overrides::new(),
+            None,
+        );
+        let text = text_of(&out);
+        assert!(text.contains("here is the fix"), "{text}");
+        assert!(
+            text.contains("fn verify()"),
+            "the code must not vanish: {text}"
+        );
+    }
+
+    #[test]
+    fn a_message_is_never_rendered_as_nothing() {
+        // An agent event kind we do not draw must not swallow the message with it.
+        let event = AgentEvent {
+            v: 1,
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            seq: 1,
+            kind: Kind::MessageStop,
+            agent: None,
+            text: None,
+            final_: None,
+            tool: None,
+            notice: None,
+            approval: None,
+            picker: None,
+            usage: None,
+        };
+        let out = render(
+            &[message(AgentPayload::Structured(Box::new(event)))],
+            &Theme::default(),
+            &Options::default(),
+            &Overrides::new(),
+            None,
+        );
+        assert!(
+            text_of(&out).contains("hello"),
+            "the body must survive an undrawn event kind: {}",
+            text_of(&out)
+        );
+    }
+
+    #[test]
     fn entries_that_render_nothing_are_not_anchored() {
         // An empty notice produces no rows, so selecting it would move the caret to a
         // row that does not exist.
@@ -640,5 +731,16 @@ mod tests {
             None,
         );
         assert!(out.anchors.is_empty());
+    }
+
+    #[test]
+    fn a_human_posting_code_is_not_an_agent() {
+        // Fenced code is not evidence of an agent. Treating it as evidence sent plain
+        // messages down the lossy path and stamped them with the degraded marker.
+        let parsed = heddle_agent::fallback::parse("look:\n```sh\nls -la\n```\n");
+        assert!(
+            parsed.is_empty(),
+            "code alone must not count as agent chrome: {parsed:?}"
+        );
     }
 }
