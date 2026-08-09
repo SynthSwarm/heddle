@@ -6,6 +6,7 @@
 use crate::app::{App, Hit, Pending, RecoveryPanel};
 use crate::composer::Composer;
 use crate::keymap::{self, Mode};
+use crate::palette::keys_for;
 use heddle_agent::AgentState;
 use heddle_matrix::{SyncState, View};
 use heddle_render::transcript::Anchor;
@@ -62,6 +63,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.emoji.is_some() {
         draw_emoji(frame, app, frame.area());
+    }
+
+    if app.palette.is_some() {
+        draw_palette(frame, app, frame.area());
     }
 
     // Last, so it sits above everything.
@@ -492,6 +497,75 @@ fn draw_emoji(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(app.theme.border_style(true))
         .title(Span::styled(title, app.theme.accent_style()));
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// The command palette, for `:`.
+///
+/// Each row carries the key that does the same thing, so that the palette is a way of
+/// learning the bindings rather than a permanent substitute for them. Keys are written
+/// with the configured prefix rather than a hardcoded `^a`, since a custom `ui.prefix`
+/// would otherwise be taught wrongly on every row.
+fn draw_palette(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(palette) = &app.palette else {
+        return;
+    };
+
+    let width = (area.width * 2 / 3).clamp(30, area.width);
+    let rows = palette.matches.len().clamp(1, crate::palette::MAX_ROWS);
+    // Query line, list, borders.
+    let height = (rows as u16 + 3).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled(":".to_owned(), app.theme.accent_style()),
+        Span::styled(palette.query.clone(), app.theme.accent_style()),
+        // A block caret, so an empty query still shows where typing goes.
+        Span::styled("\u{2588}".to_owned(), app.theme.dim_style()),
+    ])];
+
+    if palette.matches.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " nothing matches".to_owned(),
+            app.theme.dim_style(),
+        )));
+    } else {
+        // Widest key column, so the names line up without a fixed guess that a custom
+        // prefix would overflow.
+        let key_width = palette
+            .visible(rows)
+            .map(|(command, _)| UnicodeWidthStr::width(keys_for(command, app.prefix).as_str()))
+            .max()
+            .unwrap_or(0);
+
+        for (command, is_selected) in palette.visible(rows) {
+            let (marker, style) = if is_selected {
+                ("\u{258e}", app.theme.accent_style())
+            } else {
+                (" ", app.theme.dim_style())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker.to_owned(), app.theme.accent_style()),
+                Span::styled(
+                    format!("{:<key_width$}  ", keys_for(command, app.prefix)),
+                    app.theme.dim_style(),
+                ),
+                Span::styled(command.name.to_owned(), style),
+            ]));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style(true))
+        .title(Span::styled(" commands ", app.theme.accent_style()));
 
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);

@@ -11,6 +11,7 @@ mod composer;
 mod config;
 mod emoji;
 mod keymap;
+mod palette;
 mod ui;
 
 use anyhow::{Context, Result};

@@ -6,6 +6,7 @@
 use crate::composer::Composer;
 use crate::config::Config;
 use crate::keymap::{Action, Mode, Prefix};
+use crate::palette::Palette;
 use heddle_agent::{AgentState, AgentStore};
 use heddle_layout::{
     Dir, Layout, Pane, PaneId, PaneKind, Tab, Tiling, Unread, Workspaces, ORPHAN_WORKSPACE,
@@ -182,6 +183,8 @@ pub struct App {
     pub threads: Option<ThreadPicker>,
     /// The open emoji picker, if any.
     pub emoji: Option<crate::emoji::Picker>,
+    /// The open command palette, if any.
+    pub palette: Option<Palette>,
     /// The interactive verification in progress, if any.
     pub verification: Option<Verification>,
     /// Whether this account's secrets are recoverable on a new device.
@@ -269,6 +272,7 @@ impl App {
             composing: None,
             threads: None,
             emoji: None,
+            palette: None,
             verification: None,
             device_verified: None,
             recovery: RecoveryState::Unknown,
@@ -1307,6 +1311,51 @@ impl App {
         self.mode = Mode::Normal;
     }
 
+    /// Route a key to the command palette.
+    fn palette_action(&mut self, action: Action) {
+        let Some(palette) = &mut self.palette else {
+            return;
+        };
+
+        match action {
+            Action::Insert(ch) => palette.push(ch),
+            Action::Backspace => palette.pop(),
+            // Arrows come through as caret movement, because the palette is typed into
+            // from insert mode; they are the only way to walk the list while the letters
+            // are all going into the query.
+            Action::CaretUp | Action::ScrollUp(_) => palette.up(),
+            Action::CaretDown | Action::ScrollDown(_) => palette.down(),
+            Action::Cancel | Action::CommandPalette => self.close_palette(),
+            Action::Submit | Action::Accept => self.run_chosen_command(),
+            _ => {}
+        }
+    }
+
+    /// Run the highlighted command, having first closed the palette.
+    ///
+    /// Closing first is not tidiness: the command is dispatched back through
+    /// `apply_action`, which checks for an open palette before anything else, so leaving
+    /// it open would feed the command straight back into the palette and do nothing.
+    fn run_chosen_command(&mut self) {
+        let Some(action) = self
+            .palette
+            .as_ref()
+            .and_then(|p| p.chosen())
+            .map(|c| c.action.clone())
+        else {
+            self.status = Some("no command selected".into());
+            self.close_palette();
+            return;
+        };
+        self.close_palette();
+        self.apply_action(action);
+    }
+
+    fn close_palette(&mut self) {
+        self.palette = None;
+        self.mode = Mode::Normal;
+    }
+
     pub fn apply_action(&mut self, action: Action) {
         // Verification is checked before every other overlay. The emoji on screen are a
         // security decision with a human at the other end, and any binding that fired
@@ -1329,6 +1378,14 @@ impl App {
         // belong to it while it is open.
         if self.emoji.is_some() {
             self.emoji_action(action);
+            return;
+        }
+
+        // The palette is a search box too, and for the same reason owns every key while
+        // it is open. It is checked before the thread picker only because the two can
+        // never be open at once.
+        if self.palette.is_some() {
+            self.palette_action(action);
             return;
         }
 
@@ -1529,9 +1586,17 @@ impl App {
                 self.focus_moved();
             }
 
-            Action::FuzzyJump | Action::CommandPalette => {
-                // Overlays land in M4 alongside the rest of the workspace UI.
-                self.status = Some("not implemented yet".into());
+            Action::FuzzyJump => {
+                // Jumping to a room or thread by name earns its keep across many
+                // Spaces; with a handful, `<prefix> w` and `<prefix> n` already reach
+                // everything. Deferred to M6 with the rest of the convenience work.
+                self.status = Some("fuzzy jump is not implemented yet".into());
+            }
+            Action::CommandPalette => {
+                self.palette = Some(Palette::new());
+                // The palette is a search box, so keys have to arrive as characters
+                // rather than as the commands they mean in normal mode.
+                self.mode = Mode::Insert;
             }
         }
     }
@@ -2434,6 +2499,138 @@ mod tests {
         // SPEC.md §2 names it `~`; a word here reads as a section heading instead.
         assert_eq!(app.workspaces.items[0].id, ORPHAN_WORKSPACE);
         assert_eq!(app.workspaces.items[0].title, ORPHAN_WORKSPACE);
+    }
+
+    // ------------------------------------------------------------------- palette
+
+    fn type_query(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            app.apply_action(Action::Insert(ch));
+        }
+    }
+
+    #[test]
+    fn the_palette_runs_the_command_it_is_showing() {
+        let mut app = app();
+        assert_eq!(
+            app.workspaces
+                .focused()
+                .expect("w")
+                .focused_tab()
+                .expect("t")
+                .panes
+                .len(),
+            1
+        );
+
+        app.apply_action(Action::CommandPalette);
+        assert!(app.palette.is_some());
+        assert_eq!(app.mode, Mode::Insert, "the palette is typed into");
+
+        type_query(&mut app, "split r");
+        assert_eq!(
+            app.palette
+                .as_ref()
+                .and_then(|p| p.chosen())
+                .expect("match")
+                .name,
+            "split right"
+        );
+
+        app.apply_action(Action::Submit);
+        assert!(
+            app.palette.is_none(),
+            "running a command closes the palette"
+        );
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.workspaces
+                .focused()
+                .expect("w")
+                .focused_tab()
+                .expect("t")
+                .panes
+                .len(),
+            2,
+            "the command must actually run, not merely be selected"
+        );
+    }
+
+    #[test]
+    fn the_palette_swallows_keys_that_mean_something_else() {
+        // `q` is quit and `j` selects a message. While the palette is open they are
+        // letters being typed into a search box and nothing more.
+        let mut app = app();
+        app.apply_action(Action::CommandPalette);
+        type_query(&mut app, "qj");
+
+        assert!(!app.should_quit);
+        assert_eq!(app.palette.as_ref().expect("open").query, "qj");
+    }
+
+    #[test]
+    fn escape_closes_the_palette_without_running_anything() {
+        let mut app = app();
+        app.apply_action(Action::CommandPalette);
+        type_query(&mut app, "quit");
+        app.apply_action(Action::Cancel);
+
+        assert!(app.palette.is_none());
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            !app.should_quit,
+            "cancelling must not run the highlighted row"
+        );
+    }
+
+    #[test]
+    fn submitting_a_query_that_matches_nothing_does_nothing() {
+        let mut app = app();
+        app.apply_action(Action::CommandPalette);
+        type_query(&mut app, "xyzzy");
+        app.apply_action(Action::Submit);
+
+        assert!(app.palette.is_none());
+        assert!(!app.should_quit);
+        assert_eq!(app.status.as_deref(), Some("no command selected"));
+    }
+
+    #[test]
+    fn the_arrows_walk_the_list_while_the_letters_go_to_the_query() {
+        let mut app = app();
+        app.apply_action(Action::CommandPalette);
+        app.apply_action(Action::CaretDown);
+        assert_eq!(app.palette.as_ref().expect("open").selected, 1);
+        assert!(app.palette.as_ref().expect("open").query.is_empty());
+
+        app.apply_action(Action::CaretUp);
+        assert_eq!(app.palette.as_ref().expect("open").selected, 0);
+    }
+
+    #[test]
+    fn backspace_edits_the_query_rather_than_the_composer() {
+        let mut app = app();
+        app.apply_action(Action::CommandPalette);
+        type_query(&mut app, "zoom");
+        app.apply_action(Action::Backspace);
+        assert_eq!(app.palette.as_ref().expect("open").query, "zoo");
+        assert!(app.composer().is_none_or(|c| c.text().is_empty()));
+    }
+
+    #[test]
+    fn a_command_that_opens_another_overlay_hands_over_cleanly() {
+        // The palette closes before dispatching, or the command would be fed straight
+        // back into the palette by the overlay check at the top of `apply_action`.
+        let mut app = app();
+        app.apply_action(Action::CommandPalette);
+        type_query(&mut app, "thread picker");
+        app.apply_action(Action::Submit);
+
+        assert!(app.palette.is_none());
+        assert!(
+            app.threads.is_some(),
+            "the thread picker should have opened"
+        );
     }
 
     // ------------------------------------------------------------ layout persistence
