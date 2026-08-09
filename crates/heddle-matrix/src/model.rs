@@ -178,6 +178,23 @@ impl Verification {
     }
 }
 
+/// Whether this account's secrets can be recovered on a new device.
+///
+/// "Recovery" is secret storage plus a key backup: the cross-signing keys and the Megolm
+/// keys, encrypted under a key only the user holds. Without it a fresh device can read
+/// nothing sent before it existed, however well verified it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryState {
+    /// Not asked yet.
+    Unknown,
+    /// Set up, and this device holds every secret.
+    Enabled,
+    /// Nothing is set up. History will not survive losing every device.
+    Disabled,
+    /// Set up, but this device is missing secrets: it needs the recovery key.
+    Incomplete,
+}
+
 /// Sent from the app to the worker.
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -242,6 +259,9 @@ pub enum Command {
     MismatchVerification,
     /// Withdraw from a verification without judging it.
     CancelVerification,
+    /// Unlock this account's secret storage with a recovery key, importing the secrets
+    /// and, with them, the ability to read history from backup.
+    RecoverWithKey(String),
     Shutdown,
 }
 
@@ -278,6 +298,8 @@ pub enum WorkerEvent {
     /// Drawing a warning shield at a user whose device is merely unexamined would train
     /// them to ignore the shield that matters.
     DeviceVerified(Option<bool>),
+    /// Whether this account's secrets can be recovered, re-sent whenever it changes.
+    Recovery(RecoveryState),
 }
 
 #[cfg(test)]

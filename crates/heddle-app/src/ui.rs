@@ -73,6 +73,73 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.verification.is_some() {
         draw_verification(frame, app, frame.area());
     }
+
+    if app.recovery_prompt.is_some() {
+        draw_recovery(frame, app, frame.area());
+    }
+}
+
+/// The recovery-key prompt.
+///
+/// The key is masked. It is a long, high-entropy secret that unlocks every message the
+/// account has ever received, and a terminal is a shoulder-surfable, screen-shareable,
+/// scrollback-recording place to paint one in clear text. The length is shown so that a
+/// paste can be seen to have arrived.
+fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(prompt) = &app.recovery_prompt else {
+        return;
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Enter your recovery key".to_owned(),
+            Style::default(),
+        )),
+        Line::from(""),
+    ];
+
+    if prompt.submitted {
+        lines.push(Line::from(Span::styled(
+            "unlocking…".to_owned(),
+            app.theme.dim_style(),
+        )));
+    } else {
+        let masked = "•".repeat(prompt.key.chars().count());
+        lines.push(Line::from(vec![
+            Span::styled(masked, app.theme.accent_style()),
+            Span::styled("\u{2588}".to_owned(), app.theme.dim_style()),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("{} characters", prompt.key.chars().count()),
+            app.theme.dim_style(),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "enter unlock   esc cancel".to_owned(),
+            app.theme.dim_style(),
+        )));
+    }
+
+    let width = 44.min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.accent_style())
+                .title(" recovery "),
+        ),
+        popup,
+    );
 }
 
 /// The interactive verification panel.

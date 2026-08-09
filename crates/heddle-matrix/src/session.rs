@@ -5,7 +5,10 @@
 //! and the store directory is created with restrictive permissions.
 
 use matrix_sdk::{
-    authentication::matrix::MatrixSession, store::RoomLoadSettings, Client, ThreadingSupport,
+    authentication::matrix::MatrixSession,
+    encryption::{BackupDownloadStrategy, EncryptionSettings},
+    store::RoomLoadSettings,
+    Client, ThreadingSupport,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -117,6 +120,19 @@ pub struct SavedSession {
 /// `handle_refresh_tokens` is enabled so a homeserver issuing short-lived tokens does
 /// not force a re-login mid-session.
 ///
+/// Room keys are fetched from backup on a decryption failure rather than in one sweep.
+/// The SDK's default is to fetch nothing at all, which quietly makes a key backup
+/// useless: the keys sit on the server and the client never asks. `OneShot` is the other
+/// option and pulls the entire backup the moment the key arrives, which for a busy
+/// account is a large download the user did not ask for. Fetching on failure is bounded,
+/// pays only for history actually looked at, and closes a loop with the late-key retry
+/// in the worker: a failure fetches the key, the key arrives on the received stream, and
+/// the row that could not be read is decrypted in place.
+///
+/// Backups are not auto-created. Creating one silently would leave the user with a
+/// recovery key they have never seen and cannot write down, which is a backup in name
+/// only.
+///
 /// Threading support is off by default in the SDK, and without it the event cache never
 /// files an incoming threaded event under its thread: `post_process_new_events` only
 /// populates `new_events_by_thread` when `enabled_thread_support` is set. Thread-focused
@@ -134,6 +150,11 @@ pub async fn build_client(homeserver: &str, paths: &Paths) -> Result<Client, Ses
         .server_name_or_homeserver_url(homeserver)
         .sqlite_store(&paths.store, None)
         .handle_refresh_tokens()
+        .with_encryption_settings(EncryptionSettings {
+            backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
+            auto_enable_backups: false,
+            auto_enable_cross_signing: false,
+        })
         .with_threading_support(ThreadingSupport::Enabled {
             with_subscriptions: false,
         })

@@ -118,6 +118,7 @@ pub async fn spawn(client: Client) -> Result<Handle, matrix_sdk_ui::sync_service
             verification: None,
             verification_driver: None,
             verified_watch: None,
+            recovery_watch: None,
         };
         if let Err(e) = worker.run(command_rx).await {
             tracing::error!(error = %e, "matrix worker stopped");
@@ -155,6 +156,8 @@ struct Worker {
     verification_driver: Option<DriverTask>,
     /// Watches this device's cross-signing verification state.
     verified_watch: Option<DriverTask>,
+    /// Watches whether this account's secrets are recoverable.
+    recovery_watch: Option<DriverTask>,
 }
 
 /// A spawned verification driver, aborted when replaced or dropped.
@@ -212,6 +215,7 @@ impl Worker {
         });
 
         self.watch_verification_state();
+        self.watch_recovery_state();
 
         // Late-arriving room keys. Without this the "unable to decrypt" placeholder is
         // terminal: the key turns up, the store accepts it, and the row keeps saying it
@@ -478,6 +482,18 @@ impl Worker {
                 self.sas().await?.mismatch().await?;
             }
 
+            Command::RecoverWithKey(key) => {
+                // Trimmed because a recovery key is something the user copies out of a
+                // password manager or types from paper, and a trailing space or newline
+                // is not a wrong key -- refusing it as one would send them hunting for a
+                // mistake they did not make.
+                let key = key.trim();
+                if key.is_empty() {
+                    anyhow::bail!("no recovery key given");
+                }
+                self.client.encryption().recovery().recover(key).await?;
+            }
+
             Command::CancelVerification => {
                 if let Some(request) = self.verification.take() {
                     let _ = request.cancel().await;
@@ -605,6 +621,33 @@ impl Worker {
                 "missed some key updates; reopen the room if a message still cannot be read".into(),
             ))
             .await;
+    }
+
+    /// Watch whether this account's secrets are recoverable.
+    fn watch_recovery_state(&mut self) {
+        use matrix_sdk::encryption::recovery::RecoveryState as SdkRecoveryState;
+
+        let client = self.client.clone();
+        let events = self.events.clone();
+        self.recovery_watch = Some(DriverTask(tokio::spawn(async move {
+            let recovery = client.encryption().recovery();
+            let map = |state| match state {
+                SdkRecoveryState::Enabled => RecoveryState::Enabled,
+                SdkRecoveryState::Disabled => RecoveryState::Disabled,
+                SdkRecoveryState::Incomplete => RecoveryState::Incomplete,
+                SdkRecoveryState::Unknown => RecoveryState::Unknown,
+            };
+
+            let _ = events
+                .send(WorkerEvent::Recovery(map(recovery.state())))
+                .await;
+
+            let states = recovery.state_stream();
+            pin_mut!(states);
+            while let Some(state) = states.next().await {
+                let _ = events.send(WorkerEvent::Recovery(map(state))).await;
+            }
+        })));
     }
 
     fn timeline(&self, view: &View) -> anyhow::Result<Arc<Timeline>> {

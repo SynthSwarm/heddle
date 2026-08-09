@@ -346,6 +346,7 @@ chosen to avoid collision when nested inside a `ctrl+b` multiplexer.
 | `<prefix> n` / `<prefix> p` | next / previous room tab |
 | `<prefix> w` / `<prefix> W` | next / previous workspace |
 | `<prefix> v` | verify this device against your others |
+| `<prefix> R` | unlock secret storage with your recovery key |
 | `<prefix> f` | fuzzy jump to any room, thread or agent |
 | `k` / `j` | select older / newer message |
 | `r` / `e` / `D` | reply / edit / delete the selection |

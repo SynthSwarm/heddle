@@ -18,8 +18,8 @@ pub mod session;
 pub mod worker;
 
 pub use model::{
-    AgentPayload, Command, Entry, EntryKind, Message, RoomSummary, SyncState, ThreadSummary,
-    Verification, View, WorkerEvent,
+    AgentPayload, Command, Entry, EntryKind, Message, RecoveryState, RoomSummary, SyncState,
+    ThreadSummary, Verification, View, WorkerEvent,
 };
 pub use session::{CrossSigning, Paths, SavedSession, SessionError};
 pub use worker::{spawn, Handle};

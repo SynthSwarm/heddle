@@ -9,7 +9,8 @@ use crate::keymap::{Action, Mode, Prefix};
 use heddle_agent::{AgentState, AgentStore};
 use heddle_layout::{Dir, Pane, PaneId, PaneKind, Tab, Tiling, Workspaces, ORPHAN_WORKSPACE};
 use heddle_matrix::{
-    Command, Entry, RoomSummary, SyncState, ThreadSummary, Verification, View, WorkerEvent,
+    Command, Entry, RecoveryState, RoomSummary, SyncState, ThreadSummary, Verification, View,
+    WorkerEvent,
 };
 use heddle_render::{Options, Overrides, Theme};
 use std::collections::{HashMap, HashSet};
@@ -105,6 +106,19 @@ pub struct BarHits {
 }
 
 /// Everything the UI draws from.
+/// The recovery-key prompt.
+///
+/// Its own input rather than the composer's. A recovery key typed into the composer is
+/// one stray `enter` away from being sent to a room, and unlike a mistyped message it
+/// cannot be unsent in any meaningful sense once a homeserver has it.
+#[derive(Debug, Default, Clone)]
+pub struct RecoveryPrompt {
+    pub key: String,
+    /// Set once the key has been handed to the worker, so the panel can say it is
+    /// working rather than appearing to have ignored the keypress.
+    pub submitted: bool,
+}
+
 pub struct App {
     pub config: Config,
     pub theme: Theme,
@@ -150,6 +164,10 @@ pub struct App {
     pub emoji: Option<crate::emoji::Picker>,
     /// The interactive verification in progress, if any.
     pub verification: Option<Verification>,
+    /// Whether this account's secrets are recoverable on a new device.
+    pub recovery: RecoveryState,
+    /// The open recovery-key prompt, if any.
+    pub recovery_prompt: Option<RecoveryPrompt>,
     /// Whether this device has been verified by the account's cross-signing identity.
     ///
     /// `None` until the crypto store can answer. Drawing "unverified" before we know
@@ -213,6 +231,8 @@ impl App {
             emoji: None,
             verification: None,
             device_verified: None,
+            recovery: RecoveryState::Unknown,
+            recovery_prompt: None,
             typing: None,
             confirm_redact: None,
             anchors: Vec::new(),
@@ -876,6 +896,8 @@ impl App {
                 }
             }
 
+            WorkerEvent::Recovery(state) => self.recovery = state,
+
             WorkerEvent::DeviceVerified(verified) => {
                 // `None` means the crypto layer has not decided yet; keeping the last
                 // known answer avoids flickering the shield off and on during startup.
@@ -1053,6 +1075,41 @@ impl App {
         }
     }
 
+    /// Route a key to the recovery prompt.
+    ///
+    /// Printable characters go into the key and nothing else is honoured. A recovery key
+    /// is the one string in the application that must not leak into a room, so no action
+    /// that could send, split or switch is allowed to reach past this.
+    fn recovery_action(&mut self, action: Action) {
+        let Some(prompt) = &mut self.recovery_prompt else {
+            return;
+        };
+
+        match action {
+            Action::Insert(c) => prompt.key.push(c),
+            Action::Backspace => {
+                prompt.key.pop();
+            }
+            Action::Cancel => {
+                // Dropped rather than kept for later. A half-typed recovery key lingering
+                // in memory behind a closed dialog is a liability with no upside.
+                self.recovery_prompt = None;
+            }
+            Action::Submit | Action::Accept => {
+                let key = std::mem::take(&mut prompt.key);
+                if key.trim().is_empty() {
+                    self.status = Some("no recovery key entered".into());
+                    self.recovery_prompt = None;
+                    return;
+                }
+                prompt.submitted = true;
+                self.status = Some("unlocking secret storage…".into());
+                self.queue(Command::RecoverWithKey(key));
+            }
+            _ => {}
+        }
+    }
+
     pub fn apply_action(&mut self, action: Action) {
         // Verification is checked before every other overlay. The emoji on screen are a
         // security decision with a human at the other end, and any binding that fired
@@ -1060,6 +1117,13 @@ impl App {
         // while the user believes they are answering a yes/no question.
         if self.verification.is_some() {
             self.verification_action(action);
+            return;
+        }
+
+        // The recovery prompt holds a secret mid-typing, so it swallows everything for
+        // the same reason.
+        if self.recovery_prompt.is_some() {
+            self.recovery_action(action);
             return;
         }
 
@@ -1206,6 +1270,25 @@ impl App {
                 }
             }
             Action::NewThread => self.start_thread(),
+
+            Action::OpenRecovery => {
+                match self.recovery {
+                    // Nothing to unlock: the account has no secret storage at all, and
+                    // pretending a key would help would send the user looking for one
+                    // that was never created.
+                    RecoveryState::Disabled => {
+                        self.status =
+                            Some("no recovery set up for this account; set it up from Element or another client first".into());
+                    }
+                    RecoveryState::Enabled => {
+                        self.status = Some("recovery is already unlocked on this device".into());
+                    }
+                    RecoveryState::Incomplete | RecoveryState::Unknown => {
+                        self.recovery_prompt = Some(RecoveryPrompt::default());
+                        self.mode = Mode::Insert;
+                    }
+                }
+            }
 
             Action::StartVerification => {
                 if self.device_verified == Some(true) {
@@ -2966,6 +3049,90 @@ mod tests {
             Some(true),
             "a shield must not flicker off because the store went quiet"
         );
+    }
+
+    #[test]
+    fn a_recovery_key_never_reaches_a_room() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Incomplete));
+        app.apply_action(Action::OpenRecovery);
+        assert!(app.recovery_prompt.is_some());
+
+        for c in "EsTc 1234".chars() {
+            app.apply_action(Action::Insert(c));
+        }
+        // Every one of these sends, splits or switches. None may fire while a secret is
+        // half-typed.
+        app.apply_action(Action::NewThread);
+        app.apply_action(Action::Reply);
+        app.apply_action(Action::NextTab);
+
+        assert!(
+            app.take_commands().is_empty(),
+            "nothing may escape the prompt before the key is submitted"
+        );
+        assert_eq!(
+            app.recovery_prompt.as_ref().map(|p| p.key.as_str()),
+            Some("EsTc 1234")
+        );
+    }
+
+    #[test]
+    fn submitting_the_key_sends_it_once_and_clears_it() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Incomplete));
+        app.apply_action(Action::OpenRecovery);
+        for c in "secret".chars() {
+            app.apply_action(Action::Insert(c));
+        }
+        app.apply_action(Action::Submit);
+
+        match app.take_commands().as_slice() {
+            [Command::RecoverWithKey(key)] => assert_eq!(key, "secret"),
+            other => panic!("expected one recover command, got {other:?}"),
+        }
+        assert_eq!(
+            app.recovery_prompt.as_ref().map(|p| p.key.as_str()),
+            Some(""),
+            "the key must not be left sitting in the prompt after being sent"
+        );
+    }
+
+    #[test]
+    fn cancelling_drops_a_half_typed_key() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Incomplete));
+        app.apply_action(Action::OpenRecovery);
+        for c in "half".chars() {
+            app.apply_action(Action::Insert(c));
+        }
+        app.apply_action(Action::Cancel);
+
+        assert!(app.recovery_prompt.is_none());
+        assert!(app.take_commands().is_empty());
+    }
+
+    #[test]
+    fn recovery_that_is_not_set_up_says_so_instead_of_asking_for_a_key() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Disabled));
+        app.apply_action(Action::OpenRecovery);
+
+        assert!(
+            app.recovery_prompt.is_none(),
+            "asking for a key that was never created sends the user hunting for nothing"
+        );
+        assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn recovery_already_unlocked_asks_for_nothing() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Enabled));
+        app.apply_action(Action::OpenRecovery);
+
+        assert!(app.recovery_prompt.is_none());
+        assert!(app.take_commands().is_empty());
     }
 
     /// A plain message from someone else.

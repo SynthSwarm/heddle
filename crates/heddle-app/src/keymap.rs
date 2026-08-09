@@ -62,6 +62,8 @@ pub enum Action {
     EmojiIntoComposer,
     /// Ask this account's other devices to verify this one.
     StartVerification,
+    /// Unlock secret storage with a recovery key.
+    OpenRecovery,
     /// Confirm the highlighted item in whatever overlay is open.
     Accept,
     /// Abandon a reply, an edit, an armed redaction, or an overlay.
@@ -317,6 +319,7 @@ fn map_prefix(key: KeyEvent) -> Action {
         KeyCode::Char('w') => Action::NextWorkspace,
         KeyCode::Char('W') => Action::PrevWorkspace,
         KeyCode::Char('v') => Action::StartVerification,
+        KeyCode::Char('R') => Action::OpenRecovery,
         KeyCode::Char('f') => Action::FuzzyJump,
         KeyCode::Char('?') | KeyCode::Char('/') => Action::ToggleHelp,
 
