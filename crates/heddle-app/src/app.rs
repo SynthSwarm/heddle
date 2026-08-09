@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::keymap::{Action, Mode, Prefix};
 use heddle_agent::{AgentState, AgentStore};
 use heddle_layout::{
-    Dir, Pane, PaneId, PaneKind, Tab, Tiling, Unread, Workspaces, ORPHAN_WORKSPACE,
+    Dir, Layout, Pane, PaneId, PaneKind, Tab, Tiling, Unread, Workspaces, ORPHAN_WORKSPACE,
 };
 use heddle_matrix::{
     Command, Entry, EntryKind, RecoveryState, RoomSummary, Shield, SyncState, ThreadSummary,
@@ -211,12 +211,30 @@ pub struct App {
     pub needs_redraw: bool,
 
     pub should_quit: bool,
+
+    /// The saved layout, consumed room by room as rooms arrive.
+    ///
+    /// Not the layout to write back: that is captured fresh from the live state. This
+    /// is only ever drained.
+    saved_layout: Layout,
+    /// Whether the saved focus is still waiting to be applied.
+    ///
+    /// Rooms arrive over several sync responses, so the workspace the user was last in
+    /// may not exist when the first batch lands. Cleared the moment the user moves
+    /// focus themselves, because restoring a position someone has already left is
+    /// indistinguishable from the cursor jumping about on its own.
+    restoring_focus: bool,
+    /// Set when the arrangement has changed and has not yet been written out.
+    pub layout_dirty: bool,
+
     /// Commands produced by the last update, drained by the caller.
     pending: Vec<Command>,
 }
 
 impl App {
-    pub fn new(config: Config) -> Self {
+    /// `saved_layout` is drained as rooms arrive; pass [`Layout::default`] to start
+    /// with one pane per room.
+    pub fn new(config: Config, saved_layout: Layout) -> Self {
         let prefix = Prefix::parse(&config.ui.prefix).unwrap_or_else(|| {
             tracing::warn!(spec = %config.ui.prefix, "unparseable ui.prefix; using ctrl+a");
             Prefix::default()
@@ -262,8 +280,21 @@ impl App {
             help: false,
             needs_redraw: false,
             should_quit: false,
+            restoring_focus: saved_layout.workspace.is_some() || !saved_layout.tabs.is_empty(),
+            saved_layout,
+            layout_dirty: false,
             pending: Vec::new(),
         }
+    }
+
+    /// The current arrangement, ready to be written to disk.
+    pub fn layout(&self) -> Layout {
+        Layout::capture(&self.workspaces, &self.tilings)
+    }
+
+    /// Record that the arrangement has changed and should be saved.
+    fn touch_layout(&mut self) {
+        self.layout_dirty = true;
     }
 
     /// Take the commands produced since the last call.
@@ -1033,23 +1064,78 @@ impl App {
                     tab.is_encrypted = room.is_encrypted;
                     tab.unread = Unread::new(room.notification_count, room.highlight_count);
 
-                    // Every room starts with a root pane showing its main timeline.
-                    let mut tiling = Tiling::new();
-                    let root = tiling.layout(ratatui::layout::Rect::ZERO);
-                    if let Some(first) = root.first() {
-                        tab.push_pane(Pane::new(
-                            first.id,
-                            PaneKind::Room {
-                                room_id: room.room_id.clone(),
-                            },
-                            room.display_name.clone(),
-                        ));
-                    }
+                    // A room the user had arranged comes back arranged. Anything else --
+                    // no saved entry, an unreadable one, or one that disagrees with
+                    // itself -- falls through to a single pane on the main timeline,
+                    // which is the arrangement every room starts life with anyway.
+                    let tiling = match self.saved_layout.take_room(&room.room_id, &mut tab) {
+                        Some(tiling) => tiling,
+                        None => {
+                            let mut tiling = Tiling::new();
+                            let root = tiling.layout(ratatui::layout::Rect::ZERO);
+                            if let Some(first) = root.first() {
+                                tab.push_pane(Pane::new(
+                                    first.id,
+                                    PaneKind::Room {
+                                        room_id: room.room_id.clone(),
+                                    },
+                                    room.display_name.clone(),
+                                ));
+                            }
+                            tiling
+                        }
+                    };
                     self.tilings.insert(room.room_id.clone(), tiling);
                     workspace.tabs.push(tab);
+                    self.layout_dirty = true;
                 }
             }
         }
+
+        self.restore_focus();
+    }
+
+    /// Put the user back where they left off, once the rooms to do it with exist.
+    ///
+    /// Attempted after every room batch rather than once at startup, because sync
+    /// delivers rooms over several responses and the workspace someone was last in is
+    /// rarely in the first one. It stops at the first user-driven focus change: a
+    /// client that yanks the view away half a second after launch, because a late room
+    /// finally arrived, is worse than one that simply starts where it starts.
+    fn restore_focus(&mut self) {
+        if !self.restoring_focus {
+            return;
+        }
+
+        // Per-workspace tabs first, so that focusing the saved workspace lands on the
+        // saved room in one step rather than showing its first tab and then switching.
+        for (workspace_id, room_id) in &self.saved_layout.tabs {
+            if let Some(workspace) = self
+                .workspaces
+                .items
+                .iter_mut()
+                .find(|w| &w.id == workspace_id)
+            {
+                if let Some(index) = workspace.tabs.iter().position(|t| &t.room_id == room_id) {
+                    workspace.focus_tab(index);
+                }
+            }
+        }
+
+        let Some(wanted) = self.saved_layout.workspace.clone() else {
+            // Nothing more to wait for; the tabs above are applied on every batch and
+            // are harmless to reapply.
+            return;
+        };
+        let Some(index) = self.workspaces.items.iter().position(|w| w.id == wanted) else {
+            return;
+        };
+
+        self.workspaces.focus(index);
+        self.restoring_focus = false;
+        self.needs_redraw = true;
+        // No `open_focused_view` here: the caller does it after every room batch, and
+        // doing it twice queues the same view at the worker twice.
     }
 
     /// Fold a view's agent events into the store.
@@ -1379,6 +1465,7 @@ impl App {
                 if let Some(tiling) = self.focused_tiling_mut() {
                     tiling.toggle_zoom();
                 }
+                self.touch_layout();
             }
             Action::NewThread => self.start_thread(),
 
@@ -1512,6 +1599,7 @@ impl App {
         {
             tab.push_pane(Pane::new(new_id, kind, title));
         }
+        self.touch_layout();
     }
 
     fn close_pane(&mut self) {
@@ -1541,6 +1629,7 @@ impl App {
                 tab.focus(id);
             }
         }
+        self.touch_layout();
         self.open_focused_view();
     }
 
@@ -1562,6 +1651,7 @@ impl App {
         if let Some(tiling) = self.focused_tiling_mut() {
             tiling.resize(dir, RESIZE_STEP);
         }
+        self.touch_layout();
     }
 
     /// Focus a pane by its tiling id, for click-to-focus.
@@ -1590,6 +1680,11 @@ impl App {
         // does; afterwards there is nothing left pointing at the old room.
         self.stop_typing();
         self.needs_redraw = true;
+        // Where the user is looking is part of the layout, and it is also the signal
+        // that they have taken over from the restore: from here on, moving them would
+        // be the client fighting them.
+        self.restoring_focus = false;
+        self.touch_layout();
         self.mark_focused_seen();
         self.open_focused_view();
     }
@@ -1902,7 +1997,7 @@ mod tests {
     use heddle_matrix::{AgentPayload, EntryKind, Message};
 
     fn app() -> App {
-        let mut app = App::new(Config::default());
+        let mut app = App::new(Config::default(), Layout::default());
         app.apply_worker_event(WorkerEvent::Rooms(vec![RoomSummary {
             room_id: "!r:x".into(),
             display_name: "#backend".into(),
@@ -1969,7 +2064,7 @@ mod tests {
 
     #[test]
     fn spaces_become_workspaces_not_tabs() {
-        let mut app = App::new(Config::default());
+        let mut app = App::new(Config::default(), Layout::default());
         app.apply_worker_event(WorkerEvent::Rooms(vec![RoomSummary {
             room_id: "!space:x".into(),
             display_name: "hermes-proj".into(),
@@ -2341,9 +2436,193 @@ mod tests {
         assert_eq!(app.workspaces.items[0].title, ORPHAN_WORKSPACE);
     }
 
+    // ------------------------------------------------------------ layout persistence
+
+    fn summary(room_id: &str, name: &str) -> RoomSummary {
+        RoomSummary {
+            room_id: room_id.into(),
+            display_name: name.into(),
+            is_space: false,
+            parents: Vec::new(),
+            is_direct: false,
+            is_encrypted: false,
+            notification_count: 0,
+            highlight_count: 0,
+        }
+    }
+
+    /// An app whose room has been split into a room pane and a thread pane.
+    fn arranged() -> App {
+        let mut app = app();
+        app.open_thread_pane("$thread".into(), "a thread".into());
+        assert_eq!(
+            app.workspaces
+                .focused()
+                .expect("w")
+                .focused_tab()
+                .expect("t")
+                .panes
+                .len(),
+            2
+        );
+        app
+    }
+
+    #[test]
+    fn a_relaunch_comes_back_to_the_panes_that_were_open() {
+        let saved = arranged().layout();
+
+        let mut fresh = App::new(Config::default(), saved);
+        fresh.apply_worker_event(WorkerEvent::Rooms(vec![summary("!r:x", "#backend")]));
+
+        let tab = fresh
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab");
+        assert_eq!(tab.panes.len(), 2, "the thread pane must come back");
+        assert_eq!(
+            tab.panes[1].kind,
+            PaneKind::Thread {
+                room_id: "!r:x".into(),
+                root: "$thread".into()
+            }
+        );
+        // And its timeline is requested, or the pane would come back as an empty box.
+        let commands = fresh.take_commands();
+        assert!(commands.iter().any(
+            |c| matches!(c, Command::OpenView(v) if v.thread_root.as_deref() == Some("$thread"))
+        ));
+    }
+
+    #[test]
+    fn a_relaunch_returns_to_the_room_that_was_focused() {
+        let mut app = app_with_two_rooms();
+        app.apply_action(Action::NextTab);
+        assert_eq!(app.focused_view(), Some(View::room("!b:x")));
+        let saved = app.layout();
+
+        let mut fresh = App::new(Config::default(), saved);
+        fresh.apply_worker_event(WorkerEvent::Rooms(vec![
+            summary("!a:x", "Commons"),
+            summary("!b:x", "smith"),
+        ]));
+        assert_eq!(fresh.focused_view(), Some(View::room("!b:x")));
+    }
+
+    #[test]
+    fn a_workspace_that_has_not_synced_yet_is_waited_for() {
+        // Sync sends rooms over several responses. Giving up after the first one would
+        // leave the user in whichever workspace happened to arrive first.
+        let mut app = App::new(Config::default(), Layout::default());
+        app.apply_worker_event(WorkerEvent::Rooms(vec![
+            RoomSummary {
+                room_id: "!space:x".into(),
+                display_name: "hermes".into(),
+                is_space: true,
+                ..summary("", "")
+            },
+            RoomSummary {
+                parents: vec!["!space:x".into()],
+                ..summary("!inspace:x", "backend")
+            },
+            summary("!orphan:x", "elsewhere"),
+        ]));
+        let index = app
+            .workspaces
+            .items
+            .iter()
+            .position(|w| w.id == "!space:x")
+            .expect("space workspace");
+        app.workspaces.focus(index);
+        let saved = app.layout();
+        assert_eq!(saved.workspace.as_deref(), Some("!space:x"));
+
+        let mut fresh = App::new(Config::default(), saved);
+        // First batch: only the orphan room. The saved workspace does not exist yet.
+        fresh.apply_worker_event(WorkerEvent::Rooms(vec![summary("!orphan:x", "elsewhere")]));
+        assert_eq!(fresh.workspaces.focused().expect("w").id, ORPHAN_WORKSPACE);
+
+        // Second batch brings the Space, and focus follows.
+        fresh.apply_worker_event(WorkerEvent::Rooms(vec![
+            RoomSummary {
+                room_id: "!space:x".into(),
+                display_name: "hermes".into(),
+                is_space: true,
+                ..summary("", "")
+            },
+            RoomSummary {
+                parents: vec!["!space:x".into()],
+                ..summary("!inspace:x", "backend")
+            },
+        ]));
+        assert_eq!(fresh.workspaces.focused().expect("w").id, "!space:x");
+    }
+
+    #[test]
+    fn moving_first_beats_the_restore_to_it() {
+        // A late room must not yank the view out from under someone who has already
+        // started reading somewhere else.
+        let mut app = app_with_two_rooms();
+        app.apply_action(Action::NextTab);
+        let saved = app.layout();
+        assert_eq!(saved.tabs[ORPHAN_WORKSPACE], "!b:x");
+
+        let mut fresh = App::new(Config::default(), saved);
+        fresh.apply_worker_event(WorkerEvent::Rooms(vec![summary("!a:x", "Commons")]));
+        // The user picks a room before the rest of the list lands.
+        fresh.apply_action(Action::NextTab);
+        let chosen = fresh.focused_view();
+
+        fresh.apply_worker_event(WorkerEvent::Rooms(vec![summary("!b:x", "smith")]));
+        assert_eq!(
+            fresh.focused_view(),
+            chosen,
+            "the restore must yield to the user, not compete with them"
+        );
+    }
+
+    #[test]
+    fn rearranging_marks_the_layout_for_saving() {
+        let mut app = app();
+        app.layout_dirty = false;
+        app.apply_action(Action::Split(Dir::Right));
+        assert!(app.layout_dirty);
+
+        app.layout_dirty = false;
+        app.apply_action(Action::ResizePane(Dir::Left));
+        assert!(app.layout_dirty);
+
+        app.layout_dirty = false;
+        app.apply_action(Action::ZoomPane);
+        assert!(app.layout_dirty);
+    }
+
+    #[test]
+    fn a_saved_pane_for_a_room_that_is_gone_costs_nothing() {
+        // Left the room, or it was upgraded: the tab never appears, and the entry is
+        // simply never claimed.
+        let saved = arranged().layout();
+        let mut fresh = App::new(Config::default(), saved);
+        fresh.apply_worker_event(WorkerEvent::Rooms(vec![summary(
+            "!other:x",
+            "somewhere else",
+        )]));
+
+        let tab = fresh
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab");
+        assert_eq!(tab.room_id, "!other:x");
+        assert_eq!(tab.panes.len(), 1);
+    }
+
     /// Two rooms, so there is a tab to switch *to*.
     fn app_with_two_rooms() -> App {
-        let mut app = App::new(Config::default());
+        let mut app = App::new(Config::default(), Layout::default());
         app.apply_worker_event(WorkerEvent::Rooms(vec![
             RoomSummary {
                 room_id: "!a:x".into(),
@@ -2593,7 +2872,7 @@ mod tests {
 
     #[test]
     fn a_room_with_a_parent_space_lands_in_that_workspace() {
-        let mut app = App::new(Config::default());
+        let mut app = App::new(Config::default(), Layout::default());
         app.apply_worker_event(WorkerEvent::Rooms(vec![
             RoomSummary {
                 room_id: "!space:x".into(),
@@ -2642,7 +2921,7 @@ mod tests {
 
     #[test]
     fn the_prefix_cycles_workspaces_and_follows_the_focus() {
-        let mut app = App::new(Config::default());
+        let mut app = App::new(Config::default(), Layout::default());
         app.apply_worker_event(WorkerEvent::Rooms(vec![
             RoomSummary {
                 room_id: "!space:x".into(),
@@ -3804,7 +4083,7 @@ mod tests {
         // At startup the app opens its focused view before any room exists, so the
         // call is a no-op. If nothing retries, the transcript stays empty until the
         // user happens to click a pane.
-        let mut app = App::new(Config::default());
+        let mut app = App::new(Config::default(), Layout::default());
         app.open_focused_view();
         assert!(app.take_commands().is_empty(), "nothing to focus yet");
 

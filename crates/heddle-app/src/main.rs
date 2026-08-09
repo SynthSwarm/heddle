@@ -39,6 +39,12 @@ const DEFAULT_LOG: &str = "heddle=info,heddle_matrix=info,heddle_agent=info,\
 /// How often to tick even with no input, so countdowns and spinners advance.
 const TICK: Duration = Duration::from_millis(250);
 
+/// Shortest interval between layout writes.
+///
+/// Long enough that holding a resize key does not thrash the disk, short enough that a
+/// terminal killed outright loses at most a couple of seconds of rearranging.
+const LAYOUT_FLUSH: Duration = Duration::from_secs(2);
+
 #[derive(Parser)]
 #[command(name = "heddle", version, about, long_about = None)]
 struct Cli {
@@ -191,7 +197,10 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
         .await
         .context("starting the matrix worker")?;
 
-    tui(App::new(config), handle).await
+    let layout_path = dirs.layout_file(&profile_name);
+    let app = App::new(config, heddle_layout::Layout::load(&layout_path));
+
+    tui(app, handle, layout_path).await
 }
 
 /// Verify the homeserver supports everything heddle needs.
@@ -224,7 +233,7 @@ fn tick(ok: bool) -> &'static str {
 }
 
 /// Run the terminal UI.
-async fn tui(mut app: App, mut handle: Handle) -> Result<()> {
+async fn tui(mut app: App, mut handle: Handle, layout_path: std::path::PathBuf) -> Result<()> {
     let mouse = app.config.ui.mouse;
     let mut terminal = enter_terminal(mouse)?;
 
@@ -236,21 +245,37 @@ async fn tui(mut app: App, mut handle: Handle) -> Result<()> {
         hook(info);
     }));
 
-    let result = event_loop(&mut terminal, &mut app, &mut handle).await;
+    let result = event_loop(&mut terminal, &mut app, &mut handle, &layout_path).await;
+
+    // Unconditionally, and before anything that can fail: whatever went wrong, the
+    // arrangement the user built is not the thing to punish them by losing.
+    save_layout(&app, &layout_path);
 
     restore_terminal(mouse)?;
     handle.shutdown().await;
     result
 }
 
+/// Write the layout if it has changed, clearing the dirty flag either way.
+///
+/// A failure is logged and dropped. Nothing the user is doing depends on this file, and
+/// a full disk should not be allowed to end a conversation.
+fn save_layout(app: &App, path: &std::path::Path) {
+    if let Err(error) = app.layout().save(path) {
+        tracing::warn!(?error, "could not save the layout");
+    }
+}
+
 async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     handle: &mut Handle,
+    layout_path: &std::path::Path,
 ) -> Result<()> {
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_layout_save = std::time::Instant::now();
 
     app.open_focused_view();
     dispatch(app, handle);
@@ -309,6 +334,16 @@ async fn event_loop(
                 // Typing notices are driven from here rather than from the keypress, so
                 // that holding a key is not one request per character.
                 app.tick_typing(since_epoch.as_millis() as u64);
+
+                // Layout is flushed from the tick rather than from the keypress that
+                // changed it: holding a resize key would otherwise be one write per
+                // repeat. Throttled on top of that, because the tick is four times a
+                // second and this file is worth almost nothing.
+                if app.layout_dirty && last_layout_save.elapsed() >= LAYOUT_FLUSH {
+                    save_layout(app, layout_path);
+                    app.layout_dirty = false;
+                    last_layout_save = std::time::Instant::now();
+                }
             }
         }
 

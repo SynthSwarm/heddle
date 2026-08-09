@@ -7,8 +7,9 @@
 //! See `docs/SPEC.md` §4.1.
 
 use ratatui::layout::{Direction, Rect};
-use ratatui_hypertile::{Hypertile, PaneId, SplitPolicy};
-use std::collections::HashMap;
+use ratatui_hypertile::raw::Node;
+use ratatui_hypertile::{Hypertile, PaneId, SplitPolicy, StateError};
+use serde::{Deserialize, Serialize};
 
 /// Split ratios are clamped to keep every pane usable.
 const MIN_RATIO: f32 = 0.1;
@@ -48,9 +49,19 @@ pub struct Tiling {
     /// The last area passed to [`Tiling::layout`], needed to resolve clicks while
     /// zoomed.
     area: Rect,
-    /// Split ratios by split path. The engine has a setter but no getter, so the facade
-    /// keeps its own record.
-    ratios: HashMap<Vec<usize>, f32>,
+}
+
+/// Everything needed to rebuild a [`Tiling`] exactly as it was.
+///
+/// The tree is the engine's own `Node`, serialised by the engine, so split directions
+/// and ratios persist without this crate inventing a second representation of them
+/// that could drift out of step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TilingSnapshot {
+    tree: Node,
+    /// Pane ids as `u64`, so the file does not depend on the engine's newtype.
+    focused: Option<u64>,
+    zoomed: Option<u64>,
 }
 
 impl Default for Tiling {
@@ -68,8 +79,40 @@ impl Tiling {
                 .build(),
             zoomed: None,
             area: Rect::ZERO,
-            ratios: HashMap::new(),
         }
+    }
+
+    /// Capture the tiling for persistence.
+    pub fn snapshot(&self) -> TilingSnapshot {
+        TilingSnapshot {
+            tree: self.inner.root().clone(),
+            focused: self.focused().map(PaneId::get),
+            zoomed: self.zoomed.map(PaneId::get),
+        }
+    }
+
+    /// Rebuild a tiling from a snapshot.
+    ///
+    /// `set_root` normalises the tree, rejects duplicate pane ids and moves the id
+    /// allocator past the highest one restored, so a file that has been hand-edited or
+    /// truncated fails here rather than producing a tiling whose next split collides
+    /// with an existing pane.
+    pub fn restore(snapshot: &TilingSnapshot) -> Result<Self, StateError> {
+        let mut tiling = Self::new();
+        tiling.inner.set_root(snapshot.tree.clone())?;
+
+        // Focus and zoom are advisory: a pane id that is not in the tree means the file
+        // disagrees with itself, and losing the cursor position is a far better outcome
+        // than refusing to restore the layout at all.
+        if let Some(id) = snapshot.focused.map(PaneId::new) {
+            let _ = tiling.inner.focus_pane(id);
+        }
+        tiling.zoomed = snapshot
+            .zoomed
+            .map(PaneId::new)
+            .filter(|id| tiling.inner.pane_path(*id).is_some());
+
+        Ok(tiling)
     }
 
     /// The pane the user is interacting with.
@@ -159,11 +202,14 @@ impl Tiling {
             _ => -amount,
         };
 
-        // The engine exposes a setter but no getter for split ratios, so the facade
-        // tracks them. Defaulting to 0.5 matches `SplitPolicy::Half`.
-        let entry = self.ratios.entry(split_path.to_vec()).or_insert(0.5);
-        *entry = (*entry + delta).clamp(MIN_RATIO, MAX_RATIO);
-        let _ = self.inner.set_split_ratio(split_path, *entry);
+        // Read the current ratio back out of the tree rather than shadowing it in a
+        // side table. The engine has no ratio getter, but the tree it hands back has
+        // the number in it, and a second copy could only ever drift -- most obviously
+        // after a restore, where the side table would start empty and the first resize
+        // would snap a carefully placed border back to the middle.
+        let current = ratio_at(self.inner.root(), split_path).unwrap_or(0.5);
+        let updated = (current + delta).clamp(MIN_RATIO, MAX_RATIO);
+        let _ = self.inner.set_split_ratio(split_path, updated);
     }
 
     /// Toggle zoom on the focused pane.
@@ -214,6 +260,15 @@ impl Tiling {
         self.inner.pane_at(column, row)
     }
 
+    /// Every pane in the tree, whether or not a layout has been computed.
+    ///
+    /// Distinct from the ids [`Tiling::layout`] returns: those come from the layout
+    /// cache, which is empty until the first frame, and a freshly restored tiling has
+    /// panes long before it has geometry.
+    pub fn pane_ids(&self) -> Vec<PaneId> {
+        ratatui_hypertile::raw::collect_pane_ids(self.inner.root())
+    }
+
     /// Number of panes.
     pub fn len(&self) -> usize {
         self.inner.panes_iter().count()
@@ -221,6 +276,25 @@ impl Tiling {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// The ratio of the split at `path`, or `None` if the path does not name a split.
+fn ratio_at(root: &Node, path: &[usize]) -> Option<f32> {
+    let mut node = root;
+    for step in path {
+        let Node::Split { first, second, .. } = node else {
+            return None;
+        };
+        node = match step {
+            0 => first,
+            1 => second,
+            _ => return None,
+        };
+    }
+    match node {
+        Node::Split { ratio, .. } => Some(*ratio),
+        Node::Pane(_) => None,
     }
 }
 

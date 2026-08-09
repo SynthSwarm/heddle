@@ -230,6 +230,16 @@ impl Dirs {
     pub fn config_file(&self) -> PathBuf {
         self.config.join("config.toml")
     }
+
+    /// Where a profile's pane arrangement is remembered.
+    ///
+    /// State rather than data: it is entirely derived from what the user did last time
+    /// and can be thrown away without losing anything the homeserver will not send
+    /// again. Per profile, because two accounts have different rooms and sharing one
+    /// file between them would mean each launch discarding the other's arrangement.
+    pub fn layout_file(&self, profile: &str) -> PathBuf {
+        self.state.join("layout").join(format!("{profile}.json"))
+    }
 }
 
 #[cfg(test)]
