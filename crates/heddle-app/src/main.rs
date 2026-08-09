@@ -28,6 +28,13 @@ use heddle_matrix::{session, Handle};
 use std::io::stdout;
 use std::time::Duration;
 
+/// Log filter used when `HEDDLE_LOG` is unset.
+///
+/// Names every heddle crate, not just the binary. `heddle=info` alone silences the
+/// worker, which is where anything interesting happens.
+const DEFAULT_LOG: &str = "heddle=info,heddle_matrix=info,heddle_agent=info,\
+                           heddle_render=info,heddle_layout=info,warn";
+
 /// How often to tick even with no input, so countdowns and spinners advance.
 const TICK: Duration = Duration::from_millis(250);
 
@@ -327,7 +334,7 @@ fn init_tracing(dirs: &Dirs) -> Result<tracing_appender::non_blocking::WorkerGua
         .with_ansi(false)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("HEDDLE_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("heddle=info,warn")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG)),
         )
         .init();
 

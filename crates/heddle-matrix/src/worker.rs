@@ -397,6 +397,14 @@ impl Worker {
                     entries = entries.len(),
                     "timeline snapshot"
                 );
+                // At trace level, say what is actually in the snapshot. Counts alone
+                // cannot distinguish "the event never arrived" from "it arrived as
+                // something unexpected".
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    for (i, entry) in entries.iter().enumerate() {
+                        tracing::trace!(index = i, entry = %describe(entry), "entry");
+                    }
+                }
                 emit(entries).await;
             }
         });
@@ -537,6 +545,31 @@ fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem) -> Entry {
     };
 
     Entry { id, event_id, kind }
+}
+
+/// One-line description of an entry, for trace logging.
+fn describe(entry: &Entry) -> String {
+    match &entry.kind {
+        EntryKind::Message(m) => {
+            let body: String = m.body.chars().take(48).collect();
+            format!(
+                "message from {} thread_root={:?} replies={:?} agent={} {body:?}",
+                m.sender,
+                m.thread_root,
+                m.thread_replies,
+                match &m.agent {
+                    AgentPayload::Structured(_) => "structured",
+                    AgentPayload::Degraded(_) => "degraded",
+                    AgentPayload::None => "plain",
+                },
+            )
+        }
+        EntryKind::Notice(text) => format!("notice {text:?}"),
+        EntryKind::UnableToDecrypt => "unable to decrypt".to_owned(),
+        EntryKind::DateDivider(ts) => format!("date divider {ts}"),
+        EntryKind::ReadMarker => "read marker".to_owned(),
+        EntryKind::TimelineStart => "timeline start".to_owned(),
+    }
 }
 
 /// Placeholder for a timeline item heddle does not know how to draw.
