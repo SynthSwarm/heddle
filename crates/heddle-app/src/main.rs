@@ -242,13 +242,15 @@ async fn event_loop(
             }
 
             _ = ticker.tick() => {
-                let now = std::time::SystemTime::now()
+                let since_epoch = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                    .unwrap_or_default();
                 // Hermes times approvals out server-side but the resolution event can
                 // be lost; without this a pane would stay blocked for ever.
-                app.agents.expire_pending(now);
+                app.agents.expire_pending(since_epoch.as_secs());
+                // Typing notices are driven from here rather than from the keypress, so
+                // that holding a key is not one request per character.
+                app.tick_typing(since_epoch.as_millis() as u64);
             }
         }
 

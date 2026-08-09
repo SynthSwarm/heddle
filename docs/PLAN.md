@@ -75,12 +75,16 @@ have landed before it was possible to open a single Hermes thread.
 - [x] Composer: multi-line, cursor movement, per-room drafts, sent-message history
 - [x] Edit (`m.replace`), redact, reply
 - [x] Thread list per room; open a thread as its own pane
-- [ ] Typing notifications out — inbound already drives agent state
+- [x] Typing notifications out — inbound already drives agent state
 - [x] Space enumeration via `m.space.child`, so workspaces stop being a single `~`
-- [ ] Fuzzy jump across workspace, room and thread
+- [ ] Fuzzy jump across workspace, room and thread — deferred to M6
 
 **Exit:** an agent thread can be found, opened, read and replied to without leaving
-heddle.
+heddle. Met.
+
+Fuzzy jump moved to M6 with the rest of the convenience work. It earns its keep across
+many rooms in many Spaces; with a handful, `<prefix> w` and `<prefix> n` already reach
+everything, and encryption is the thing that hurts to retrofit.
 
 Deferred to M6 as chat-client parity the agent path does not need: image rendering,
 attachment upload and download, room join / leave / invite.

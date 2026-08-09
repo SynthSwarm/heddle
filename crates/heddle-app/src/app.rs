@@ -33,6 +33,30 @@ pub enum Pending {
     Edit(String),
 }
 
+/// How long after the last keystroke heddle declares the user has stopped typing.
+///
+/// Under the four seconds the server keeps a notice alive, so the room sees an explicit
+/// stop rather than watching it lapse. For an agent room that difference matters: the
+/// stop is the cue that a question is finished being asked.
+const TYPING_IDLE_MS: u64 = 3_000;
+
+/// How often an ongoing notice is re-asserted while typing continues. Matches the SDK's
+/// own resend window, which suppresses anything sent more often than this anyway.
+const TYPING_REFRESH_MS: u64 = 3_000;
+
+/// The local user's outbound typing state for one room.
+#[derive(Debug, Clone)]
+struct Typing {
+    room_id: String,
+    /// Set by the keypress, consumed by the tick. Keeping the clock out of the keypress
+    /// path is what makes this testable without a fake clock in the composer.
+    dirty: bool,
+    /// Whether the room currently believes the user is typing.
+    active: bool,
+    last_input_ms: u64,
+    last_sent_ms: u64,
+}
+
 /// The open thread picker.
 #[derive(Debug, Clone, Default)]
 pub struct ThreadPicker {
@@ -122,6 +146,8 @@ pub struct App {
     pub threads: Option<ThreadPicker>,
     /// The open emoji picker, if any.
     pub emoji: Option<crate::emoji::Picker>,
+    /// What the local user is currently telling the room about their typing.
+    typing: Option<Typing>,
     /// Event armed for redaction, awaiting a confirming second keypress.
     confirm_redact: Option<String>,
     /// Row of each event in the focused transcript, recorded by the renderer.
@@ -176,6 +202,7 @@ impl App {
             composing: None,
             threads: None,
             emoji: None,
+            typing: None,
             confirm_redact: None,
             anchors: Vec::new(),
             help: false,
@@ -539,6 +566,82 @@ impl App {
 
     // ------------------------------------------------------------------- threads
 
+    // ---------------------------------------------------------------- typing notices
+
+    /// Record that the composer was edited.
+    ///
+    /// Deliberately does no clock work and queues nothing: a notice per keystroke would
+    /// be one request per character. The tick decides what the room needs to hear.
+    fn note_typing(&mut self) {
+        let Some(room_id) = self.focused_view().map(|v| v.room_id) else {
+            return;
+        };
+
+        let fresh = Typing {
+            room_id: room_id.clone(),
+            dirty: true,
+            active: false,
+            last_input_ms: 0,
+            last_sent_ms: 0,
+        };
+
+        match &mut self.typing {
+            Some(typing) if typing.room_id == room_id => typing.dirty = true,
+            // Typing in a different room from the one last announced: tell the old room
+            // we stopped first, or it shows an indicator until the notice lapses.
+            Some(_) => {
+                self.stop_typing();
+                self.typing = Some(fresh);
+            }
+            None => self.typing = Some(fresh),
+        }
+    }
+
+    /// Drive outbound typing notices. Called from the event loop's tick.
+    pub fn tick_typing(&mut self, now_ms: u64) {
+        let Some(typing) = &mut self.typing else {
+            return;
+        };
+
+        if typing.dirty {
+            typing.dirty = false;
+            typing.last_input_ms = now_ms;
+            // Re-assert on a timer rather than per keystroke: the notice has a lifetime,
+            // so it needs refreshing while a long message is written.
+            let stale = now_ms.saturating_sub(typing.last_sent_ms) >= TYPING_REFRESH_MS;
+            if !typing.active || stale {
+                typing.active = true;
+                typing.last_sent_ms = now_ms;
+                let room_id = typing.room_id.clone();
+                self.queue(Command::SendTyping {
+                    room_id,
+                    typing: true,
+                });
+            }
+            return;
+        }
+
+        if typing.active && now_ms.saturating_sub(typing.last_input_ms) >= TYPING_IDLE_MS {
+            self.stop_typing();
+        }
+    }
+
+    /// Tell the room the user has stopped, if it currently believes otherwise.
+    fn stop_typing(&mut self) {
+        let Some(typing) = &self.typing else {
+            return;
+        };
+        let was_active = typing.active;
+        let room_id = typing.room_id.clone();
+        self.typing = None;
+        if was_active {
+            self.queue(Command::SendTyping {
+                room_id,
+                typing: false,
+            });
+        }
+    }
+
     /// Open the emoji picker to put an emoji in the composer.
     fn open_emoji_for_composer(&mut self) {
         self.emoji = Some(crate::emoji::Picker::new(crate::emoji::Target::Composer));
@@ -876,7 +979,12 @@ impl App {
 
         match action {
             Action::None => {}
-            Action::Quit => self.should_quit = true,
+            Action::Quit => {
+                // Quitting without this leaves the room showing a typing indicator until
+                // the server expires it.
+                self.stop_typing();
+                self.should_quit = true;
+            }
 
             Action::EnterInsert => self.mode = Mode::Insert,
 
@@ -892,6 +1000,7 @@ impl App {
             Action::Cancel => {
                 self.help = false;
                 self.cancel_pending();
+                self.stop_typing();
                 self.mode = Mode::Normal;
             }
 
@@ -899,31 +1008,37 @@ impl App {
                 if let Some(composer) = self.composer_mut() {
                     composer.insert(c);
                 }
+                self.note_typing();
             }
             Action::Backspace => {
                 if let Some(composer) = self.composer_mut() {
                     composer.backspace();
                 }
+                self.note_typing();
             }
             Action::Delete => {
                 if let Some(composer) = self.composer_mut() {
                     composer.delete();
                 }
+                self.note_typing();
             }
             Action::DeleteWord => {
                 if let Some(composer) = self.composer_mut() {
                     composer.delete_word();
                 }
+                self.note_typing();
             }
             Action::DeleteToLineStart => {
                 if let Some(composer) = self.composer_mut() {
                     composer.delete_to_line_start();
                 }
+                self.note_typing();
             }
             Action::Newline => {
                 if let Some(composer) = self.composer_mut() {
                     composer.insert_newline();
                 }
+                self.note_typing();
             }
             Action::CaretLeft => {
                 if let Some(composer) = self.composer_mut() {
@@ -1015,6 +1130,9 @@ impl App {
     }
 
     fn submit(&mut self) {
+        // Sending is the clearest possible "finished typing", and it must not wait for
+        // the idle timer: the agent sees the message and a live typing notice at once.
+        self.stop_typing();
         let Some(view) = self.focused_view() else {
             self.status = Some("no pane focused".into());
             return;
@@ -1148,6 +1266,9 @@ impl App {
     /// out of step with the screen. Switching to a shorter transcript then leaves the
     /// previous room's text visible underneath it.
     fn focus_moved(&mut self) {
+        // The notice belongs to the room being left, so it has to go before the focus
+        // does; afterwards there is nothing left pointing at the old room.
+        self.stop_typing();
         self.needs_redraw = true;
         self.mark_focused_seen();
         self.open_focused_view();
@@ -2350,6 +2471,118 @@ mod tests {
 
         assert!(app.emoji.is_none());
         assert_eq!(app.mode, Mode::Normal);
+        assert!(app.take_commands().is_empty());
+    }
+
+    #[test]
+    fn typing_is_announced_once_and_refreshed_while_it_continues() {
+        let mut app = app_with_messages();
+        let _ = app.take_commands();
+
+        app.apply_action(Action::EnterInsert);
+        app.apply_action(Action::Insert('h'));
+        app.tick_typing(1_000);
+        match app.take_commands().as_slice() {
+            [Command::SendTyping { room_id, typing }] => {
+                assert_eq!(room_id, "!r:x");
+                assert!(*typing);
+            }
+            other => panic!("expected one SendTyping, got {other:?}"),
+        }
+
+        // More typing inside the refresh window says nothing further: a notice per
+        // keystroke would be a request per character.
+        app.apply_action(Action::Insert('i'));
+        app.tick_typing(1_500);
+        assert!(app.take_commands().is_empty());
+
+        // Past it, the notice is re-asserted, because the server lets it lapse.
+        app.apply_action(Action::Insert('!'));
+        app.tick_typing(4_100);
+        assert!(matches!(
+            app.take_commands().as_slice(),
+            [Command::SendTyping { typing: true, .. }]
+        ));
+    }
+
+    #[test]
+    fn typing_stops_by_itself_once_the_keyboard_goes_quiet() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::EnterInsert);
+        app.apply_action(Action::Insert('h'));
+        app.tick_typing(1_000);
+        let _ = app.take_commands();
+
+        app.tick_typing(1_000 + TYPING_IDLE_MS - 1);
+        assert!(app.take_commands().is_empty(), "not yet idle");
+
+        app.tick_typing(1_000 + TYPING_IDLE_MS);
+        assert!(matches!(
+            app.take_commands().as_slice(),
+            [Command::SendTyping { typing: false, .. }]
+        ));
+
+        // And having said so once, it does not keep saying it.
+        app.tick_typing(99_000);
+        assert!(app.take_commands().is_empty());
+    }
+
+    #[test]
+    fn sending_stops_typing_without_waiting_for_the_timer() {
+        // The agent would otherwise see the message arrive while we still claim to be
+        // typing it.
+        let mut app = app_with_messages();
+        app.apply_action(Action::EnterInsert);
+        app.apply_action(Action::Insert('h'));
+        app.tick_typing(1_000);
+        let _ = app.take_commands();
+
+        app.apply_action(Action::Submit);
+
+        let commands = app.take_commands();
+        let stop = commands
+            .iter()
+            .position(|c| matches!(c, Command::SendTyping { typing: false, .. }))
+            .expect("sending must stop the notice");
+        let sent = commands
+            .iter()
+            .position(|c| matches!(c, Command::SendMessage { .. }))
+            .expect("and still send the message");
+        assert!(stop < sent, "the stop goes first");
+    }
+
+    #[test]
+    fn leaving_the_composer_or_the_room_stops_typing() {
+        for action in [Action::Cancel, Action::NextWorkspace] {
+            let mut app = app_with_messages();
+            app.apply_action(Action::EnterInsert);
+            app.apply_action(Action::Insert('h'));
+            app.tick_typing(1_000);
+            let _ = app.take_commands();
+
+            app.apply_action(action.clone());
+
+            assert!(
+                app.take_commands()
+                    .iter()
+                    .any(|c| matches!(c, Command::SendTyping { typing: false, .. })),
+                "{action:?} must stop the notice"
+            );
+        }
+    }
+
+    #[test]
+    fn moving_the_caret_is_not_typing() {
+        // Reading back what you wrote should not re-announce anything.
+        let mut app = app_with_messages();
+        app.apply_action(Action::EnterInsert);
+        app.apply_action(Action::Insert('h'));
+        app.tick_typing(1_000);
+        let _ = app.take_commands();
+
+        app.apply_action(Action::CaretLeft);
+        app.apply_action(Action::CaretRight);
+        app.tick_typing(1_100);
         assert!(app.take_commands().is_empty());
     }
 
