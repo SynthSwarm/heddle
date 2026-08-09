@@ -349,6 +349,8 @@ chosen to avoid collision when nested inside a `ctrl+b` multiplexer.
 | `k` / `j` | select older / newer message |
 | `r` / `e` / `D` | reply / edit / delete the selection |
 | `<prefix> t` | thread picker |
+| `<prefix> e` | emoji picker, inserting into the composer |
+| `<prefix> r` | emoji picker, reacting to the selected message |
 | `<prefix> ?` | key overlay |
 | `<prefix> d` | detach (leave the terminal, keep sync warm) |
 | `:` | command palette |

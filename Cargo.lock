@@ -1629,6 +1629,7 @@ dependencies = [
  "clap",
  "crossterm",
  "directories",
+ "emojis",
  "futures-util",
  "heddle-agent",
  "heddle-layout",

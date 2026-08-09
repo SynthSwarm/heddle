@@ -59,6 +59,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_threads(frame, app, frame.area());
     }
 
+    if app.emoji.is_some() {
+        draw_emoji(frame, app, frame.area());
+    }
+
     // Last, so it sits above everything.
     if app.help {
         draw_help(frame, app, frame.area());
@@ -122,6 +126,78 @@ fn draw_threads(frame: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(app.theme.border_style(true))
         .title(Span::styled(" threads ", app.theme.accent_style()));
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// The emoji picker, for `<prefix> e` and `<prefix> r`.
+///
+/// A list rather than a grid. Terminals disagree with `unicode-width` about how many
+/// cells some emoji occupy, and in a grid that error compounds across every column; one
+/// per row keeps the damage to the row that caused it. See the width note in PLAN.md.
+fn draw_emoji(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(picker) = &app.emoji else {
+        return;
+    };
+
+    let width = (area.width / 2).clamp(24, area.width);
+    let rows = (picker.matches.len() as u16).clamp(1, 12);
+    // Query line, list, borders.
+    let height = (rows + 3).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let title = match &picker.target {
+        crate::emoji::Target::Composer => " emoji ",
+        crate::emoji::Target::Reaction { .. } => " react ",
+    };
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled("search ".to_owned(), app.theme.dim_style()),
+        Span::styled(picker.query.clone(), app.theme.accent_style()),
+        // A block caret, so an empty query still shows where typing goes.
+        Span::styled("\u{2588}".to_owned(), app.theme.dim_style()),
+    ])];
+
+    if picker.matches.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " nothing matches".to_owned(),
+            app.theme.dim_style(),
+        )));
+    } else {
+        // Keep the highlight on screen once the selection walks past the visible rows.
+        let first = picker
+            .selected
+            .saturating_sub(rows.saturating_sub(1) as usize);
+        for (i, emoji) in picker
+            .matches
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(rows as usize)
+        {
+            let (marker, style) = if i == picker.selected {
+                ("\u{258e}", app.theme.accent_style())
+            } else {
+                (" ", app.theme.dim_style())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker.to_owned(), app.theme.accent_style()),
+                Span::styled(format!("{}  ", emoji.as_str()), style),
+                Span::styled(emoji.name().to_owned(), app.theme.dim_style()),
+            ]));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style(true))
+        .title(Span::styled(title, app.theme.accent_style()));
 
     frame.render_widget(Clear, popup);
     frame.render_widget(Paragraph::new(lines).block(block), popup);

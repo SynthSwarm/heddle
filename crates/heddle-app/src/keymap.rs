@@ -56,6 +56,10 @@ pub enum Action {
     EditMessage,
     RedactMessage,
     OpenThreads,
+    /// Open the emoji picker to react to the selected message.
+    ReactToSelected,
+    /// Open the emoji picker to put an emoji in the composer.
+    EmojiIntoComposer,
     /// Confirm the highlighted item in whatever overlay is open.
     Accept,
     /// Abandon a reply, an edit, an armed redaction, or an overlay.
@@ -244,6 +248,8 @@ pub const BINDINGS: &[Binding] = &[
     b("x", "close pane (not the last)", true),
     b("c", "new thread", true),
     b("t", "thread picker", true),
+    b("e", "emoji into composer", true),
+    b("r", "react to selected", true),
     b("w / W", "next / prev workspace", true),
     b("f", "fuzzy jump", true),
     b("?", "this help", true),
@@ -304,6 +310,8 @@ fn map_prefix(key: KeyEvent) -> Action {
         KeyCode::Char('n') => Action::NextTab,
         KeyCode::Char('p') => Action::PrevTab,
         KeyCode::Char('t') => Action::OpenThreads,
+        KeyCode::Char('e') => Action::EmojiIntoComposer,
+        KeyCode::Char('r') => Action::ReactToSelected,
         KeyCode::Char('w') => Action::NextWorkspace,
         KeyCode::Char('W') => Action::PrevWorkspace,
         KeyCode::Char('f') => Action::FuzzyJump,

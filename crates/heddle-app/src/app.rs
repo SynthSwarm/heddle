@@ -120,6 +120,8 @@ pub struct App {
     pub composing: Option<Pending>,
     /// The room whose thread picker is open, if any.
     pub threads: Option<ThreadPicker>,
+    /// The open emoji picker, if any.
+    pub emoji: Option<crate::emoji::Picker>,
     /// Event armed for redaction, awaiting a confirming second keypress.
     confirm_redact: Option<String>,
     /// Row of each event in the focused transcript, recorded by the renderer.
@@ -173,6 +175,7 @@ impl App {
             selected: HashMap::new(),
             composing: None,
             threads: None,
+            emoji: None,
             confirm_redact: None,
             anchors: Vec::new(),
             help: false,
@@ -536,6 +539,89 @@ impl App {
 
     // ------------------------------------------------------------------- threads
 
+    /// Open the emoji picker to put an emoji in the composer.
+    fn open_emoji_for_composer(&mut self) {
+        self.emoji = Some(crate::emoji::Picker::new(crate::emoji::Target::Composer));
+        // The picker is a search box, so typing has to reach it. Insert mode is what
+        // turns a keypress into `Insert(c)` rather than a normal-mode command.
+        self.mode = Mode::Insert;
+    }
+
+    /// Open the emoji picker to react to the selected message.
+    fn open_emoji_for_reaction(&mut self) {
+        let Some(event_id) = self.selected_event().map(ToOwned::to_owned) else {
+            self.status = Some("select a message to react to".into());
+            return;
+        };
+        self.emoji = Some(crate::emoji::Picker::new(crate::emoji::Target::Reaction {
+            event_id,
+        }));
+        self.mode = Mode::Insert;
+    }
+
+    /// Route a key to the open emoji picker.
+    fn emoji_action(&mut self, action: Action) {
+        let Some(picker) = &mut self.emoji else {
+            return;
+        };
+
+        match action {
+            Action::Cancel => self.close_emoji(),
+            Action::Insert(c) => picker.push(c),
+            Action::Backspace => picker.pop(),
+            // Both pairs move the highlight: arrows are what the composer's own bindings
+            // send here, j/k are what someone arriving from the transcript will press.
+            Action::CaretUp | Action::ScrollUp(_) | Action::SelectOlder => picker.up(),
+            Action::CaretDown | Action::ScrollDown(_) | Action::SelectNewer => picker.down(),
+            Action::Submit | Action::Accept => self.accept_emoji(),
+            // Anything else is swallowed rather than acted on: a stray binding firing
+            // underneath an overlay is how a picker ends up splitting a pane.
+            _ => {}
+        }
+    }
+
+    /// Apply the highlighted emoji and close the picker.
+    fn accept_emoji(&mut self) {
+        let Some(picker) = &self.emoji else {
+            return;
+        };
+        let Some(chosen) = picker.chosen() else {
+            self.status = Some("no emoji matches that".into());
+            return;
+        };
+        let target = picker.target.clone();
+
+        match target {
+            crate::emoji::Target::Composer => {
+                if let Some(composer) = self.composer_mut() {
+                    for c in chosen.chars() {
+                        composer.insert(c);
+                    }
+                }
+                self.emoji = None;
+                // Straight back to typing: choosing an emoji is part of writing the
+                // message, not a detour out of it.
+                self.mode = Mode::Insert;
+                return;
+            }
+            crate::emoji::Target::Reaction { event_id } => {
+                if let Some(view) = self.focused_view() {
+                    self.queue(Command::ToggleReaction {
+                        view,
+                        event_id,
+                        key: chosen.to_owned(),
+                    });
+                }
+            }
+        }
+        self.close_emoji();
+    }
+
+    fn close_emoji(&mut self) {
+        self.emoji = None;
+        self.mode = Mode::Normal;
+    }
+
     /// Open the thread picker for the focused room and ask the worker to fill it.
     fn open_thread_picker(&mut self) {
         let Some(room_id) = self
@@ -752,6 +838,14 @@ impl App {
     // ---------------------------------------------------------------------- actions
 
     pub fn apply_action(&mut self, action: Action) {
+        // The emoji picker is checked first and swallows everything: it is a search box,
+        // so the keys that would otherwise scroll, select or type into the composer all
+        // belong to it while it is open.
+        if self.emoji.is_some() {
+            self.emoji_action(action);
+            return;
+        }
+
         // The thread picker owns navigation while it is open, so the same j/k that
         // scroll a transcript walk the list instead of doing both at once.
         if self.threads.is_some() {
@@ -792,6 +886,8 @@ impl App {
             Action::EditMessage => self.begin_edit(),
             Action::RedactMessage => self.redact_selected(),
             Action::OpenThreads => self.open_thread_picker(),
+            Action::EmojiIntoComposer => self.open_emoji_for_composer(),
+            Action::ReactToSelected => self.open_emoji_for_reaction(),
             Action::Accept => self.accept_selection(),
             Action::Cancel => {
                 self.help = false;
@@ -2156,6 +2252,105 @@ mod tests {
                 .any(|c| matches!(c, Command::OpenView(_))),
             "moving to a workspace opens the view it focuses"
         );
+    }
+
+    #[test]
+    fn the_emoji_picker_reacts_to_the_selected_message() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectNewer);
+        let view = app.focused_view().expect("view");
+        let _ = app.take_commands();
+
+        app.apply_action(Action::ReactToSelected);
+        assert!(app.emoji.is_some(), "the picker must open");
+
+        for c in "rocket".chars() {
+            app.apply_action(Action::Insert(c));
+        }
+        app.apply_action(Action::Accept);
+
+        assert!(app.emoji.is_none(), "accepting closes the picker");
+        match app.take_commands().as_slice() {
+            [Command::ToggleReaction {
+                view: v,
+                event_id,
+                key,
+            }] => {
+                assert_eq!(v, &view);
+                assert_eq!(event_id, "$mine");
+                assert_eq!(key, "🚀");
+            }
+            other => panic!("expected one ToggleReaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reacting_needs_a_selection() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::ReactToSelected);
+
+        assert!(app.emoji.is_none());
+        assert!(app.take_commands().is_empty());
+        assert!(app.status.is_some(), "and says why");
+    }
+
+    #[test]
+    fn the_emoji_picker_inserts_into_the_composer_at_the_caret() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::EnterInsert);
+        for c in "ship it ".chars() {
+            app.apply_action(Action::Insert(c));
+        }
+
+        app.apply_action(Action::EmojiIntoComposer);
+        for c in "rocket".chars() {
+            app.apply_action(Action::Insert(c));
+        }
+        app.apply_action(Action::Submit);
+
+        assert!(app.emoji.is_none());
+        assert_eq!(app.composer().expect("composer").text(), "ship it 🚀");
+        assert_eq!(
+            app.mode,
+            Mode::Insert,
+            "choosing an emoji is part of writing the message, so typing continues"
+        );
+        assert!(
+            app.take_commands().is_empty(),
+            "accepting into the composer must not also send the message"
+        );
+    }
+
+    #[test]
+    fn the_emoji_picker_swallows_the_keys_underneath_it() {
+        // Without this the search box doubles as a command stream: typing "e" to find
+        // "eyes" would also be editing a message underneath.
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectNewer);
+        let before = app.workspaces.focused().map(|w| w.id.clone());
+        let _ = app.take_commands();
+
+        app.apply_action(Action::EmojiIntoComposer);
+        app.apply_action(Action::NextWorkspace);
+        app.apply_action(Action::RedactMessage);
+
+        assert!(app.emoji.is_some(), "the picker stays open");
+        assert_eq!(app.workspaces.focused().map(|w| w.id.clone()), before);
+        assert!(app.take_commands().is_empty());
+    }
+
+    #[test]
+    fn escape_closes_the_emoji_picker_without_acting() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectNewer);
+        let _ = app.take_commands();
+
+        app.apply_action(Action::ReactToSelected);
+        app.apply_action(Action::Cancel);
+
+        assert!(app.emoji.is_none());
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.take_commands().is_empty());
     }
 
     /// A plain message from someone else.

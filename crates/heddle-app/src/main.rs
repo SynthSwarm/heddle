@@ -9,6 +9,7 @@
 mod app;
 mod composer;
 mod config;
+mod emoji;
 mod keymap;
 mod ui;
 
