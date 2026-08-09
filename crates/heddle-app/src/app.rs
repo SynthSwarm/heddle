@@ -409,6 +409,124 @@ impl App {
         self.confirm_redact = None;
     }
 
+    /// The thread reachable from the selected message, as (root, title).
+    ///
+    /// A message either roots a thread or sits inside one; both are a way in.
+    fn selected_thread(&self) -> Option<(String, String)> {
+        let view = self.focused_view()?;
+        let id = self.selected.get(&view)?;
+        let entry = self
+            .timelines
+            .get(&view)?
+            .iter()
+            .find(|e| e.event_id.as_deref() == Some(id.as_str()))?;
+        let heddle_matrix::EntryKind::Message(message) = &entry.kind else {
+            return None;
+        };
+        let title = message
+            .body
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+
+        if message.thread_replies.is_some() {
+            Some((id.clone(), title))
+        } else {
+            message.thread_root.clone().map(|root| (root, title))
+        }
+    }
+
+    /// Open the thread on the selected message.
+    fn accept_selection(&mut self) {
+        let Some((root, title)) = self.selected_thread() else {
+            self.status = Some("that message has no thread".into());
+            return;
+        };
+        self.open_thread_pane(root, title);
+    }
+
+    /// Open a thread as a pane, or focus it if it is already open.
+    fn open_thread_pane(&mut self, root: String, title: String) {
+        let Some(room_id) = self
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map(|t| t.room_id.clone())
+        else {
+            return;
+        };
+
+        // Already open: focus it rather than growing a second pane onto the same thread.
+        if let Some(existing) = self
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .and_then(|t| t.pane_for_thread(&root))
+            .map(|p| p.id)
+        {
+            self.focus_pane_id(existing);
+            return;
+        }
+
+        // Geometry. The first thread splits the room pane vertically, so transcript and
+        // thread sit side by side. Later threads stack under the newest thread instead,
+        // because splitting the room pane again would squeeze the transcript towards
+        // nothing while the threads stayed wide.
+        let (anchor, dir) = match self.newest_thread_pane() {
+            Some(id) => (Some(id), Dir::Down),
+            None => (self.room_pane(), Dir::Right),
+        };
+        if let Some(id) = anchor {
+            if let Some(tiling) = self.focused_tiling_mut() {
+                tiling.focus(id);
+            }
+            if let Some(tab) = self
+                .workspaces
+                .focused_mut()
+                .and_then(Workspace_focused_tab_mut)
+            {
+                tab.focus(id);
+            }
+        }
+
+        let Some(new_id) = self.focused_tiling_mut().and_then(|t| t.split(dir)) else {
+            return;
+        };
+        if let Some(tab) = self
+            .workspaces
+            .focused_mut()
+            .and_then(Workspace_focused_tab_mut)
+        {
+            tab.push_pane(Pane::new(new_id, PaneKind::Thread { room_id, root }, title));
+        }
+        self.focus_moved();
+    }
+
+    /// The pane showing the room's main timeline, if it is still open.
+    fn room_pane(&self) -> Option<PaneId> {
+        self.workspaces
+            .focused()?
+            .focused_tab()?
+            .panes
+            .iter()
+            .find(|p| p.kind.thread_root().is_none())
+            .map(|p| p.id)
+    }
+
+    /// The most recently opened thread pane.
+    fn newest_thread_pane(&self) -> Option<PaneId> {
+        self.workspaces
+            .focused()?
+            .focused_tab()?
+            .panes
+            .iter()
+            .rev()
+            .find(|p| p.kind.thread_root().is_some())
+            .map(|p| p.id)
+    }
+
     // ------------------------------------------------------------------- threads
 
     /// Open the thread picker for the focused room and ask the worker to fill it.
@@ -446,34 +564,7 @@ impl App {
             thread.preview.clone()
         };
         self.threads = None;
-
-        let Some(room_id) = self
-            .workspaces
-            .focused()
-            .and_then(|w| w.focused_tab())
-            .map(|t| t.room_id.clone())
-        else {
-            return;
-        };
-
-        // A thread is a pane, so opening one is a split. That is the whole conceptual
-        // model: Space -> workspace, Room -> tab, Thread -> pane.
-        let Some(id) = self
-            .tilings
-            .entry(room_id.clone())
-            .or_default()
-            .split(Dir::Right)
-        else {
-            return;
-        };
-        if let Some(tab) = self
-            .workspaces
-            .focused_mut()
-            .and_then(Workspace_focused_tab_mut)
-        {
-            tab.push_pane(Pane::new(id, PaneKind::Thread { room_id, root }, title));
-        }
-        self.focus_moved();
+        self.open_thread_pane(root, title);
     }
 
     // ---------------------------------------------------------------- worker events
@@ -683,7 +774,7 @@ impl App {
             Action::EditMessage => self.begin_edit(),
             Action::RedactMessage => self.redact_selected(),
             Action::OpenThreads => self.open_thread_picker(),
-            Action::Accept => {}
+            Action::Accept => self.accept_selection(),
             Action::Cancel => {
                 self.help = false;
                 self.cancel_pending();
@@ -863,6 +954,18 @@ impl App {
     }
 
     fn close_pane(&mut self) {
+        // A tab with no panes shows nothing and offers no way back, so the last one
+        // stays. Closing the tab itself is the operation the user wants there.
+        let remaining = self
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map_or(0, |t| t.panes.len());
+        if remaining <= 1 {
+            self.status = Some("the last pane stays open".into());
+            return;
+        }
+
         let Some(closed) = self.focused_tiling_mut().and_then(Tiling::close_focused) else {
             return;
         };
@@ -1245,6 +1348,7 @@ mod tests {
                 is_own: false,
                 is_edited: false,
                 thread_root: Some("$root".into()),
+                thread_replies: None,
                 reactions: Vec::new(),
                 agent: AgentPayload::Structured(Box::new(event)),
             }),
@@ -1849,6 +1953,7 @@ mod tests {
                 is_own: false,
                 is_edited: false,
                 thread_root: None,
+                thread_replies: None,
                 reactions: Vec::new(),
                 agent: AgentPayload::None,
             }),
@@ -2086,6 +2191,159 @@ mod tests {
             picker.loading,
             "a late answer for another room must not land"
         );
+    }
+
+    /// A message that roots a thread.
+    fn thread_root_message(event_id: &str, body: &str, replies: u32) -> Entry {
+        let mut entry = their_message(event_id, body);
+        if let EntryKind::Message(m) = &mut entry.kind {
+            m.thread_replies = Some(replies);
+        }
+        entry
+    }
+
+    #[test]
+    fn enter_opens_the_thread_on_the_selected_message() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: vec![thread_root_message("$root", "fix auth", 3)],
+        });
+        let _ = app.take_commands();
+
+        app.apply_action(Action::SelectOlder);
+        app.apply_action(Action::Accept);
+
+        assert_eq!(
+            app.focused_view(),
+            Some(View::thread("!r:x", "$root")),
+            "enter must open the thread as a focused pane"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_message_with_no_thread_says_so() {
+        let mut app = app_with_messages();
+        app.apply_action(Action::SelectOlder);
+        app.apply_action(Action::Accept);
+        assert!(app
+            .status
+            .as_deref()
+            .is_some_and(|s| s.contains("no thread")));
+        assert_eq!(app.focused_view(), Some(View::room("!r:x")));
+    }
+
+    #[test]
+    fn a_message_inside_a_thread_is_also_a_way_in() {
+        let mut app = app();
+        let mut reply = their_message("$reply", "a reply");
+        if let EntryKind::Message(m) = &mut reply.kind {
+            m.thread_root = Some("$root".into());
+        }
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: vec![reply],
+        });
+        let _ = app.take_commands();
+
+        app.apply_action(Action::SelectOlder);
+        app.apply_action(Action::Accept);
+        assert_eq!(app.focused_view(), Some(View::thread("!r:x", "$root")));
+    }
+
+    #[test]
+    fn the_first_thread_splits_beside_the_room_and_later_ones_stack() {
+        let mut app = app();
+        app.open_thread_pane("$a".into(), "first".into());
+        app.open_thread_pane("$b".into(), "second".into());
+
+        let tab = app
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab");
+        assert_eq!(tab.panes.len(), 3, "room plus two threads");
+
+        // Splitting the room pane again would squeeze the transcript towards nothing
+        // while the threads stayed wide, so the second thread stacks under the first.
+        let room = tab
+            .panes
+            .iter()
+            .find(|p| p.kind.thread_root().is_none())
+            .expect("room pane");
+        let tiling = app.tilings.get_mut("!r:x").expect("tiling");
+        let placements = tiling.layout(ratatui::layout::Rect::new(0, 0, 100, 100));
+        let room_rect = placements
+            .iter()
+            .find(|p| p.id == room.id)
+            .expect("room placement")
+            .rect;
+        assert!(
+            room_rect.width < 100,
+            "the room pane gives up width to the first thread"
+        );
+        assert_eq!(
+            room_rect.height, 100,
+            "but keeps its full height, because later threads stack instead"
+        );
+    }
+
+    #[test]
+    fn reopening_a_thread_focuses_it_rather_than_duplicating_it() {
+        let mut app = app();
+        app.open_thread_pane("$a".into(), "first".into());
+        let after_first = app
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map_or(0, |t| t.panes.len());
+
+        app.open_thread_pane("$a".into(), "first".into());
+        let after_second = app
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map_or(0, |t| t.panes.len());
+
+        assert_eq!(
+            after_first, after_second,
+            "no second pane on the same thread"
+        );
+        assert_eq!(app.focused_view(), Some(View::thread("!r:x", "$a")));
+    }
+
+    #[test]
+    fn the_last_pane_cannot_be_closed() {
+        let mut app = app();
+        app.apply_action(Action::ClosePane);
+        let tab = app
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab");
+        assert_eq!(
+            tab.panes.len(),
+            1,
+            "an empty tab shows nothing and offers no way back"
+        );
+    }
+
+    #[test]
+    fn closing_a_thread_pane_leaves_the_room_pane() {
+        let mut app = app();
+        app.open_thread_pane("$a".into(), "first".into());
+        app.apply_action(Action::ClosePane);
+
+        let tab = app
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab");
+        assert_eq!(tab.panes.len(), 1);
+        assert_eq!(app.focused_view(), Some(View::room("!r:x")));
     }
 
     #[test]

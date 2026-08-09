@@ -508,6 +508,9 @@ fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem) -> Entry {
                     is_own: event.is_own(),
                     is_edited: message.is_edited(),
                     thread_root: msg_like.thread_root.as_ref().map(ToString::to_string),
+                    // The room timeline hides threaded events, so this summary is the
+                    // only sign from inside the room that a thread exists at all.
+                    thread_replies: msg_like.thread_summary.as_ref().map(|t| t.num_replies),
                     reactions: msg_like
                         .reactions
                         .iter()

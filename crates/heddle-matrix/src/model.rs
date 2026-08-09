@@ -91,6 +91,11 @@ pub struct Message {
     /// Event ID of the thread root, when this message is in a thread. This is the key
     /// that maps a message to a heddle pane.
     pub thread_root: Option<String>,
+    /// Replies to this message, when it is itself a thread root.
+    ///
+    /// `Some(0)` is a real state: a thread whose replies have all been redacted still
+    /// exists and can still be opened.
+    pub thread_replies: Option<u32>,
     /// Reaction key to the number of senders who used it.
     pub reactions: Vec<(String, usize)>,
     pub agent: AgentPayload,

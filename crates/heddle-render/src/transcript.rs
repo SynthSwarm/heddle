@@ -173,7 +173,27 @@ fn render_message(
         out.push(reaction_line(message, theme));
     }
 
+    // A thread root is the entry point to an agent session, and the room timeline hides
+    // the replies, so without this the thread is invisible from here.
+    if let Some(replies) = message.thread_replies {
+        out.push(thread_line(replies, theme));
+    }
+
     out
+}
+
+/// The "this message has a thread" affordance.
+fn thread_line(replies: u32, theme: &Theme) -> Line<'static> {
+    let label = match replies {
+        0 => "thread".to_owned(),
+        1 => "1 reply".to_owned(),
+        n => format!("{n} replies"),
+    };
+    Line::from(vec![
+        Span::styled("  ⤷ ".to_owned(), theme.accent_style()),
+        Span::styled(label, theme.accent_style()),
+        Span::styled("  enter to open".to_owned(), theme.dim_style()),
+    ])
 }
 
 fn render_agent_event(
@@ -340,6 +360,7 @@ mod tests {
                 is_own: false,
                 is_edited: false,
                 thread_root: None,
+                thread_replies: None,
                 reactions: Vec::new(),
                 agent,
             }),
