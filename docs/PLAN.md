@@ -96,7 +96,7 @@ attachment upload and download, room join / leave / invite.
 **Goal:** encrypted rooms work, including the parts most clients skip.
 
 - [x] Crypto store wired to SQLite; device ID persisted across restarts
-- [ ] Encrypted send and receive; UTD (unable-to-decrypt) placeholder with retry
+- [x] Encrypted send and receive; UTD (unable-to-decrypt) placeholder with retry
 - [x] Interactive SAS emoji verification, both initiating and accepting
 - [x] Cross-signing bootstrap on first login
 - [ ] `Recovery` — key backup enable, restore from recovery key, reset flow
