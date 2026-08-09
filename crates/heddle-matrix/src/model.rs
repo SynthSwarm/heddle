@@ -145,6 +145,39 @@ pub struct ThreadSummary {
     pub timestamp: u64,
 }
 
+/// How far an interactive device verification has got.
+///
+/// Only one runs at a time. Verification is a conversation with a human at both ends,
+/// and a client showing two sets of emoji at once is a client inviting the user to
+/// confirm the wrong one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verification {
+    /// Another of our devices asked to verify. Nothing has been agreed yet.
+    Requested { other_device: String },
+    /// Protocols are being negotiated. Nothing for the user to do.
+    Negotiating { other_device: String },
+    /// Both sides derived a short auth string. The user compares and answers.
+    Compare {
+        other_device: String,
+        /// Symbol and its English description, in the order both sides must show them.
+        emoji: Vec<(String, String)>,
+    },
+    /// We answered; the other side has not yet.
+    WaitingForOther { other_device: String },
+    /// Verified. The device is now signed by this account's identity.
+    Done,
+    /// Ended without verifying. Carries whatever the SDK said, which may be a plain
+    /// withdrawal or a genuine mismatch.
+    Cancelled { reason: String },
+}
+
+impl Verification {
+    /// Whether this state is the end of the flow.
+    pub fn is_finished(&self) -> bool {
+        matches!(self, Self::Done | Self::Cancelled { .. })
+    }
+}
+
 /// Sent from the app to the worker.
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -197,6 +230,18 @@ pub enum Command {
     MarkRead {
         view: View,
     },
+    /// Ask this account's other devices to verify this one.
+    StartVerification,
+    /// Accept a verification another device asked for.
+    AcceptVerification,
+    /// The emoji match. Signs the other device and, for a self-verification, gets this
+    /// one signed in return.
+    ConfirmVerification,
+    /// The emoji do not match. Reported to the other side as a mismatch rather than a
+    /// plain cancel, because the two mean very different things.
+    MismatchVerification,
+    /// Withdraw from a verification without judging it.
+    CancelVerification,
     Shutdown,
 }
 
@@ -225,6 +270,13 @@ pub enum WorkerEvent {
     Warning(String),
     /// Fatal; the worker has stopped.
     Fatal(String),
+    /// An interactive verification changed state.
+    Verification(Verification),
+    /// Whether this device is verified, re-sent whenever it changes.
+    ///
+    /// Separate from [`WorkerEvent::Verification`], which is about one flow in progress:
+    /// this is the standing fact a shield in the UI is drawn from.
+    DeviceVerified(bool),
 }
 
 #[cfg(test)]

@@ -345,6 +345,7 @@ chosen to avoid collision when nested inside a `ctrl+b` multiplexer.
 | `<prefix> c` | start a thread on the selected message (new agent session) |
 | `<prefix> n` / `<prefix> p` | next / previous room tab |
 | `<prefix> w` / `<prefix> W` | next / previous workspace |
+| `<prefix> v` | verify this device against your others |
 | `<prefix> f` | fuzzy jump to any room, thread or agent |
 | `k` / `j` | select older / newer message |
 | `r` / `e` / `D` | reply / edit / delete the selection |

@@ -60,6 +60,8 @@ pub enum Action {
     ReactToSelected,
     /// Open the emoji picker to put an emoji in the composer.
     EmojiIntoComposer,
+    /// Ask this account's other devices to verify this one.
+    StartVerification,
     /// Confirm the highlighted item in whatever overlay is open.
     Accept,
     /// Abandon a reply, an edit, an armed redaction, or an overlay.
@@ -314,6 +316,7 @@ fn map_prefix(key: KeyEvent) -> Action {
         KeyCode::Char('r') => Action::ReactToSelected,
         KeyCode::Char('w') => Action::NextWorkspace,
         KeyCode::Char('W') => Action::PrevWorkspace,
+        KeyCode::Char('v') => Action::StartVerification,
         KeyCode::Char('f') => Action::FuzzyJump,
         KeyCode::Char('?') | KeyCode::Char('/') => Action::ToggleHelp,
 

@@ -15,7 +15,14 @@
 use crate::model::*;
 use futures_util::{pin_mut, StreamExt};
 use matrix_sdk::{
-    ruma::{events::room::message::RoomMessageEventContent, EventId, RoomId},
+    encryption::verification::VerificationRequest,
+    ruma::{
+        events::{
+            key::verification::request::ToDeviceKeyVerificationRequestEvent,
+            room::message::RoomMessageEventContent,
+        },
+        EventId, RoomId,
+    },
     Client, Room,
 };
 use matrix_sdk_ui::{
@@ -108,6 +115,8 @@ pub async fn spawn(client: Client) -> Result<Handle, matrix_sdk_ui::sync_service
             sync_service,
             views: HashMap::new(),
             events: event_tx,
+            verification: None,
+            verification_driver: None,
         };
         if let Err(e) = worker.run(command_rx).await {
             tracing::error!(error = %e, "matrix worker stopped");
@@ -139,6 +148,19 @@ struct Worker {
     sync_service: SyncService,
     views: HashMap<View, OpenView>,
     events: mpsc::Sender<WorkerEvent>,
+    /// The verification in progress, if any. Held so the user's answers have something
+    /// to act on; the flow itself is followed on `verification_driver`.
+    verification: Option<VerificationRequest>,
+    verification_driver: Option<DriverTask>,
+}
+
+/// A spawned verification driver, aborted when replaced or dropped.
+struct DriverTask(JoinHandle<()>);
+
+impl Drop for DriverTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Worker {
@@ -166,6 +188,28 @@ impl Worker {
         controller.set_filter(Box::new(|_| true));
         pin_mut!(room_stream);
 
+        // Verification requests arrive as to-device events, which the timeline never
+        // sees, so they need their own listener. The handler cannot touch the worker --
+        // it runs on the sync task -- so it hands the request over a channel instead.
+        let (verify_tx, mut verify_rx) = mpsc::channel::<VerificationRequest>(4);
+        let handler = self.client.add_event_handler({
+            let tx = verify_tx.clone();
+            move |ev: ToDeviceKeyVerificationRequestEvent, client: Client| {
+                let tx = tx.clone();
+                async move {
+                    if let Some(request) = client
+                        .encryption()
+                        .get_verification_request(&ev.sender, &ev.content.transaction_id)
+                        .await
+                    {
+                        let _ = tx.send(request).await;
+                    }
+                }
+            }
+        });
+
+        self.report_device_verified().await;
+
         loop {
             tokio::select! {
                 // Commands first: a user keypress must not queue behind a sync burst.
@@ -183,6 +227,11 @@ impl Worker {
                             }
                         }
                     }
+                }
+
+                Some(request) = verify_rx.recv() => {
+                    tracing::info!(from = %request.other_user_id(), "verification requested");
+                    self.drive_verification(request);
                 }
 
                 Some(_diff) = room_stream.next() => {
@@ -210,8 +259,23 @@ impl Worker {
         }
 
         self.views.clear();
+        self.client.remove_event_handler(handler);
         self.sync_service.stop().await;
         Ok(())
+    }
+
+    /// Tell the app whether this device is verified.
+    ///
+    /// Best effort: before the first sync the store may not know its own device yet, and
+    /// an unanswered question is better left unanswered than reported as "unverified",
+    /// which would flash a warning shield at a user who has done nothing wrong.
+    async fn report_device_verified(&self) {
+        if let Ok(Some(device)) = self.client.encryption().get_own_device().await {
+            let _ = self
+                .events
+                .send(WorkerEvent::DeviceVerified(device.is_verified()))
+                .await;
+        }
     }
 
     async fn handle(&mut self, command: Command) -> anyhow::Result<()> {
@@ -339,6 +403,41 @@ impl Worker {
                     .mark_as_read(ReceiptType::Read)
                     .await?;
             }
+
+            Command::StartVerification => self.start_verification().await?,
+
+            Command::AcceptVerification => {
+                self.verification
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no verification to accept"))?
+                    .accept()
+                    .await?;
+            }
+
+            Command::ConfirmVerification => {
+                self.sas().await?.confirm().await?;
+            }
+
+            Command::MismatchVerification => {
+                // Reported as a mismatch rather than a cancel. The distinction is the
+                // whole point of the flow: a cancel means someone changed their mind, a
+                // mismatch means the keys did not agree and the other side should be
+                // told loudly.
+                self.sas().await?.mismatch().await?;
+            }
+
+            Command::CancelVerification => {
+                if let Some(request) = self.verification.take() {
+                    let _ = request.cancel().await;
+                }
+                self.verification_driver.take();
+                let _ = self
+                    .events
+                    .send(WorkerEvent::Verification(Verification::Cancelled {
+                        reason: "cancelled here".into(),
+                    }))
+                    .await;
+            }
         }
         Ok(())
     }
@@ -348,6 +447,71 @@ impl Worker {
         self.client
             .get_room(&id)
             .ok_or_else(|| anyhow::anyhow!("unknown room {room_id}"))
+    }
+
+    /// Ask this account's other devices to verify this one.
+    ///
+    /// The request goes to the user identity rather than to one named device, so every
+    /// other device the user owns can answer it. Sending to a single device would mean
+    /// picking one on the user's behalf, and the phone in their pocket is a better
+    /// choice than any heuristic we could write.
+    async fn start_verification(&mut self) -> anyhow::Result<()> {
+        let user_id = self
+            .client
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("not logged in"))?
+            .to_owned();
+
+        let identity = self
+            .client
+            .encryption()
+            .get_user_identity(&user_id)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("this account has no cross-signing identity to verify against")
+            })?;
+
+        let request = identity.request_verification().await?;
+        self.drive_verification(request);
+        Ok(())
+    }
+
+    /// Watch a verification request through to its end, reporting each step.
+    ///
+    /// Driven on its own task because the flow is a conversation with a human at the far
+    /// end: it can sit at any step for minutes, and the worker loop must stay responsive
+    /// to everything else while it does.
+    fn drive_verification(&mut self, request: VerificationRequest) {
+        // Only one at a time. A second flow would put two sets of emoji on screen, and a
+        // user who confirms the wrong one has verified an attacker.
+        self.verification_driver.take();
+
+        self.verification = Some(request.clone());
+        let events = self.events.clone();
+        self.verification_driver = Some(DriverTask(tokio::spawn(async move {
+            drive(request, events).await;
+        })));
+    }
+
+    /// The SAS flow currently in progress, if the user has answered far enough for one
+    /// to exist.
+    async fn sas(&self) -> anyhow::Result<matrix_sdk::encryption::verification::SasVerification> {
+        let request = self
+            .verification
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no verification in progress"))?;
+
+        // Looked up rather than held: the SAS is created inside the flow, on the driver
+        // task, and the store is the one place both sides can agree on what it is.
+        match self
+            .client
+            .encryption()
+            .get_verification(request.own_user_id(), request.flow_id())
+            .await
+        {
+            Some(matrix_sdk::encryption::verification::Verification::SasV1(sas)) => Ok(sas),
+            _ => anyhow::bail!("the emoji are not ready yet"),
+        }
     }
 
     fn timeline(&self, view: &View) -> anyhow::Result<Arc<Timeline>> {
@@ -608,6 +772,206 @@ fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem) -> Entry {
 }
 
 /// One-line description of an entry, for trace logging.
+/// Follow one verification request from start to finish, reporting each step.
+///
+/// Two things happen here that the user never sees and must not have to think about.
+///
+/// When the request becomes ready, someone has to actually start the SAS flow. Both
+/// sides are allowed to, and the spec resolves the tie, so heddle starts it rather than
+/// waiting: a client that waits politely for the other side to move is a client that
+/// hangs when the other side is doing the same.
+///
+/// When the flow arrives having been started by the other device, it needs accepting
+/// before any keys are exchanged. That accept is a protocol step, not a decision the
+/// user is making -- the decision comes later, when they compare the emoji -- so asking
+/// them here would be asking them to approve something they have not been shown yet.
+async fn drive(request: VerificationRequest, events: mpsc::Sender<WorkerEvent>) {
+    use matrix_sdk::encryption::verification::VerificationRequestState;
+
+    let other = device_label(&request);
+    let emit = |state: Verification| {
+        let events = events.clone();
+        async move {
+            let _ = events.send(WorkerEvent::Verification(state)).await;
+        }
+    };
+
+    let changes = request.changes();
+    pin_mut!(changes);
+
+    // The current state is reported before waiting, because a request that arrived while
+    // we were busy is already past `Created` and would otherwise sit invisible.
+    let mut state = Some(request.state());
+
+    loop {
+        let Some(current) = state.take().or(None) else {
+            break;
+        };
+
+        match current {
+            VerificationRequestState::Created { .. } => {
+                emit(Verification::Negotiating {
+                    other_device: other.clone(),
+                })
+                .await;
+            }
+            VerificationRequestState::Requested { .. } => {
+                emit(Verification::Requested {
+                    other_device: other.clone(),
+                })
+                .await;
+            }
+            VerificationRequestState::Ready { .. } => {
+                emit(Verification::Negotiating {
+                    other_device: other.clone(),
+                })
+                .await;
+                if let Err(e) = request.start_sas().await {
+                    tracing::warn!(error = %e, "could not start SAS");
+                }
+            }
+            VerificationRequestState::Transitioned { verification } => {
+                let matrix_sdk::encryption::verification::Verification::SasV1(sas) = verification
+                else {
+                    tracing::warn!("verification transitioned to an unsupported method");
+                    let _ = request.cancel().await;
+                    emit(Verification::Cancelled {
+                        reason: "unsupported verification method".into(),
+                    })
+                    .await;
+                    return;
+                };
+                drive_sas(sas, other.clone(), events.clone()).await;
+                return;
+            }
+            VerificationRequestState::Done => {
+                emit(Verification::Done).await;
+                return;
+            }
+            VerificationRequestState::Cancelled(info) => {
+                emit(Verification::Cancelled {
+                    reason: info.reason().to_owned(),
+                })
+                .await;
+                return;
+            }
+        }
+
+        state = changes.next().await;
+        if state.is_none() {
+            return;
+        }
+    }
+}
+
+/// Follow the SAS half: accept if needed, show the emoji, wait for the outcome.
+async fn drive_sas(
+    sas: matrix_sdk::encryption::verification::SasVerification,
+    other: String,
+    events: mpsc::Sender<WorkerEvent>,
+) {
+    use matrix_sdk::encryption::verification::SasState;
+
+    let emit = |state: Verification| {
+        let events = events.clone();
+        async move {
+            let _ = events.send(WorkerEvent::Verification(state)).await;
+        }
+    };
+
+    if !sas.we_started() {
+        if let Err(e) = sas.accept().await {
+            tracing::warn!(error = %e, "could not accept SAS");
+            emit(Verification::Cancelled {
+                reason: e.to_string(),
+            })
+            .await;
+            return;
+        }
+    }
+
+    let changes = sas.changes();
+    pin_mut!(changes);
+
+    let mut state = Some(sas.state());
+    loop {
+        let Some(current) = state.take() else { return };
+
+        match current {
+            SasState::Created { .. } | SasState::Started { .. } | SasState::Accepted { .. } => {
+                emit(Verification::Negotiating {
+                    other_device: other.clone(),
+                })
+                .await;
+            }
+            SasState::KeysExchanged { emojis, .. } => {
+                // Emoji, not decimals. Both are offered by the protocol, but comparing
+                // seven pictures across a room is something people do reliably and
+                // comparing three five-digit numbers is not.
+                let Some(short) = emojis else {
+                    let _ = sas.cancel().await;
+                    emit(Verification::Cancelled {
+                        reason: "the other device refused emoji comparison".into(),
+                    })
+                    .await;
+                    return;
+                };
+                let emoji = short
+                    .emojis
+                    .iter()
+                    .map(|e| (e.symbol.to_owned(), e.description.to_owned()))
+                    .collect();
+                emit(Verification::Compare {
+                    other_device: other.clone(),
+                    emoji,
+                })
+                .await;
+            }
+            SasState::Confirmed => {
+                emit(Verification::WaitingForOther {
+                    other_device: other.clone(),
+                })
+                .await;
+            }
+            SasState::Done { .. } => {
+                emit(Verification::Done).await;
+                let _ = events.send(WorkerEvent::DeviceVerified(true)).await;
+                return;
+            }
+            SasState::Cancelled(info) => {
+                emit(Verification::Cancelled {
+                    reason: info.reason().to_owned(),
+                })
+                .await;
+                return;
+            }
+        }
+
+        state = changes.next().await;
+    }
+}
+
+/// How to name the device at the other end.
+///
+/// Its display name if it has one, since that is what the user set and will recognise;
+/// the device ID otherwise, which is at least checkable against the other screen.
+fn device_label(request: &VerificationRequest) -> String {
+    match request.state() {
+        matrix_sdk::encryption::verification::VerificationRequestState::Requested {
+            other_device_data,
+            ..
+        }
+        | matrix_sdk::encryption::verification::VerificationRequestState::Ready {
+            other_device_data,
+            ..
+        } => other_device_data
+            .display_name()
+            .map_or_else(|| other_device_data.device_id().to_string(), str::to_owned),
+        _ => request.other_user_id().to_string(),
+    }
+}
+
+/// A one-line summary of an entry, for the trace log.
 fn describe(entry: &Entry) -> String {
     match &entry.kind {
         EntryKind::Message(m) => {

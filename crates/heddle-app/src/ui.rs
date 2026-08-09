@@ -67,6 +67,125 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.help {
         draw_help(frame, app, frame.area());
     }
+
+    // Above even the help: a security prompt that something else can obscure is a
+    // security prompt the user can be tricked into answering blind.
+    if app.verification.is_some() {
+        draw_verification(frame, app, frame.area());
+    }
+}
+
+/// The interactive verification panel.
+///
+/// The emoji are drawn one per line with their names spelled out, rather than in a row.
+/// Other clients use a grid, but heddle cannot: terminals disagree with `unicode-width`
+/// about how many cells several of these glyphs occupy, and a row that wraps wrongly
+/// puts the seventh emoji under the first. Comparing a misaligned grid against a phone
+/// is exactly the moment a user gives up and presses yes. The name beside each symbol
+/// also settles any ambiguity the font introduces.
+fn draw_verification(frame: &mut Frame, app: &App, area: Rect) {
+    use heddle_matrix::Verification;
+
+    let Some(state) = &app.verification else {
+        return;
+    };
+
+    let (title, mut lines, hint) = match state {
+        Verification::Requested { other_device } => (
+            " verification requested ",
+            vec![
+                Line::from(Span::styled(
+                    format!("{other_device} wants to verify this device."),
+                    Style::default(),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Accepting only starts the comparison; you confirm the keys next.".to_owned(),
+                    app.theme.dim_style(),
+                )),
+            ],
+            "y accept   n reject",
+        ),
+        Verification::Negotiating { other_device } => (
+            " verifying ",
+            vec![Line::from(Span::styled(
+                format!("agreeing on a method with {other_device}…"),
+                app.theme.dim_style(),
+            ))],
+            "esc cancel",
+        ),
+        Verification::Compare {
+            other_device,
+            emoji,
+        } => {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    format!("Do these match what {other_device} shows?"),
+                    Style::default(),
+                )),
+                Line::from(""),
+            ];
+            for (symbol, description) in emoji {
+                lines.push(Line::from(vec![
+                    // The symbol carries the accent; the name is ordinary text beside
+                    // it, so the eye lands on the glyph being compared.
+                    Span::styled(format!(" {symbol} "), app.theme.accent_style()),
+                    Span::styled("  ".to_owned(), Style::default()),
+                    Span::styled(description.clone(), Style::default()),
+                ]));
+            }
+            (
+                " compare emoji ",
+                lines,
+                "y they match   n they do NOT match",
+            )
+        }
+        Verification::WaitingForOther { other_device } => (
+            " waiting ",
+            vec![Line::from(Span::styled(
+                format!("confirmed here; waiting for {other_device}…"),
+                app.theme.dim_style(),
+            ))],
+            "esc cancel",
+        ),
+        // Both terminal states clear `app.verification`, so the panel is already gone.
+        Verification::Done | Verification::Cancelled { .. } => return,
+    };
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        hint.to_owned(),
+        app.theme.dim_style(),
+    )));
+
+    let width = lines
+        .iter()
+        .map(ratatui::text::Line::width)
+        .max()
+        .unwrap_or(20)
+        .saturating_add(4)
+        .try_into()
+        .unwrap_or(u16::MAX)
+        .clamp(24, area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.accent_style())
+                .title(title),
+        ),
+        popup,
+    );
 }
 
 /// The `<prefix> t` thread picker.

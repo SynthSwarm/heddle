@@ -8,7 +8,9 @@ use crate::config::Config;
 use crate::keymap::{Action, Mode, Prefix};
 use heddle_agent::{AgentState, AgentStore};
 use heddle_layout::{Dir, Pane, PaneId, PaneKind, Tab, Tiling, Workspaces, ORPHAN_WORKSPACE};
-use heddle_matrix::{Command, Entry, RoomSummary, SyncState, ThreadSummary, View, WorkerEvent};
+use heddle_matrix::{
+    Command, Entry, RoomSummary, SyncState, ThreadSummary, Verification, View, WorkerEvent,
+};
 use heddle_render::{Options, Overrides, Theme};
 use std::collections::{HashMap, HashSet};
 
@@ -146,6 +148,13 @@ pub struct App {
     pub threads: Option<ThreadPicker>,
     /// The open emoji picker, if any.
     pub emoji: Option<crate::emoji::Picker>,
+    /// The interactive verification in progress, if any.
+    pub verification: Option<Verification>,
+    /// Whether this device has been verified by the account's cross-signing identity.
+    ///
+    /// `None` until the crypto store can answer. Drawing "unverified" before we know
+    /// would put a warning in front of a user who has done nothing wrong.
+    pub device_verified: Option<bool>,
     /// What the local user is currently telling the room about their typing.
     typing: Option<Typing>,
     /// Event armed for redaction, awaiting a confirming second keypress.
@@ -202,6 +211,8 @@ impl App {
             composing: None,
             threads: None,
             emoji: None,
+            verification: None,
+            device_verified: None,
             typing: None,
             confirm_redact: None,
             anchors: Vec::new(),
@@ -845,6 +856,28 @@ impl App {
 
             WorkerEvent::Warning(text) => self.status = Some(text),
 
+            WorkerEvent::Verification(state) => {
+                // A finished flow reports itself in the status line and gets out of the
+                // way. Leaving a "verified" panel on screen would mean the user has to
+                // dismiss a dialog to acknowledge good news.
+                match &state {
+                    Verification::Done => {
+                        self.status = Some("device verified".into());
+                        self.device_verified = Some(true);
+                        self.verification = None;
+                        self.needs_redraw = true;
+                    }
+                    Verification::Cancelled { reason } => {
+                        self.status = Some(format!("verification cancelled: {reason}"));
+                        self.verification = None;
+                        self.needs_redraw = true;
+                    }
+                    _ => self.verification = Some(state),
+                }
+            }
+
+            WorkerEvent::DeviceVerified(verified) => self.device_verified = Some(verified),
+
             WorkerEvent::Fatal(text) => {
                 self.status = Some(format!("fatal: {text}"));
                 self.should_quit = true;
@@ -973,7 +1006,57 @@ impl App {
 
     // ---------------------------------------------------------------------- actions
 
+    /// Route a key to the verification overlay.
+    ///
+    /// Only the keys that mean something are honoured, and everything else is swallowed.
+    /// The answer to "do these emoji match" is yes, no, or not now; a client that let
+    /// any other key through would be a client where a mistyped `j` dismissed a security
+    /// prompt.
+    fn verification_action(&mut self, action: Action) {
+        let Some(state) = &self.verification else {
+            return;
+        };
+
+        match (state, action) {
+            // Accepting a request is not yet a judgement about keys: it only agrees to
+            // start comparing them.
+            (Verification::Requested { .. }, Action::Approve | Action::Accept) => {
+                self.queue(Command::AcceptVerification);
+            }
+
+            // This is the judgement. `Deny` reports a mismatch rather than a withdrawal,
+            // because a user pressing "they do not match" is reporting an attack, and the
+            // other side needs to hear that rather than a shrug.
+            (Verification::Compare { .. }, Action::Approve | Action::Accept) => {
+                self.queue(Command::ConfirmVerification);
+            }
+            (Verification::Compare { .. }, Action::Deny) => {
+                self.status = Some("reported a mismatch: those keys are not trusted".into());
+                self.queue(Command::MismatchVerification);
+            }
+
+            (_, Action::Deny | Action::Cancel) => {
+                self.queue(Command::CancelVerification);
+            }
+
+            // Redraw stays available: a corrupted screen is exactly when a user needs to
+            // re-read emoji before answering.
+            (_, Action::Redraw) => self.needs_redraw = true,
+
+            _ => {}
+        }
+    }
+
     pub fn apply_action(&mut self, action: Action) {
+        // Verification is checked before every other overlay. The emoji on screen are a
+        // security decision with a human at the other end, and any binding that fired
+        // underneath it -- splitting a pane, sending a message -- would be acted on
+        // while the user believes they are answering a yes/no question.
+        if self.verification.is_some() {
+            self.verification_action(action);
+            return;
+        }
+
         // The emoji picker is checked first and swallows everything: it is a search box,
         // so the keys that would otherwise scroll, select or type into the composer all
         // belong to it while it is open.
@@ -1117,6 +1200,15 @@ impl App {
                 }
             }
             Action::NewThread => self.start_thread(),
+
+            Action::StartVerification => {
+                if self.device_verified == Some(true) {
+                    self.status = Some("this device is already verified".into());
+                } else {
+                    self.status = Some("asking your other devices to verify this one…".into());
+                    self.queue(Command::StartVerification);
+                }
+            }
 
             Action::NextTab => {
                 if let Some(w) = self.workspaces.focused_mut() {
@@ -2701,6 +2793,145 @@ mod tests {
 
         assert_eq!(app.focused_view(), Some(View::room("!r:x")));
         assert!(app.status.is_some());
+    }
+
+    fn comparing() -> Verification {
+        Verification::Compare {
+            other_device: "Element X Android".into(),
+            emoji: vec![("🐶".into(), "Dog".into()), ("🎂".into(), "Cake".into())],
+        }
+    }
+
+    #[test]
+    fn an_incoming_request_is_shown_before_anything_is_agreed() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Verification(Verification::Requested {
+            other_device: "Element X Android".into(),
+        }));
+
+        assert!(matches!(
+            app.verification,
+            Some(Verification::Requested { .. })
+        ));
+    }
+
+    #[test]
+    fn accepting_a_request_does_not_confirm_the_keys() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Verification(Verification::Requested {
+            other_device: "phone".into(),
+        }));
+        app.apply_action(Action::Approve);
+
+        // Agreeing to compare is not agreeing that they matched.
+        assert!(matches!(
+            app.take_commands().as_slice(),
+            [Command::AcceptVerification]
+        ));
+    }
+
+    #[test]
+    fn yes_at_the_emoji_confirms_and_no_reports_a_mismatch() {
+        let mut confirming = app();
+        confirming.apply_worker_event(WorkerEvent::Verification(comparing()));
+        confirming.apply_action(Action::Approve);
+        assert!(matches!(
+            confirming.take_commands().as_slice(),
+            [Command::ConfirmVerification]
+        ));
+
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Verification(comparing()));
+        app.apply_action(Action::Deny);
+        assert!(
+            matches!(
+                app.take_commands().as_slice(),
+                [Command::MismatchVerification]
+            ),
+            "`no` must report a mismatch, not withdraw quietly: the other side needs to \
+             know its keys were rejected"
+        );
+    }
+
+    #[test]
+    fn the_verification_panel_swallows_everything_else() {
+        let mut app = app();
+        let before = format!("{:?}", app.workspaces);
+        app.apply_worker_event(WorkerEvent::Verification(comparing()));
+
+        // Every one of these would otherwise do something irreversible or confusing
+        // underneath a prompt the user believes is a yes/no question.
+        for action in [
+            Action::Split(Dir::Right),
+            Action::ClosePane,
+            Action::NewThread,
+            Action::Submit,
+            Action::EnterInsert,
+            Action::NextTab,
+        ] {
+            app.apply_action(action);
+        }
+
+        assert!(app.take_commands().is_empty(), "no command may escape");
+        assert_eq!(
+            format!("{:?}", app.workspaces),
+            before,
+            "the layout must be untouched"
+        );
+        assert!(matches!(
+            app.verification,
+            Some(Verification::Compare { .. })
+        ));
+    }
+
+    #[test]
+    fn a_finished_verification_clears_the_panel() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Verification(comparing()));
+        app.apply_worker_event(WorkerEvent::Verification(Verification::Done));
+
+        assert!(app.verification.is_none(), "good news needs no dialog");
+        assert_eq!(app.device_verified, Some(true));
+        assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn a_cancelled_verification_says_why() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Verification(comparing()));
+        app.apply_worker_event(WorkerEvent::Verification(Verification::Cancelled {
+            reason: "m.mismatched_sas".into(),
+        }));
+
+        assert!(app.verification.is_none());
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.contains("m.mismatched_sas")),
+            "the reason is the whole point: a mismatch is not the same as a withdrawal"
+        );
+    }
+
+    #[test]
+    fn verifying_an_already_verified_device_asks_for_nothing() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::DeviceVerified(true));
+        app.apply_action(Action::StartVerification);
+
+        assert!(app.take_commands().is_empty());
+        assert!(app.status.is_some());
+    }
+
+    #[test]
+    fn an_unverified_device_can_ask_to_be_verified() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::DeviceVerified(false));
+        app.apply_action(Action::StartVerification);
+
+        assert!(matches!(
+            app.take_commands().as_slice(),
+            [Command::StartVerification]
+        ));
     }
 
     /// A plain message from someone else.
