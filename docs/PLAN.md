@@ -76,7 +76,7 @@ have landed before it was possible to open a single Hermes thread.
 - [x] Edit (`m.replace`), redact, reply
 - [x] Thread list per room; open a thread as its own pane
 - [ ] Typing notifications out — inbound already drives agent state
-- [ ] Space enumeration via `m.space.child`, so workspaces stop being a single `~`
+- [x] Space enumeration via `m.space.child`, so workspaces stop being a single `~`
 - [ ] Fuzzy jump across workspace, room and thread
 
 **Exit:** an agent thread can be found, opened, read and replied to without leaving
