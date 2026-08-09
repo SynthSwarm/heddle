@@ -6,7 +6,7 @@
 use crate::app::{App, Hit, Pending};
 use crate::composer::Composer;
 use crate::keymap::{self, Mode};
-use heddle_matrix::SyncState;
+use heddle_matrix::{SyncState, View};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -367,8 +367,7 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let placements = app.tilings.entry(room_id).or_default().layout(area);
 
-    // Snapshot what each pane needs before borrowing the frame, so drawing does not
-    // fight the borrow checker over `app`.
+    // Everything each pane needs, gathered before the frame is borrowed mutably.
     let panes: Vec<_> = placements
         .iter()
         .map(|placement| {
@@ -377,77 +376,134 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
                 .focused()
                 .and_then(|w| w.focused_tab())
                 .and_then(|t| t.panes.iter().find(|p| p.id == placement.id));
+            let view = pane.map(|p| match p.kind.thread_root() {
+                Some(root) => View::thread(p.kind.room_id(), root),
+                None => View::room(p.kind.room_id()),
+            });
             (
                 *placement,
                 pane.map(|p| p.header()).unwrap_or_default(),
                 pane.map(|p| p.state).unwrap_or_default(),
+                view,
             )
         })
         .collect();
 
-    let entries = app.focused_entries().to_vec();
     let selected = app.selected_event().map(ToOwned::to_owned);
-    let rendered = heddle_render::transcript::render(
-        &entries,
-        &app.theme,
-        &app.render_options,
-        &app.overrides,
-        selected.as_deref(),
-    );
-    // Hand the anchors back so selection can scroll itself into view; only the renderer
-    // knows which row an event landed on.
-    app.anchors = rendered.anchors;
-    let lines = rendered.lines;
-    let scroll = app
-        .focused_view()
-        .and_then(|v| app.scroll.get(&v).copied())
-        .unwrap_or(0);
 
-    for (placement, header, state) in panes {
+    // Render every pane, not just the focused one. A pane that goes blank the moment it
+    // loses focus destroys the reason for having panes at all.
+    let drawn: Vec<_> = panes
+        .iter()
+        .map(|(placement, header, state, view)| {
+            let inner = inner_of(placement.rect);
+            let entries = view
+                .as_ref()
+                .and_then(|v| app.timelines.get(v))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+
+            let rendered = heddle_render::transcript::render(
+                entries,
+                &app.theme,
+                &app.render_options,
+                &app.overrides,
+                // The selection belongs to the focused view; marking it in a background
+                // pane would claim a message is selected there too.
+                if placement.is_focused {
+                    selected.as_deref()
+                } else {
+                    None
+                },
+            );
+
+            let scroll = view
+                .as_ref()
+                .and_then(|v| app.scroll.get(v).copied())
+                .unwrap_or(0);
+
+            (*placement, header.clone(), *state, inner, rendered, scroll)
+        })
+        .collect();
+
+    // Hand back the focused pane's geometry: scroll clamping, pagination and
+    // scroll-to-selection all measure against it.
+    if let Some((_, _, _, inner, rendered, _)) =
+        drawn.iter().find(|(placement, ..)| placement.is_focused)
+    {
+        let paragraph = Paragraph::new(rendered.lines.clone()).wrap(Wrap { trim: false });
+        app.rendered_lines =
+            paragraph.line_count(inner.width.saturating_sub(TRANSCRIPT_GUTTER)) as u16;
+        app.viewport_height = inner.height;
+        app.anchors.clone_from(&rendered.anchors);
+    }
+
+    for (placement, header, state, inner, rendered, scroll) in drawn {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(app.theme.border_style(placement.is_focused))
             .title(Span::styled(header, app.theme.state(state)));
-        let inner = block.inner(placement.rect);
 
-        // Only the focused pane shows the loaded transcript for now; per-pane
-        // transcripts arrive with the M4 workspace work.
-        if placement.is_focused {
-            // Keep one column clear on the right. `unicode-width` and the terminal
-            // disagree about emoji whose East Asian Width is Neutral but which render
-            // as two cells — U+1F54A DOVE and friends. ratatui lays them out as one
-            // column, the terminal paints two, and the overflow lands on whatever is to
-            // the right. Without the gutter that is the border, which is why the edge
-            // went dashed wherever such a glyph happened to end a line.
-            let text_area = Rect {
-                width: inner.width.saturating_sub(TRANSCRIPT_GUTTER),
-                ..inner
-            };
+        // Keep one column clear on the right. `unicode-width` and the terminal disagree
+        // about emoji whose East Asian Width is Neutral but which render as two cells —
+        // U+1F54A DOVE and friends. ratatui lays them out as one column, the terminal
+        // paints two, and the overflow lands on whatever is to the right. Without the
+        // gutter that is the border, which is why the edge went dashed wherever such a
+        // glyph happened to end a line.
+        let text_area = Rect {
+            width: inner.width.saturating_sub(TRANSCRIPT_GUTTER),
+            ..inner
+        };
 
-            let paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
+        let lines = if placement.is_focused {
+            rendered.lines
+        } else {
+            // Dim rather than blank. The text is still context worth reading; it just is
+            // not where the keyboard is pointing.
+            dimmed(rendered.lines)
+        };
 
-            // The *wrapped* row count, not `lines.len()`. A single long message can
-            // occupy many rows, and scrolling is measured in rows, so counting
-            // unwrapped lines under-reports the scrollable extent and strands the
-            // bottom of the transcript out of reach.
-            let total = paragraph.line_count(text_area.width) as u16;
-            let height = text_area.height;
-
-            // Hand the geometry back: only the renderer knows the wrapped extent at
-            // this width, and both scroll clamping and pagination depend on it.
-            app.rendered_lines = total;
-            app.viewport_height = height;
-
-            // `scroll` counts up from the bottom, so translate it to a top offset.
-            let max_scroll = total.saturating_sub(height);
-            let offset = max_scroll.saturating_sub(scroll.min(max_scroll));
-            frame.render_widget(paragraph.scroll((offset, 0)), text_area);
-        }
+        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let total = paragraph.line_count(text_area.width) as u16;
+        let max_scroll = total.saturating_sub(text_area.height);
+        let offset = max_scroll.saturating_sub(scroll.min(max_scroll));
+        frame.render_widget(paragraph.scroll((offset, 0)), text_area);
 
         // Border last, deliberately. Belt and braces alongside the gutter: whatever the
         // transcript contains, the chrome is painted over it rather than under it.
         frame.render_widget(block, placement.rect);
     }
+}
+
+/// The area inside a pane's border.
+fn inner_of(rect: Rect) -> Rect {
+    Rect {
+        x: rect.x.saturating_add(1),
+        y: rect.y.saturating_add(1),
+        width: rect.width.saturating_sub(2),
+        height: rect.height.saturating_sub(2),
+    }
+}
+
+/// Dim a rendered transcript without flattening its colours.
+///
+/// `Modifier::DIM` is a patch, so markdown highlighting and sender colours survive; the
+/// whole pane just recedes.
+fn dimmed(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|line| {
+            Line::from(
+                line.spans
+                    .into_iter()
+                    .map(|span| {
+                        let style = span.style.add_modifier(Modifier::DIM);
+                        Span::styled(span.content, style)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
 }
 
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {

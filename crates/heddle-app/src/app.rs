@@ -201,13 +201,6 @@ impl App {
         })
     }
 
-    pub fn focused_entries(&self) -> &[Entry] {
-        self.focused_view()
-            .and_then(|v| self.timelines.get(&v))
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
     /// The focused view's composer, for drawing. Empty when nothing is focused.
     pub fn composer(&self) -> Option<&Composer> {
         self.composers.get(&self.focused_view()?)
@@ -1107,12 +1100,31 @@ impl App {
         false
     }
 
-    /// Ask the worker for the focused view if it is not already streaming.
+    /// Ask the worker to stream every view on show, not just the focused one.
+    ///
+    /// Unfocused panes render their own transcript, so they need their own timeline.
+    /// Streaming only the focused view is what left the room pane blank the moment a
+    /// thread took focus.
     pub fn open_focused_view(&mut self) {
-        let Some(view) = self.focused_view() else {
-            return;
-        };
-        if !self.timelines.contains_key(&view) {
+        let views: Vec<View> = self
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map(|tab| {
+                tab.panes
+                    .iter()
+                    .map(|pane| match pane.kind.thread_root() {
+                        Some(root) => View::thread(pane.kind.room_id(), root),
+                        None => View::room(pane.kind.room_id()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for view in views {
+            if self.timelines.contains_key(&view) {
+                continue;
+            }
             self.queue(Command::OpenView(view.clone()));
             // A live timeline starts with only what sync delivered, which for a room
             // opened at launch is usually nothing. Without this first page the pane is
@@ -2344,6 +2356,37 @@ mod tests {
             .expect("tab");
         assert_eq!(tab.panes.len(), 1);
         assert_eq!(app.focused_view(), Some(View::room("!r:x")));
+    }
+
+    #[test]
+    fn every_pane_on_show_gets_its_own_timeline() {
+        // A background pane renders its own transcript, so it needs its own stream.
+        // Streaming only the focused view is what left the room pane blank the moment a
+        // thread took focus.
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::room("!r:x"),
+            entries: Vec::new(),
+        });
+        let _ = app.take_commands();
+
+        app.open_thread_pane("$root".into(), "a thread".into());
+
+        let commands = app.take_commands();
+        assert!(
+            commands
+                .iter()
+                .any(|c| matches!(c, Command::OpenView(v) if v == &View::thread("!r:x", "$root"))),
+            "the new thread pane must be opened: {commands:?}"
+        );
+
+        // And the room pane, already streaming, must not be re-requested.
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, Command::OpenView(v) if v == &View::room("!r:x"))),
+            "an already-streaming view must not be reopened"
+        );
     }
 
     #[test]

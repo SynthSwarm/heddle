@@ -58,8 +58,8 @@ Building the spine surfaced two things that were cheaper to do now than to retro
   no Matrix dependency, so they were written and tested without a homeserver. 62 of the
   123 tests cover them.
 
-Also present but not yet exercised end to end: BSP tiling (`heddle-layout`), badge
-roll-up, keypress approvals.
+Also present but not yet exercised end to end: badge roll-up and keypress approvals.
+BSP tiling now carries real content in every pane rather than only the focused one.
 
 ---
 
