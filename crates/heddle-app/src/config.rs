@@ -140,6 +140,70 @@ impl Config {
             })
             .map(|(name, p)| (name.clone(), p.clone()))
     }
+
+    /// Whether any profile is configured at all.
+    pub fn has_profiles(&self) -> bool {
+        !self.profile.is_empty()
+    }
+}
+
+/// Add a `[profile.<name>]` block to the config file unless one is already there.
+///
+/// Appended as text rather than by re-serialising the whole `Config`, because a round
+/// trip through `toml::to_string` would silently discard every comment and any ordering
+/// the user chose. A config file is something a person edits by hand, and a tool that
+/// quietly reformats it is a tool they stop trusting with the file.
+///
+/// Returns whether a block was written, so the caller can stay quiet on a re-login
+/// rather than claiming to have done something it did not.
+pub fn append_profile(path: &Path, name: &str, profile: &Profile) -> anyhow::Result<bool> {
+    let existing = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+
+    // Parse before writing: appending to a file we cannot understand risks compounding
+    // an existing syntax error with a second one the user did not make.
+    let parsed: Config = toml::from_str(&existing)?;
+    if parsed.profile.contains_key(name) {
+        return Ok(false);
+    }
+
+    // The first profile becomes the default, so that a single-account install works
+    // with a bare `heddle` and no further editing.
+    let default = !parsed.has_profiles();
+
+    let mut block = String::new();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        block.push('\n');
+    }
+    if !existing.is_empty() {
+        block.push('\n');
+    }
+    block.push_str(&format!("[profile.{name}]\n"));
+    block.push_str(&format!("user_id = {}\n", quote(&profile.user_id)));
+    block.push_str(&format!("homeserver = {}\n", quote(&profile.homeserver)));
+    if default {
+        block.push_str("default = true\n");
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let updated = format!("{existing}{block}");
+    std::fs::write(path, updated)?;
+
+    Ok(true)
+}
+
+/// Quote a TOML basic string, escaping what the format requires.
+fn quote(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
 }
 
 /// Standard locations, honouring the XDG spec.
@@ -257,5 +321,129 @@ mod tests {
         };
         assert!(configured.is_agent("@hermes:x"));
         assert!(!configured.is_agent("@someone-else:x"));
+    }
+
+    /// A scratch config path, unique per test so they can run in parallel.
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "heddle-cfg-{}-{tag}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir.join("config.toml")
+    }
+
+    fn profile(user: &str) -> Profile {
+        Profile {
+            user_id: user.into(),
+            homeserver: "https://matrix.example.org".into(),
+            default: false,
+        }
+    }
+
+    #[test]
+    fn logging_in_creates_a_usable_profile_from_nothing() {
+        let path = scratch("fresh");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(append_profile(&path, "lab", &profile("@q:example.org")).expect("writes"));
+
+        let cfg = Config::load(&path).expect("reloads");
+        let (name, p) = cfg
+            .resolve_profile(Some("lab"))
+            .expect("the profile just written must resolve");
+        assert_eq!(name, "lab");
+        assert_eq!(p.user_id, "@q:example.org");
+        // The whole point: a bare `heddle` has to work after a single login.
+        assert_eq!(cfg.resolve_profile(None).expect("default").0, "lab");
+    }
+
+    #[test]
+    fn a_second_profile_does_not_steal_the_default() {
+        let path = scratch("second");
+        let _ = std::fs::remove_file(&path);
+
+        append_profile(&path, "first", &profile("@a:example.org")).expect("first");
+        append_profile(&path, "second", &profile("@b:example.org")).expect("second");
+
+        let cfg = Config::load(&path).expect("reloads");
+        assert_eq!(cfg.profile.len(), 2);
+        assert!(cfg.profile["first"].default);
+        assert!(
+            !cfg.profile["second"].default,
+            "adding an account must not silently redirect the bare `heddle` command"
+        );
+        assert_eq!(cfg.resolve_profile(None).expect("default").0, "first");
+    }
+
+    #[test]
+    fn logging_in_again_changes_nothing() {
+        let path = scratch("again");
+        let _ = std::fs::remove_file(&path);
+
+        append_profile(&path, "lab", &profile("@q:example.org")).expect("first");
+        let after_first = std::fs::read_to_string(&path).expect("read");
+
+        assert!(
+            !append_profile(&path, "lab", &profile("@q:example.org")).expect("second"),
+            "a re-login must report that it wrote nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            after_first,
+            "re-login must not duplicate the block"
+        );
+    }
+
+    #[test]
+    fn hand_written_comments_and_settings_survive() {
+        let path = scratch("comments");
+        let original = "# my notes, kept by hand\n\
+                        [ui]\n\
+                        prefix = \"ctrl+b\"  # deliberate\n";
+        std::fs::write(&path, original).expect("seed");
+
+        append_profile(&path, "lab", &profile("@q:example.org")).expect("appends");
+
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            text.starts_with(original),
+            "existing bytes must be untouched"
+        );
+        assert!(text.contains("# my notes, kept by hand"));
+        assert!(text.contains("# deliberate"));
+
+        let cfg = Config::load(&path).expect("still parses");
+        assert_eq!(cfg.ui.prefix, "ctrl+b");
+        assert!(cfg.profile.contains_key("lab"));
+    }
+
+    #[test]
+    fn a_broken_config_is_not_made_worse() {
+        let path = scratch("broken");
+        std::fs::write(&path, "[ui\nthis is not toml").expect("seed");
+
+        assert!(
+            append_profile(&path, "lab", &profile("@q:example.org")).is_err(),
+            "appending to a file we cannot parse would compound the user's error"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "[ui\nthis is not toml",
+            "the file must be left exactly as found"
+        );
+    }
+
+    #[test]
+    fn quoting_survives_a_hostile_display_name() {
+        let path = scratch("quoting");
+        let _ = std::fs::remove_file(&path);
+
+        let nasty = r#"@odd"user\name:example.org"#;
+        append_profile(&path, "odd", &profile(nasty)).expect("writes");
+
+        let cfg = Config::load(&path).expect("parses despite the quotes");
+        assert_eq!(cfg.profile["odd"].user_id, nasty);
     }
 }

@@ -62,9 +62,9 @@ struct Cli {
 enum Cmd {
     /// Log in and save a session.
     ///
-    /// This writes the credential store only. The matching `[profile.<name>]` block in
-    /// config.toml is not created for you and must be added by hand before plain
-    /// `heddle` will start with that profile.
+    /// This saves the session and adds a matching `[profile.<name>]` block to
+    /// config.toml if one is not already there. The first profile added becomes the
+    /// default, so a single-account install works with a bare `heddle`.
     Login {
         /// Homeserver URL, e.g. https://matrix.example.org.
         #[arg(long)]
@@ -111,9 +111,25 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
             })?;
             let name = cli.profile.as_deref().unwrap_or("default");
             let paths = session::Paths::for_profile(&dirs.data, name);
-            let (_client, cross_signing) =
+            let (client, cross_signing) =
                 session::login_password(&homeserver, &user, &password, "heddle", &paths).await?;
             println!("logged in as {user}; profile `{name}` saved");
+
+            // Written from the login response rather than the typed `--user`, which may
+            // be a bare localpart: the config wants the full `@user:server` form.
+            let user_id = client
+                .user_id()
+                .map_or_else(|| user.clone(), ToString::to_string);
+            let entry = config::Profile {
+                user_id,
+                homeserver: homeserver.clone(),
+                default: false,
+            };
+            let path = dirs.config_file();
+            if config::append_profile(&path, name, &entry)? {
+                println!("added [profile.{name}] to {}", path.display());
+            }
+
             match cross_signing {
                 session::CrossSigning::Created => {
                     println!("cross-signing identity created for this account");
@@ -142,11 +158,24 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
     let (profile_name, profile) =
         config
             .resolve_profile(cli.profile.as_deref())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no profile selected. Add one to {} or pass --profile",
+            .ok_or_else(|| match cli.profile.as_deref() {
+                // Naming the profile that was asked for matters: the old wording claimed
+                // none had been selected, when in fact one had and simply was not there.
+                Some(name) => anyhow::anyhow!(
+                    "no `[profile.{name}]` in {}. Log in with `heddle --profile {name} login` \
+                     to create it, or add the block by hand",
                     dirs.config_file().display()
-                )
+                ),
+                None if config.has_profiles() => anyhow::anyhow!(
+                    "several profiles are configured and none is marked `default = true`. \
+                     Pass --profile, or set the flag in {}",
+                    dirs.config_file().display()
+                ),
+                None => anyhow::anyhow!(
+                    "no profiles configured. Run `heddle login` to create one, or add a \
+                     block to {}",
+                    dirs.config_file().display()
+                ),
             })?;
 
     if cli.check {
