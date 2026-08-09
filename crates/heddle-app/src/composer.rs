@@ -43,21 +43,43 @@ impl Composer {
         self.stashed = None;
     }
 
-    /// Caret position as (row, column), both measured for display.
+    /// Lay the buffer out at `width`, mapping the caret through the wrap.
     ///
-    /// The column is a display width, not a character count, so the caret lands in the
-    /// right cell after a wide glyph.
-    pub fn caret(&self) -> (u16, u16) {
-        let before = &self.text[..self.cursor];
-        let row = before.matches('\n').count() as u16;
-        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-        let column = UnicodeWidthStr::width(&before[line_start..]) as u16;
-        (row, column)
-    }
+    /// The caret has to be computed here rather than by the renderer: it is a byte
+    /// offset into the buffer, and only the wrap knows which display row that offset
+    /// ended up on.
+    pub fn wrapped(&self, width: u16) -> Wrapped<'_> {
+        let width = width.max(1) as usize;
+        let mut lines = Vec::new();
+        let mut caret = (0, 0);
+        let mut placed = false;
 
-    /// Number of lines, at least one.
-    pub fn line_count(&self) -> u16 {
-        (self.text.matches('\n').count() + 1) as u16
+        let mut base = 0;
+        for logical in self.text.split('\n') {
+            let segments = wrap_segments(logical, width);
+            let last = segments.len() - 1;
+
+            for (n, (from, to)) in segments.into_iter().enumerate() {
+                let (start, end) = (base + from, base + to);
+                let row = lines.len() as u16;
+                lines.push(&self.text[start..end]);
+
+                if placed || self.cursor < start {
+                    continue;
+                }
+                // On a soft break the caret belongs at the start of the next row, so a
+                // segment only claims an offset sitting exactly on its end when it is
+                // the last of its logical line.
+                if self.cursor < end || (self.cursor == end && n == last) {
+                    let column = UnicodeWidthStr::width(&self.text[start..self.cursor]) as u16;
+                    caret = (row, column);
+                    placed = true;
+                }
+            }
+            base += logical.len() + 1; // past the '\n'
+        }
+
+        Wrapped { lines, caret }
     }
 
     // ------------------------------------------------------------------- editing
@@ -150,6 +172,16 @@ impl Composer {
 
     pub fn end(&mut self) {
         self.cursor = self.line_end();
+    }
+
+    /// Move to the start of the previous word, stopping at the line start.
+    pub fn word_left(&mut self) {
+        self.cursor = self.word_start();
+    }
+
+    /// Move past the end of the next word, stopping at the line end.
+    pub fn word_right(&mut self) {
+        self.cursor = self.word_end();
     }
 
     /// Move up a line, keeping the display column where possible.
@@ -283,12 +315,76 @@ impl Composer {
             None => 0,
         }
     }
+
+    /// Offset just past the next word, without crossing a line break.
+    fn word_end(&self) -> usize {
+        let after = &self.text[self.cursor..];
+        // Skip any run of spaces first, so the caret lands past a word rather than at
+        // the front of the gap before it.
+        let gap = after.len() - after.trim_start_matches([' ', '\t']).len();
+        let rest = &after[gap..];
+        let word = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+        self.cursor + gap + word
+    }
+}
+
+/// Split one logical line into display rows no wider than `width`.
+///
+/// Returns byte ranges into `line`. Breaks after a space where there is one, and
+/// mid-word only when a single word is wider than the pane, since the alternative is
+/// text that never appears.
+fn wrap_segments(line: &str, width: usize) -> Vec<(usize, usize)> {
+    if line.is_empty() {
+        // One empty row: a blank line still occupies a row and can hold the caret.
+        return vec![(0, 0)];
+    }
+
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut used = 0;
+    let mut last_break: Option<usize> = None;
+
+    for (i, grapheme) in line.grapheme_indices(true) {
+        let w = UnicodeWidthStr::width(grapheme);
+        if used + w > width && i > start {
+            let brk = last_break.filter(|b| *b > start).unwrap_or(i);
+            out.push((start, brk));
+            start = brk;
+            used = UnicodeWidthStr::width(&line[start..i]) + w;
+            last_break = None;
+        } else {
+            used += w;
+        }
+        if grapheme == " " {
+            last_break = Some(i + grapheme.len());
+        }
+    }
+
+    out.push((start, line.len()));
+    out
+}
+
+/// The buffer laid out at a given width.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wrapped<'a> {
+    pub lines: Vec<&'a str>,
+    /// Caret in wrapped coordinates: display row and display column.
+    pub caret: (u16, u16),
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
+
+    /// Caret at a width wide enough that nothing wraps, i.e. the logical position.
+    fn caret(c: &Composer) -> (u16, u16) {
+        c.wrapped(200).caret
+    }
+
+    fn rows(c: &Composer) -> usize {
+        c.wrapped(200).lines.len()
+    }
 
     fn typed(s: &str) -> Composer {
         let mut c = Composer::default();
@@ -328,7 +424,7 @@ mod tests {
     fn the_caret_is_measured_in_display_columns() {
         // Two wide glyphs then a caret: column 4, not 2.
         let c = typed("\u{2705}\u{2705}");
-        assert_eq!(c.caret(), (0, 4));
+        assert_eq!(caret(&c), (0, 4));
     }
 
     #[test]
@@ -339,11 +435,11 @@ mod tests {
         c.right();
         // Past 'a' and the whole dove cluster.
         assert_eq!(
-            c.caret().1,
+            caret(&c).1,
             UnicodeWidthStr::width("a\u{1F54A}\u{FE0F}") as u16
         );
         c.left();
-        assert_eq!(c.caret().1, 1);
+        assert_eq!(caret(&c).1, 1);
     }
 
     #[test]
@@ -353,17 +449,17 @@ mod tests {
         for ch in "two".chars() {
             c.insert(ch);
         }
-        assert_eq!(c.line_count(), 2);
-        assert_eq!(c.caret(), (1, 3));
+        assert_eq!(rows(&c), 2);
+        assert_eq!(caret(&c), (1, 3));
     }
 
     #[test]
     fn vertical_movement_keeps_the_column_and_reports_the_edges() {
         let mut c = typed("first\nsecond");
-        assert_eq!(c.caret(), (1, 6));
+        assert_eq!(caret(&c), (1, 6));
 
         assert!(c.up(), "there is a line above");
-        assert_eq!(c.caret(), (0, 5), "clamped to the shorter line");
+        assert_eq!(caret(&c), (0, 5), "clamped to the shorter line");
 
         assert!(!c.up(), "already on the first line");
         assert!(c.down());
@@ -374,9 +470,9 @@ mod tests {
     fn home_and_end_work_per_line() {
         let mut c = typed("first\nsecond");
         c.home();
-        assert_eq!(c.caret(), (1, 0));
+        assert_eq!(caret(&c), (1, 0));
         c.end();
-        assert_eq!(c.caret(), (1, 6));
+        assert_eq!(caret(&c), (1, 6));
     }
 
     #[test]
@@ -449,5 +545,102 @@ mod tests {
         let mut c = typed("draft");
         assert!(!c.history_prev());
         assert_eq!(c.text(), "draft", "the draft must survive a failed recall");
+    }
+
+    #[test]
+    fn word_movement_stops_at_line_ends() {
+        let mut c = typed("alpha beta gamma");
+        c.word_left();
+        assert_eq!(c.text()[..c.cursor].to_owned(), "alpha beta ");
+        c.word_left();
+        assert_eq!(c.text()[..c.cursor].to_owned(), "alpha ");
+        c.word_left();
+        assert_eq!(c.cursor, 0);
+        c.word_left();
+        assert_eq!(c.cursor, 0, "already at the start");
+
+        c.word_right();
+        assert_eq!(c.text()[..c.cursor].to_owned(), "alpha");
+        c.word_right();
+        assert_eq!(c.text()[..c.cursor].to_owned(), "alpha beta");
+        c.word_right();
+        c.word_right();
+        assert_eq!(c.cursor, c.text().len(), "already at the end");
+    }
+
+    #[test]
+    fn word_movement_does_not_cross_a_newline() {
+        let mut c = typed("one two\nthree four");
+        c.home();
+        assert_eq!(caret(&c), (1, 0));
+        c.word_left();
+        assert_eq!(caret(&c), (1, 0), "must not jump up to the previous line");
+
+        c.end();
+        c.word_right();
+        assert_eq!(caret(&c).0, 1, "must not fall through to the next line");
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces() {
+        let c = typed("the quick brown fox");
+        let w = c.wrapped(10);
+        assert_eq!(w.lines, vec!["the quick ", "brown fox"]);
+    }
+
+    #[test]
+    fn a_word_longer_than_the_pane_is_broken_rather_than_hidden() {
+        let c = typed("supercalifragilistic");
+        let w = c.wrapped(8);
+        assert_eq!(w.lines, vec!["supercal", "ifragili", "stic"]);
+    }
+
+    #[test]
+    fn wrapping_keeps_hard_line_breaks() {
+        let c = typed("short\nalso short");
+        let w = c.wrapped(40);
+        assert_eq!(w.lines, vec!["short", "also short"]);
+    }
+
+    #[test]
+    fn a_blank_line_still_occupies_a_row() {
+        let c = typed("a\n\nb");
+        let w = c.wrapped(10);
+        assert_eq!(w.lines, vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn the_caret_follows_the_text_across_a_soft_break() {
+        let mut c = typed("the quick brown fox");
+        // Caret at the very end: last row, after "brown fox".
+        assert_eq!(c.wrapped(10).caret, (1, 9));
+
+        c.home();
+        assert_eq!(c.wrapped(10).caret, (0, 0), "home goes to the logical line");
+
+        // Sitting exactly on a soft break belongs at the start of the next row, not
+        // hanging off the end of the previous one.
+        for _ in 0..10 {
+            c.right();
+        }
+        assert_eq!(c.wrapped(10).caret, (1, 0));
+    }
+
+    #[test]
+    fn the_caret_accounts_for_wide_glyphs_when_wrapped() {
+        let c = typed("\u{2705}\u{2705}\u{2705}");
+        // Three two-cell glyphs at width 5: two fit, the third wraps.
+        let w = c.wrapped(5);
+        assert_eq!(w.lines.len(), 2);
+        assert_eq!(w.caret, (1, 2), "column is cells, not characters");
+    }
+
+    #[test]
+    fn wrapping_a_trailing_newline_leaves_an_empty_last_row() {
+        let mut c = typed("done");
+        c.insert_newline();
+        let w = c.wrapped(10);
+        assert_eq!(w.lines, vec!["done", ""]);
+        assert_eq!(w.caret, (1, 0));
     }
 }

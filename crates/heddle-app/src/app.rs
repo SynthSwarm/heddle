@@ -726,6 +726,16 @@ impl App {
                     composer.right();
                 }
             }
+            Action::CaretWordLeft => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.word_left();
+                }
+            }
+            Action::CaretWordRight => {
+                if let Some(composer) = self.composer_mut() {
+                    composer.word_right();
+                }
+            }
             Action::CaretHome => {
                 if let Some(composer) = self.composer_mut() {
                     composer.home();
@@ -1819,7 +1829,7 @@ mod tests {
             "one\ntwo",
             "moving within the message must not recall history"
         );
-        assert_eq!(app.composer().expect("composer").caret().0, 0);
+        assert_eq!(app.composer().expect("composer").wrapped(200).caret.0, 0);
     }
 
     /// A plain message from someone else.

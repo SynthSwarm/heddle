@@ -43,7 +43,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Constraint::Length(1), // workspace bar
             Constraint::Length(1), // tab bar
             Constraint::Min(3),    // panes
-            Constraint::Length(composer_height(app)),
+            Constraint::Length(composer_height(app, frame.area().width)),
             Constraint::Length(1), // status
         ])
         .split(frame.area());
@@ -128,11 +128,15 @@ fn draw_threads(frame: &mut Frame, app: &App, area: Rect) {
 
 /// How tall the composer needs to be, borders included.
 ///
-/// Grows with the message so a multi-line paragraph is visible while it is written,
-/// rather than scrolling out of a one-line slot.
-fn composer_height(app: &App) -> u16 {
-    let lines = app.composer().map_or(1, Composer::line_count);
-    COMPOSER_MIN_HEIGHT + lines.clamp(1, COMPOSER_MAX_LINES) - 1
+/// Measured after wrapping, not by counting newlines: a single long paragraph occupies
+/// several rows and should be visible while it is written rather than scrolling out of
+/// a one-line slot.
+fn composer_height(app: &App, total_width: u16) -> u16 {
+    let width = total_width.saturating_sub(2);
+    let rows = app
+        .composer()
+        .map_or(1, |c| c.wrapped(width).lines.len() as u16);
+    COMPOSER_MIN_HEIGHT + rows.clamp(1, COMPOSER_MAX_LINES) - 1
 }
 
 /// The `<prefix> ?` key overlay.
@@ -475,17 +479,33 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
             )),
             inner,
         );
-    } else {
-        let lines: Vec<Line> = text.split('\n').map(|l| Line::raw(l.to_owned())).collect();
-        frame.render_widget(Paragraph::new(lines), inner);
+        return;
     }
 
+    // Wrap in the composer rather than leaving it to Paragraph, because the caret is a
+    // byte offset and only the wrap knows which display row it landed on. Letting the
+    // widget wrap would put the text in one place and the caret in another.
+    let wrapped = app.composer().map(|c| c.wrapped(inner.width));
+    let Some(wrapped) = wrapped else {
+        return;
+    };
+
+    // Keep the caret in view when the message is taller than the box.
+    let height = inner.height.max(1);
+    let first = wrapped.caret.0.saturating_sub(height - 1);
+
+    let lines: Vec<Line> = wrapped
+        .lines
+        .iter()
+        .skip(first as usize)
+        .map(|l| Line::raw((*l).to_owned()))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+
     if app.mode == Mode::Insert {
-        // The composer reports the caret in display columns, so it lands in the right
-        // cell after a wide glyph rather than however many `char`s preceded it.
-        let (row, column) = app.composer().map_or((0, 0), Composer::caret);
+        let (row, column) = wrapped.caret;
         let x = inner.x + column;
-        let y = inner.y + row;
+        let y = inner.y + row.saturating_sub(first);
         if x < inner.right() && y < inner.bottom() {
             frame.set_cursor_position((x, y));
         }

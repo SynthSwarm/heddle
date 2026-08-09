@@ -81,6 +81,8 @@ pub enum Action {
     Newline,
     CaretLeft,
     CaretRight,
+    CaretWordLeft,
+    CaretWordRight,
     CaretUp,
     CaretDown,
     CaretHome,
@@ -230,6 +232,7 @@ pub const BINDINGS: &[Binding] = &[
     b(":", "command palette", false),
     b("^l", "redraw the screen", false),
     b("left / right", "move the caret", false),
+    b("^left / ^right", "move a word", false),
     b("up / down", "line, then history", false),
     b("^w / ^u", "delete word / to line start", false),
     b("n / p", "next / prev tab", true),
@@ -356,6 +359,8 @@ fn map_insert(key: KeyEvent) -> (Action, Mode) {
         KeyCode::Char('w') if ctrl => Action::DeleteWord,
         KeyCode::Char('u') if ctrl => Action::DeleteToLineStart,
 
+        KeyCode::Left if ctrl => Action::CaretWordLeft,
+        KeyCode::Right if ctrl => Action::CaretWordRight,
         KeyCode::Left => Action::CaretLeft,
         KeyCode::Right => Action::CaretRight,
         // Up and down move within a multi-line message and fall through to history at
