@@ -310,15 +310,19 @@ fn sender_line(message: &Message, theme: &Theme, mark_degraded: bool) -> Line<'s
     // Beside the name, because a shield is a statement about who sent this, and the name
     // is the claim it qualifies. The reason stays spelled out: a glyph alone gets read as
     // decoration, and the user is owed the specific meaning of "unverified".
+    //
+    // Cautions are deliberately not drawn. In non-strict mode the only one the SDK ever
+    // produces is `AuthenticityNotGuaranteed`, which means the Megolm key came from an
+    // "insecure source" -- and a key backup is one. Every message a recovered device can
+    // read therefore carries it, for ever, which made the transcript a wall of identical
+    // warnings saying nothing about any particular message. The SDK's own comment calls
+    // this case "quite common and mostly noise". A warning on every line is a warning on
+    // none, and the red one has to survive being noticed.
     match message.shield {
-        Shield::None => {}
+        Shield::None | Shield::Caution(_) => {}
         Shield::Warning(reason) => spans.push(Span::styled(
             format!("  ⛔ {}", reason.describe()),
             theme.error_style(),
-        )),
-        Shield::Caution(reason) => spans.push(Span::styled(
-            format!("  ❓ {}", reason.describe()),
-            theme.dim_style(),
         )),
     }
     Line::from(spans)
@@ -593,6 +597,28 @@ mod tests {
     }
 
     #[test]
+    fn a_key_from_backup_does_not_shield_every_message_it_unlocks() {
+        // Recovering from backup marks every restored key as an insecure source, so this
+        // caution lands on all of history at once. Drawn, it buries the warning that
+        // means something.
+        let mut entry = message(AgentPayload::None);
+        if let EntryKind::Message(m) = &mut entry.kind {
+            m.shield = Shield::Caution(heddle_matrix::ShieldReason::Unknown);
+        }
+        let out = render(
+            std::slice::from_ref(&entry),
+            &Theme::default(),
+            &Options::default(),
+            &Overrides::new(),
+            None,
+        );
+
+        let text = text_of(&out);
+        assert!(!text.contains("❓"));
+        assert!(!text.contains("authenticity unknown"));
+    }
+
+    #[test]
     fn every_glyph_the_transcript_prints_is_measured_as_it_is_painted() {
         use unicode_width::UnicodeWidthStr;
 
@@ -603,7 +629,7 @@ mod tests {
         //
         // The tempting glyphs for a security warning -- ⚠ and 🛡 -- are both Neutral.
         // This test exists because the next person to reach for one will not know that.
-        for glyph in ["👤", "🤖", "⛔", "❓", "🔒"] {
+        for glyph in ["👤", "🤖", "⛔", "🔒"] {
             assert_eq!(
                 UnicodeWidthStr::width(glyph),
                 2,
