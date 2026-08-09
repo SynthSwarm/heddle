@@ -168,6 +168,7 @@ Work in a fork of `hermes-agent`, not the installed checkout.
 | Hermes patch diverges from upstream | Medium | Minimal, additive, feature-flagged; fallback parser means heddle degrades rather than breaks | Open |
 | `ratatui-hypertile` is v0.4, single maintainer | Medium | Wrapped behind `heddle-layout` trait; fork is a one-file change | Open |
 | Terminal image protocol probing is unreliable | Low | `ratatui-image` handles detection; block fallback always available | Open |
+| `unicode-width` and the terminal disagree on emoji width | Medium | Emoji with East Asian Width `Neutral` (U+1F54A DOVE, U+1F441 EYE, U+1F5E1 DAGGER) measure as one cell and paint as two, so layout drifts by a column wherever one appears. A right-hand gutter keeps the overflow off the pane border and a forced repaint on focus change clears stranded cells, but text alignment is still approximate. A real fix means measuring widths ourselves and wrapping without `ratatui::Wrap` | Mitigated |
 | Render stalls during sync bursts | Medium | All SDK I/O off the render thread; `WorkerEvent` drained with a per-frame budget | Designed for |
 
 ---

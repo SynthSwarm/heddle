@@ -203,6 +203,13 @@ async fn event_loop(
     dispatch(app, handle);
 
     loop {
+        // A full clear discards ratatui's diff state, forcing every cell to be written
+        // again. Needed when the screen and ratatui's model of it have diverged; see
+        // App::focus_moved.
+        if app.needs_redraw {
+            terminal.clear()?;
+            app.needs_redraw = false;
+        }
         terminal.draw(|frame| ui::draw(frame, app))?;
         if app.should_quit {
             return Ok(());

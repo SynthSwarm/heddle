@@ -57,6 +57,10 @@ pub enum Action {
     ToggleHelp,
     CloseHelp,
 
+    /// Force a full repaint. The conventional terminal escape hatch for a screen that
+    /// has been corrupted by something outside the application's control.
+    Redraw,
+
     // Composer
     Insert(char),
     Backspace,
@@ -200,6 +204,7 @@ pub const BINDINGS: &[Binding] = &[
     b("^u / ^d", "half-page scroll", false),
     b("g / G", "top / bottom", false),
     b(":", "command palette", false),
+    b("^l", "redraw the screen", false),
     b("n / p", "next / prev tab", true),
     b("| / -", "split right / down", true),
     b("h j k l", "focus pane", true),
@@ -288,6 +293,7 @@ fn map_normal(key: KeyEvent) -> (Action, Mode) {
 
         KeyCode::Tab => (Action::ToggleCard, Mode::Normal),
 
+        KeyCode::Char('l') if ctrl => (Action::Redraw, Mode::Normal),
         KeyCode::Char('u') if ctrl => (Action::ScrollUp(10), Mode::Normal),
         KeyCode::Char('d') if ctrl => (Action::ScrollDown(10), Mode::Normal),
         KeyCode::Char('k') | KeyCode::Up => (Action::ScrollUp(1), Mode::Normal),

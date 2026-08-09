@@ -25,6 +25,12 @@ const TAB_SEPARATOR: &str = "│";
 /// Blank columns between key hints in the status bar.
 const HINT_GAP: usize = 3;
 
+/// Columns kept clear on the right of a transcript.
+///
+/// Absorbs the overflow when a glyph paints wider than `unicode-width` measured it, so
+/// the spill lands on a blank cell instead of the pane border.
+const TRANSCRIPT_GUTTER: u16 = 1;
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -317,14 +323,25 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
         // Only the focused pane shows the loaded transcript for now; per-pane
         // transcripts arrive with the M4 workspace work.
         if placement.is_focused {
+            // Keep one column clear on the right. `unicode-width` and the terminal
+            // disagree about emoji whose East Asian Width is Neutral but which render
+            // as two cells — U+1F54A DOVE and friends. ratatui lays them out as one
+            // column, the terminal paints two, and the overflow lands on whatever is to
+            // the right. Without the gutter that is the border, which is why the edge
+            // went dashed wherever such a glyph happened to end a line.
+            let text_area = Rect {
+                width: inner.width.saturating_sub(TRANSCRIPT_GUTTER),
+                ..inner
+            };
+
             let paragraph = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
 
             // The *wrapped* row count, not `lines.len()`. A single long message can
             // occupy many rows, and scrolling is measured in rows, so counting
             // unwrapped lines under-reports the scrollable extent and strands the
             // bottom of the transcript out of reach.
-            let total = paragraph.line_count(inner.width) as u16;
-            let height = inner.height;
+            let total = paragraph.line_count(text_area.width) as u16;
+            let height = text_area.height;
 
             // Hand the geometry back: only the renderer knows the wrapped extent at
             // this width, and both scroll clamping and pagination depend on it.
@@ -334,14 +351,11 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
             // `scroll` counts up from the bottom, so translate it to a top offset.
             let max_scroll = total.saturating_sub(height);
             let offset = max_scroll.saturating_sub(scroll.min(max_scroll));
-            frame.render_widget(paragraph.scroll((offset, 0)), inner);
+            frame.render_widget(paragraph.scroll((offset, 0)), text_area);
         }
 
-        // Border last, deliberately. Transcript content can reach the final inner
-        // column, and a double-width glyph landing there spills one cell into the
-        // border and punches a hole in it — which is why the right edge only went
-        // dashed once scrolling changed which glyphs sat at that column. Painting the
-        // chrome after the content makes the border immune to whatever it contains.
+        // Border last, deliberately. Belt and braces alongside the gutter: whatever the
+        // transcript contains, the chrome is painted over it rather than under it.
         frame.render_widget(block, placement.rect);
     }
 }

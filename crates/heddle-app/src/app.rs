@@ -86,6 +86,14 @@ pub struct App {
     pub bars: BarHits,
     /// Whether the `<prefix> ?` key overlay is showing.
     pub help: bool,
+    /// Set when the terminal must be fully repainted rather than diffed.
+    ///
+    /// ratatui only rewrites cells it believes have changed. A glyph that paints wider
+    /// than it was measured desynchronises that belief from the real screen, and the
+    /// stale cells are never repainted because ratatui thinks they are already right.
+    /// Switching view is the common case: the previous room's text stays on screen
+    /// under the new one.
+    pub needs_redraw: bool,
 
     pub should_quit: bool,
     /// Commands produced by the last update, drained by the caller.
@@ -125,6 +133,7 @@ impl App {
             viewport_height: 0,
             bars: BarHits::default(),
             help: false,
+            needs_redraw: false,
             should_quit: false,
             pending: Vec::new(),
         }
@@ -342,15 +351,13 @@ impl App {
                 if let Some(w) = self.workspaces.focused_mut() {
                     w.next_tab();
                 }
-                self.mark_focused_seen();
-                self.open_focused_view();
+                self.focus_moved();
             }
             Action::PrevTab => {
                 if let Some(w) = self.workspaces.focused_mut() {
                     w.prev_tab();
                 }
-                self.mark_focused_seen();
-                self.open_focused_view();
+                self.focus_moved();
             }
 
             Action::ScrollUp(n) => self.scroll_by(-(n as i32)),
@@ -365,6 +372,7 @@ impl App {
 
             Action::ToggleHelp => self.help = !self.help,
             Action::CloseHelp => self.help = false,
+            Action::Redraw => self.needs_redraw = true,
 
             Action::WorkspaceSwitcher | Action::FuzzyJump | Action::CommandPalette => {
                 // Overlays land in M4 alongside the rest of the workspace UI.
@@ -451,8 +459,7 @@ impl App {
         {
             tab.focus(id);
         }
-        self.mark_focused_seen();
-        self.open_focused_view();
+        self.focus_moved();
     }
 
     fn resize_pane(&mut self, dir: Dir) {
@@ -473,6 +480,17 @@ impl App {
         {
             tab.focus(id);
         }
+        self.focus_moved();
+    }
+
+    /// The user moved focus: repaint, mark the new view seen, and stream it.
+    ///
+    /// The repaint is not cosmetic. ratatui rewrites only the cells it believes have
+    /// changed, and a glyph that paints wider than it was measured leaves that belief
+    /// out of step with the screen. Switching to a shorter transcript then leaves the
+    /// previous room's text visible underneath it.
+    fn focus_moved(&mut self) {
+        self.needs_redraw = true;
         self.mark_focused_seen();
         self.open_focused_view();
     }
@@ -519,8 +537,7 @@ impl App {
                 .map(|h| h.index);
             if let Some(index) = index {
                 if self.workspaces.focus(index) {
-                    self.mark_focused_seen();
-                    self.open_focused_view();
+                    self.focus_moved();
                 }
             }
             return true;
@@ -546,8 +563,7 @@ impl App {
                     .focused_mut()
                     .is_some_and(|w| w.focus_tab(index))
                 {
-                    self.mark_focused_seen();
-                    self.open_focused_view();
+                    self.focus_moved();
                 }
             }
             return true;
@@ -1408,6 +1424,36 @@ mod tests {
         app.apply_action(Action::ToggleHelp);
         app.apply_action(Action::CloseHelp);
         assert!(!app.help, "escape must close the overlay");
+    }
+
+    #[test]
+    fn moving_focus_forces_a_full_repaint() {
+        // ratatui diffs against what it believes is on screen. A glyph that paints
+        // wider than it measured breaks that belief, and the old room's text is left
+        // stranded under the new one.
+        let mut app = app_with_two_rooms();
+        app.needs_redraw = false;
+
+        app.apply_action(Action::NextTab);
+        assert!(app.needs_redraw, "switching tab must repaint");
+
+        app.needs_redraw = false;
+        app.bars.tab_row = 1;
+        app.bars.tabs = vec![Hit {
+            x0: 1,
+            x1: 13,
+            index: 0,
+        }];
+        app.click_bar(5, 1);
+        assert!(app.needs_redraw, "clicking a tab must repaint");
+    }
+
+    #[test]
+    fn redraw_is_available_as_an_escape_hatch() {
+        let mut app = app();
+        app.needs_redraw = false;
+        app.apply_action(Action::Redraw);
+        assert!(app.needs_redraw);
     }
 
     #[test]
