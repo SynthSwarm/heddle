@@ -41,6 +41,12 @@ use tokio::task::JoinHandle;
 /// How many events to request per pagination step.
 const PAGINATE_BATCH: u16 = 40;
 
+/// How many times to ask for a page before giving a pane up as empty.
+///
+/// Five pages of [`PAGINATE_BATCH`] is enough to get past a long run of threaded events
+/// without walking a busy room back to its creation on every startup.
+const PAGINATE_ATTEMPTS: u8 = 5;
+
 /// Bound on the app -> worker channel. Commands are user-initiated, so this only needs
 /// to absorb a burst of keypresses.
 const COMMAND_BUFFER: usize = 64;
@@ -355,7 +361,32 @@ impl Worker {
             Command::Paginate { view, count } => {
                 let timeline = self.timeline(&view)?;
                 let count = if count == 0 { PAGINATE_BATCH } else { count };
-                let result = timeline.paginate_backwards(count).await;
+                // One call is not reliably one page; see `keep_paginating`.
+                let mut result = Ok(false);
+                for attempt in 1..=PAGINATE_ATTEMPTS {
+                    let started = std::time::Instant::now();
+                    result = timeline.paginate_backwards(count).await;
+                    let items = timeline.items().await;
+                    let shown = items.iter().filter(|i| i.as_event().is_some()).count();
+                    // Pagination is the only way a pane gets history that sync did not
+                    // bring, so when one comes up empty this says whether it was asked
+                    // for, how long it took and whether it brought anything back. An
+                    // empty pane and a pane nobody filled look identical without it.
+                    tracing::debug!(
+                        view = ?view,
+                        attempt,
+                        requested = count,
+                        items = items.len(),
+                        shown,
+                        reached_start = ?result.as_ref().ok(),
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "paginated backwards"
+                    );
+                    let Ok(reached_start) = result else { break };
+                    if !keep_paginating(attempt, shown, reached_start) {
+                        break;
+                    }
+                }
                 // A pagination that adds nothing produces no diff, so the subscriber
                 // stays silent -- and the app clears its in-flight flag on snapshots.
                 // Left to that alone the flag leaks, and because the flag is what
@@ -463,9 +494,27 @@ impl Worker {
 
             Command::MarkRead { view } => {
                 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
-                self.timeline(&view)?
-                    .mark_as_read(ReceiptType::Read)
-                    .await?;
+                let timeline = self.timeline(&view)?;
+                // The event is chosen here rather than left to `Timeline::mark_as_read`;
+                // see `receipt_target` for what that got wrong.
+                let items = timeline.items().await;
+                if let Some(event_id) = receipt_target(items.iter(), &view) {
+                    // Still the SDK's `send_single_receipt`, because the two things it
+                    // does get right are worth keeping: it infers the receipt's thread
+                    // from the timeline's focus, and it drops the request entirely when
+                    // an existing receipt already covers the event.
+                    //
+                    // A receipt is a courtesy to other people in the room. If the server
+                    // refuses it there is nothing the user can do and nothing they need
+                    // to know, so it does not travel back as a command failure -- which
+                    // is how a raw Synapse 400 ended up in the status line.
+                    if let Err(e) = timeline
+                        .send_single_receipt(ReceiptType::Read, event_id)
+                        .await
+                    {
+                        tracing::debug!(view = ?view, error = %e, "read receipt refused");
+                    }
+                }
             }
 
             Command::StartVerification => self.start_verification().await?,
@@ -747,7 +796,12 @@ impl Worker {
                 }
             };
 
-            emit(convert(initial.iter(), &agents)).await;
+            let initial = convert(initial.iter(), &agents);
+            // What the app is showing for this view, which is not always what the last
+            // snapshot said -- see `classify`.
+            let mut showing = initial.len();
+            let mut refilling = false;
+            emit(initial).await;
 
             while stream.next().await.is_some() {
                 // A snapshot rather than an incremental patch. The SDK has already done
@@ -772,12 +826,160 @@ impl Worker {
                         tracing::trace!(index = i, entry = %describe(entry), "entry");
                     }
                 }
-                emit(entries).await;
+
+                match classify(entries.len(), showing, refilling) {
+                    Snapshot::Show => {
+                        showing = entries.len();
+                        refilling = false;
+                        emit(entries).await;
+                    }
+                    Snapshot::Wait => {}
+                    Snapshot::Refill => {
+                        tracing::debug!(
+                            view = ?forward_view,
+                            showing,
+                            "timeline cache invalidated; refilling instead of blanking the pane"
+                        );
+                        refilling = true;
+                        // Back-pagination is what reloads the unloaded chunk, for a
+                        // thread as much as for a room. Its diffs wake this same loop,
+                        // and the snapshot that follows is the one the app gets.
+                        if let Err(e) = forward_timeline.paginate_backwards(PAGINATE_BATCH).await {
+                            // Not fatal, and not worth a status line: the pane keeps
+                            // what it had, and the next live event refills it anyway.
+                            tracing::warn!(
+                                view = ?forward_view,
+                                error = %e,
+                                "could not refill an invalidated timeline"
+                            );
+                        }
+                    }
+                }
             }
         });
 
         self.views.insert(view, OpenView { timeline, forward });
         Ok(())
+    }
+}
+
+/// Whether a pane that still has nothing to show is worth another page.
+///
+/// One call to `paginate_backwards` is not reliably one page of history, and a client
+/// that assumes it is leaves panes empty. Two SDK behaviours do it:
+///
+/// - A live timeline shows only the last `MAXIMUM_NUMBER_OF_INITIAL_ITEMS` (20) of what
+///   it holds, and hides the rest behind a skip count. `paginate_backwards` first tries
+///   to satisfy the request by lowering that count, and returns without touching the
+///   event cache when it can. The SDK says as much where it does it: "A subsequent call
+///   will go to the `Some()` arm of this match, and cause a call to the event cache's
+///   pagination."
+/// - A room pane hides threaded events, so a page that is entirely thread replies adds
+///   nothing it can draw. In an agent room that is the normal shape of recent history.
+///
+/// This is why the Commons pane came up blank at startup while its two thread panes
+/// filled at once: the saved layout puts the room pane first, so its pagination ran
+/// first, returned in under 300 ms, and brought back nothing the pane could show. Thread
+/// panes go straight to `/relations` and have neither behaviour.
+///
+/// A pane that already has content asks once, exactly as before.
+fn keep_paginating(attempt: u8, shown: usize, reached_start: bool) -> bool {
+    shown == 0 && !reached_start && attempt < PAGINATE_ATTEMPTS
+}
+
+/// What to do with a timeline snapshot, given what the pane is already showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Snapshot {
+    /// Send it: it is the truth about the view.
+    Show,
+    /// Drop it and back-paginate; the cache was unloaded, not the history deleted.
+    Refill,
+    /// Drop it; a refill is already in flight.
+    Wait,
+}
+
+/// Decide whether an empty snapshot is news or an artefact.
+///
+/// A *gappy* sync -- one the server marks `limited`, carrying a fresh prev-batch token
+/// -- makes the SDK unload the room's linked chunk down to its last chunk, and invalidate
+/// every thread in the room along with it, because it cannot know which ones the gap
+/// touched. Both are deliberate: `RoomEventCacheState::handle_sync` says so, and the
+/// SDK's own tests assert the events disappear. Every timeline for that room then
+/// publishes a snapshot of nothing, within milliseconds of each other, and nothing
+/// refills them until something asks for a page.
+///
+/// Forwarded verbatim, that empties every pane at once -- which is bug 2.1, and why it
+/// looked like reacting caused it: the react merely happened to be what the user was
+/// doing when a gappy sync landed.
+///
+/// So an empty snapshot for a view that was showing something is treated as the
+/// invalidation it is, and answered with a back-pagination rather than passed on. The
+/// cost of being wrong is a pane that keeps its transcript after a room genuinely
+/// emptied; that needs the room to be left, since redaction leaves entries behind, and
+/// a pane of a room you have left is not worth blanking a working client for.
+fn classify(snapshot: usize, showing: usize, refilling: bool) -> Snapshot {
+    if snapshot > 0 || showing == 0 {
+        Snapshot::Show
+    } else if refilling {
+        Snapshot::Wait
+    } else {
+        Snapshot::Refill
+    }
+}
+
+/// The newest event in `items` that a receipt for `view` is allowed to name.
+///
+/// `Timeline::mark_as_read` picks this itself, and picked wrong: the server answered
+/// `[400 / M_INVALID_PARAM] event_id $… is not related to thread main`, and heddle
+/// reported it as a command failure, so a raw Synapse error landed in the status line.
+///
+/// The SDK does try. For a live timeline built with `hide_threaded_events`, it sends the
+/// receipt against `main` and skips events it knows are in a thread. But it also has to
+/// skip *aggregations of* in-thread events -- a reaction carries no thread relation of
+/// its own, so it looks unthreaded until you resolve its target -- and that resolution
+/// needs the target still present in the timeline's remote events. After a gappy sync
+/// unloads the room's chunk (§2.1) it is not, the reaction is taken for a main-timeline
+/// event, and the server disagrees.
+///
+/// heddle does not need to reconstruct any of that, because a view already answers the
+/// question. Its entries are the events it displays: the room pane hides threaded events,
+/// and a thread pane shows one thread. Picking from what was drawn makes the receipt
+/// consistent with the pane by construction, and reactions never appear here at all --
+/// they are folded into the message they annotate.
+fn receipt_target<'a>(
+    items: impl DoubleEndedIterator<Item = &'a Arc<matrix_sdk_ui::timeline::TimelineItem>>,
+    view: &View,
+) -> Option<matrix_sdk::ruma::OwnedEventId> {
+    items.rev().find_map(|item| {
+        let event = item.as_event()?;
+        let event_id = event.event_id()?;
+        let root = match event.content() {
+            TimelineItemContent::MsgLike(msg_like) => {
+                msg_like.thread_root.as_ref().map(ToString::to_string)
+            }
+            _ => None,
+        };
+        belongs_to(
+            view.thread_root.as_deref(),
+            event_id.as_str(),
+            root.as_deref(),
+        )
+        .then(|| event_id.to_owned())
+    })
+}
+
+/// Whether an event may carry the read receipt for a view.
+///
+/// This is the same question the homeserver asks when it validates the receipt's
+/// `thread_id`, which is why it is worth asking in the same terms.
+fn belongs_to(view_root: Option<&str>, event_id: &str, event_root: Option<&str>) -> bool {
+    match view_root {
+        // The room pane hides threaded events, so its receipt goes against `main`, and
+        // `main` means an event that is in no thread.
+        None => event_root.is_none(),
+        // A thread pane's receipt names that thread. The root qualifies: it is the
+        // thread's first event, not an event outside it.
+        Some(root) => event_root == Some(root) || event_id == root,
     }
 }
 
@@ -1308,4 +1510,96 @@ fn decode_agent(
     }
 
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    use super::*;
+
+    #[test]
+    fn a_pane_with_something_to_show_asks_for_one_page() {
+        // Scrolling must not turn into five requests.
+        assert!(!keep_paginating(1, 20, false));
+    }
+
+    #[test]
+    fn a_pane_with_nothing_to_show_asks_again() {
+        // The startup case: the first call lowered a skip count, or returned a page of
+        // threaded events the room pane hides. Either way the pane is still blank.
+        assert!(keep_paginating(1, 0, false));
+    }
+
+    #[test]
+    fn a_pane_stops_asking_at_the_start_of_the_room() {
+        // A room really can have no history this pane can draw; asking again would be
+        // asking for events that do not exist.
+        assert!(!keep_paginating(1, 0, true));
+    }
+
+    #[test]
+    fn a_pane_gives_up_rather_than_walking_back_forever() {
+        // A room whose entire history is threaded would otherwise paginate to its
+        // creation event every time it is opened.
+        assert!(!keep_paginating(PAGINATE_ATTEMPTS, 0, false));
+    }
+
+    #[test]
+    fn an_ordinary_snapshot_is_shown() {
+        assert_eq!(classify(12, 7, false), Snapshot::Show);
+    }
+
+    #[test]
+    fn a_view_that_has_nothing_yet_may_be_told_it_has_nothing() {
+        // The first snapshot of a room the client has not synced is legitimately empty,
+        // and suppressing it would leave the pane waiting for a page that never comes.
+        assert_eq!(classify(0, 0, false), Snapshot::Show);
+    }
+
+    #[test]
+    fn a_gappy_sync_does_not_blank_a_pane_that_had_a_transcript() {
+        // Bug 2.1: three views of one room emptied within 5ms of each other because the
+        // SDK unloaded the room's chunk and invalidated its threads after a limited
+        // sync. None of them was actually empty.
+        assert_eq!(classify(0, 71, false), Snapshot::Refill);
+    }
+
+    #[test]
+    fn a_refill_is_asked_for_once_and_not_on_every_snapshot() {
+        // Pagination that returns nothing must not turn into a request per wake-up: the
+        // pane keeps what it has and waits instead.
+        assert_eq!(classify(0, 71, true), Snapshot::Wait);
+    }
+
+    #[test]
+    fn a_room_receipt_may_only_name_an_event_outside_every_thread() {
+        // Bug 2.3: the room pane's receipt goes against `main`, and the server checks it.
+        assert!(belongs_to(None, "$msg", None));
+        assert!(!belongs_to(None, "$reply", Some("$root")));
+    }
+
+    #[test]
+    fn a_thread_receipt_may_name_a_reply_in_that_thread() {
+        assert!(belongs_to(Some("$root"), "$reply", Some("$root")));
+    }
+
+    #[test]
+    fn a_thread_receipt_may_name_the_root_itself() {
+        // The root carries no thread relation -- it starts the thread rather than
+        // sitting in it -- but it is the one event a thread pane always shows.
+        assert!(belongs_to(Some("$root"), "$root", None));
+    }
+
+    #[test]
+    fn a_thread_receipt_may_not_name_another_thread_or_the_main_timeline() {
+        assert!(!belongs_to(Some("$root"), "$reply", Some("$other")));
+        assert!(!belongs_to(Some("$root"), "$msg", None));
+    }
+
+    #[test]
+    fn a_refill_that_worked_ends_the_wait() {
+        // The snapshot after a successful back-pagination is shown, and `refilling` is
+        // cleared by the caller so a later invalidation is answered afresh.
+        assert_eq!(classify(40, 71, true), Snapshot::Show);
+    }
 }
