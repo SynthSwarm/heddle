@@ -215,6 +215,22 @@ pub struct ThreadSummary {
     pub timestamp: u64,
 }
 
+/// One joined member of a room, as offered by the mention picker.
+///
+/// Only joined members: a mention of someone who has left notifies nobody, and offering
+/// them would be offering a dead end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberSummary {
+    pub user_id: String,
+    /// The member's chosen name, or the localpart when they have not set one.
+    pub display_name: String,
+    /// Whether another joined member shows the same display name.
+    ///
+    /// Taken from the SDK's own disambiguation rather than recomputed, because deciding
+    /// when two people look alike is exactly the judgement a client should not improvise.
+    pub ambiguous: bool,
+}
+
 /// How far an interactive device verification has got.
 ///
 /// Only one runs at a time. Verification is a conversation with a human at both ends,
@@ -281,18 +297,27 @@ pub enum Command {
     SendMessage {
         view: View,
         body: String,
+        /// User IDs to mention, for `m.mentions`.
+        ///
+        /// Carried separately from the body because a mention is not text. Since spec
+        /// v1.7 the push rules fire on `m.mentions`, so an `@name` that only appears in
+        /// the body notifies nobody and, more to the point, does not reach an agent
+        /// waiting to be called.
+        mentions: Vec<String>,
     },
     /// Send a message as a reply to an event.
     SendReply {
         view: View,
         in_reply_to: String,
         body: String,
+        mentions: Vec<String>,
     },
     /// Replace an event's content. Only own, editable events.
     Edit {
         view: View,
         event_id: String,
         body: String,
+        mentions: Vec<String>,
     },
     /// Redact an event.
     Redact {
@@ -301,6 +326,10 @@ pub enum Command {
     },
     /// Ask for the room's thread roots.
     ListThreads {
+        room_id: String,
+    },
+    /// Ask who is in the room, for the mention picker.
+    ListMembers {
         room_id: String,
     },
     /// React to an event. Used for approvals and the model picker as well as ordinary
@@ -359,6 +388,11 @@ pub enum WorkerEvent {
     Threads {
         room_id: String,
         threads: Vec<ThreadSummary>,
+    },
+    /// A room's joined members, for the mention picker.
+    Members {
+        room_id: String,
+        members: Vec<MemberSummary>,
     },
     /// Non-fatal; shown in the status line.
     Warning(String),

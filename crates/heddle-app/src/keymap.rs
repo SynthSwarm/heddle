@@ -96,6 +96,9 @@ pub enum Action {
     CaretDown,
     CaretHome,
     CaretEnd,
+    /// Take the highlighted completion. Means nothing unless a completion is offered,
+    /// which is why tab is otherwise free to be swallowed.
+    Complete,
 
     Quit,
     /// A key that means nothing in this mode. Swallowed.
@@ -244,6 +247,7 @@ pub const BINDINGS: &[Binding] = &[
     b("^left / ^right", "move a word", false),
     b("up / down", "line, then history", false),
     b("^w / ^u", "delete word / to line start", false),
+    b("@", "mention someone, tab or enter to pick", false),
     b("n / p", "next / prev tab", true),
     b("| / -", "split right / down", true),
     b("h j k l", "focus pane", true),
@@ -392,6 +396,10 @@ fn map_insert(key: KeyEvent) -> (Action, Mode) {
         // and every coding agent REPL.
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => Action::Newline,
         KeyCode::Enter => Action::Submit,
+
+        // Only ever reaches an open completion popup; there is nothing else in the
+        // composer for a tab to do, and inserting one would be a tab in a chat message.
+        KeyCode::Tab => Action::Complete,
 
         KeyCode::Char(c) if !ctrl => Action::Insert(c),
         _ => Action::None,

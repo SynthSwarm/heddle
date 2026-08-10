@@ -10,7 +10,7 @@ built, what is broken, what was got wrong, and what to do next.
 | **Date**       | 2026-08-10                                        |
 | **Commit**     | `df331e1`                                         |
 | **Branch**     | `main`, pushed, worktree clean                    |
-| **Tests**      | 334 passing; `fmt` and `clippy -D warnings` clean |
+| **Tests**      | 365 passing; `fmt` and `clippy -D warnings` clean |
 | **Size**       | 16,843 lines across five crates                   |
 | **Milestones** | M0–M4 closed; M5 deliberately skipped; M6 open    |
 
@@ -190,6 +190,7 @@ thing that has exercised most of this session's work.**
 | Command palette (`:`)                     | `d774c36` | Yes              |
 | Agent adapter layer                       | `9b6b71c` | **No**           |
 | `--check` doctor                          | `9e51f72` | Yes              |
+| @mentions and the room roster             | this run  | Yes              |
 
 The adapter refactor is the one to be most careful about: it changed the type that
 every single message flows through. It is well covered by unit tests and has never
@@ -233,6 +234,38 @@ agents produced 10,180 records:
 
 ---
 
+## 4.2 Mentions
+
+`@` in the composer opens a picker over the room's joined members (SPEC §5.3.1). Three
+parts, and the middle one is the part that does the work:
+
+| Where | What |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| `worker.rs` | `collect_members` over `RoomMemberships::JOIN`; `Command::ListMembers` → `WorkerEvent::Members`. |
+| `worker.rs::mention` | Puts the user IDs in `m.mentions`. Without this the feature is decoration. |
+| `app.rs`, `composer.rs` | `mention_query` / `replace_mention`, and the picker state. |
+
+Things that were decided and are easy to undo by accident:
+
+- **The picker is not modal.** Every other overlay swallows keys or switches mode; this
+  one lets editing through and is recomputed from the buffer afterwards, by
+  `touches_composer` at the end of `apply_action`. Driving it from its own keystrokes
+  instead would break the first time someone pastes or moves the caret.
+- **A picker with no matches steals nothing.** It draws nothing, so it must not eat the
+  return key either — otherwise "email me @ 5pm" is a message that silently will not
+  send. There is a test named after that.
+- **Mentions are resolved from the sent text, not tracked while typing.** So a name typed
+  by hand counts and a name deleted afterwards does not.
+- **A name that names two people names nobody.** Two members can share a localpart across
+  homeservers, and two more can share a display name. `resolve_mention` answers only when
+  exactly one member matches.
+- The roster is asked for once per room on first focus, so the popup opens with a list
+  rather than a round trip.
+- `ui.rs::anchored` is the first non-centred popup in the codebase. The other six still
+  hand-roll the same centred rect; extracting them was deliberately left alone.
+
+---
+
 ## 5. Decisions that should not be relitigated
 
 | Decision                                                  | Reason                                                                                                            |
@@ -243,6 +276,8 @@ agents produced 10,180 records:
 | No close-tab                                              | Tabs are rooms. There is no way to open one, so closing is a trapdoor.                                            |
 | Only EAW=Wide glyphs in the UI                            | Everything else mismeasures across terminals. Unread badges are ASCII `(3)` / `(@3)` for the same reason.         |
 | No real homeserver in docs or tests                       | `example.org` throughout.                                                                                         |
+| Mentions ride in `m.mentions`, not in the body text       | It is what the push rules read since spec v1.7, and what an agent waiting to be called actually sees.             |
+| Enter takes the completion when the picker is open        | What every client with an autocomplete does. `esc` first sends the text as written.                                |
 
 ---
 
@@ -251,7 +286,8 @@ agents produced 10,180 records:
 Ordered by what should happen first.
 
 1. **Shakedown of the §2.4 fix against a live homeserver**, which is the only place it
-   was ever wrong. §2.1–§2.3 are already confirmed there.
+   was ever wrong. §2.1–§2.3 and mentions (§4.2) are confirmed there; Hermes does wake
+   on `m.mentions`.
 2. **Fixtures from the deduplicated capture** (§4.1), and prune dead chrome tests.
 3. **Shakedown of the unverified features** (§3).
 4. Fix capture duplication by keying on event id.

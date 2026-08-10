@@ -13,8 +13,8 @@ use heddle_layout::{
     ORPHAN_WORKSPACE,
 };
 use heddle_matrix::{
-    Command, Entry, EntryKind, RecoveryState, RoomSummary, Shield, SyncState, ThreadSummary,
-    Verification, View, WorkerEvent,
+    Command, Entry, EntryKind, MemberSummary, RecoveryState, RoomSummary, Shield, SyncState,
+    ThreadSummary, Verification, View, WorkerEvent,
 };
 use heddle_render::{Options, Overrides, Theme};
 use std::collections::{HashMap, HashSet};
@@ -78,6 +78,20 @@ impl ThreadPicker {
     pub fn selected(&self) -> Option<&ThreadSummary> {
         self.threads.get(self.selected)
     }
+}
+
+/// The open mention picker.
+///
+/// Unlike every other overlay this one is not modal: the composer keeps taking keys
+/// underneath it, and the query is recomputed from the buffer after each edit rather
+/// than accumulated here. Only movement and acceptance are intercepted.
+#[derive(Debug, Clone, Default)]
+pub struct MentionPicker {
+    /// Byte offset of the `@` in the composer, so a completion knows what to replace.
+    pub start: usize,
+    /// Indices into the room's member list, best match first.
+    pub matches: Vec<usize>,
+    pub selected: usize,
 }
 
 /// A clickable cell on one of the bars, in absolute terminal columns.
@@ -182,6 +196,15 @@ pub struct App {
     pub composing: Option<Pending>,
     /// The room whose thread picker is open, if any.
     pub threads: Option<ThreadPicker>,
+    /// Joined members per room, for the mention picker.
+    ///
+    /// Asked for once per room, when it is first focused, so that typing `@` shows a
+    /// list rather than a round trip. A room nobody has looked at costs nothing.
+    pub members: HashMap<String, Vec<MemberSummary>>,
+    /// Rooms already asked about, so a room with no members is not asked about forever.
+    members_asked: HashSet<String>,
+    /// The open mention picker, if any.
+    pub mentions: Option<MentionPicker>,
     /// The open emoji picker, if any.
     pub emoji: Option<crate::emoji::Picker>,
     /// The open command palette, if any.
@@ -277,6 +300,9 @@ impl App {
             selected: HashMap::new(),
             composing: None,
             threads: None,
+            members: HashMap::new(),
+            members_asked: HashSet::new(),
+            mentions: None,
             emoji: None,
             palette: None,
             dragging: None,
@@ -951,6 +977,14 @@ impl App {
                 }
             }
 
+            WorkerEvent::Members { room_id, members } => {
+                // Cached rather than handed to an open picker: the roster belongs to the
+                // room, not to one moment of typing, and the picker is opened and closed
+                // once per mention.
+                self.members.insert(room_id, members);
+                self.refilter_mentions();
+            }
+
             WorkerEvent::Warning(text) => self.status = Some(text),
 
             WorkerEvent::Verification(state) => {
@@ -1424,6 +1458,55 @@ impl App {
             }
         }
 
+        // The mention picker is a filter on the composer, not a replacement for it, so
+        // it takes only the three keys that mean something to a list and lets every
+        // editing key through to the buffer underneath. The popup is then recomputed
+        // from that buffer at the end of this function.
+        //
+        // Only while it has something to show. An armed `@` that matches nobody draws
+        // nothing, and a popup nobody can see must not swallow the return key -- that
+        // way lies a message that will not send and no way to find out why.
+        if self
+            .mentions
+            .as_ref()
+            .is_some_and(|p| !p.matches.is_empty())
+        {
+            match action {
+                // Arrow keys only. The wheel belongs to the transcript: a list of four
+                // names is not what someone reaching for the mouse means to scroll.
+                Action::CaretUp => {
+                    if let Some(p) = &mut self.mentions {
+                        p.selected = p.selected.saturating_sub(1);
+                    }
+                    self.needs_redraw = true;
+                    return;
+                }
+                Action::CaretDown => {
+                    if let Some(p) = &mut self.mentions {
+                        p.selected = (p.selected + 1).min(p.matches.len().saturating_sub(1));
+                    }
+                    self.needs_redraw = true;
+                    return;
+                }
+                // Enter completes rather than sends, which is what every client with an
+                // autocomplete does; Esc first is how you send the text as written.
+                Action::Submit | Action::Complete => {
+                    self.accept_mention();
+                    return;
+                }
+                Action::Cancel => {
+                    // Only the popup. `keymap` has already set Normal on the way in, and
+                    // dropping out of the composer as well would punish a user who just
+                    // wanted the list gone.
+                    self.mentions = None;
+                    self.mode = Mode::Insert;
+                    self.needs_redraw = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match action {
             Action::None => {}
             Action::Quit => {
@@ -1519,6 +1602,9 @@ impl App {
             }
             Action::CaretUp => self.composer_up(),
             Action::CaretDown => self.composer_down(),
+            // Reaching here means no completion was on offer, so tab does nothing rather
+            // than putting a tab character into a chat message.
+            Action::Complete => {}
             Action::Submit => self.submit(),
 
             Action::Split(dir) => self.split(dir),
@@ -1606,6 +1692,13 @@ impl App {
                 self.mode = Mode::Insert;
             }
         }
+
+        // The popup follows the buffer rather than the keystrokes, so it is recomputed
+        // once here from whatever the edit left behind. Doing it per arm would mean
+        // fourteen call sites and one of them eventually forgotten.
+        if touches_composer(action) {
+            self.refilter_mentions();
+        }
     }
 
     fn submit(&mut self) {
@@ -1620,19 +1713,29 @@ impl App {
         let Some(body) = self.composers.entry(view.clone()).or_default().take() else {
             return;
         };
+        // Read back off the finished text rather than tracked while typing, so a name
+        // typed out in full mentions its owner exactly like one picked from the list,
+        // and one deleted afterwards mentions nobody.
+        let mentions = self.mentioned_in(&view.room_id, &body);
 
         let command = match self.composing.take() {
             Some(Pending::Reply(in_reply_to)) => Command::SendReply {
                 view,
                 in_reply_to,
                 body,
+                mentions,
             },
             Some(Pending::Edit(event_id)) => Command::Edit {
                 view,
                 event_id,
                 body,
+                mentions,
             },
-            None => Command::SendMessage { view, body },
+            None => Command::SendMessage {
+                view,
+                body,
+                mentions,
+            },
         };
         self.queue(command);
     }
@@ -1802,6 +1905,9 @@ impl App {
         // The notice belongs to the room being left, so it has to go before the focus
         // does; afterwards there is nothing left pointing at the old room.
         self.stop_typing();
+        // The picker belongs to one composer in one pane. Carried across, it would offer
+        // the last pane's half-typed name over this pane's transcript.
+        self.mentions = None;
         self.needs_redraw = true;
         // Where the user is looking is part of the layout, and it is also the signal
         // that they have taken over from the restore: from here on, moving them would
@@ -1923,6 +2029,134 @@ impl App {
             self.paginating.insert(view.clone());
             self.queue(Command::Paginate { view, count: 0 });
         }
+
+        self.ask_for_members();
+    }
+
+    /// Ask who is in the focused room, once.
+    ///
+    /// Asked on focus rather than when `@` is typed so the picker has a list to show the
+    /// moment it opens. A roster that arrives a round trip after the popup does is a
+    /// popup that appears empty and then jumps.
+    fn ask_for_members(&mut self) {
+        let Some(room_id) = self
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map(|tab| tab.room_id.clone())
+        else {
+            return;
+        };
+        // Tracked separately from `members` because a room can legitimately answer with
+        // nobody, and an empty answer must not look like an unasked question.
+        if self.members_asked.insert(room_id.clone()) {
+            self.queue(Command::ListMembers { room_id });
+        }
+    }
+
+    /// Recompute the mention picker from the composer, opening or closing it as needed.
+    ///
+    /// Called after every composer edit rather than driven by its own keystrokes: the
+    /// buffer is the truth about what is being typed, and deriving the query from it is
+    /// what makes the popup survive a backspace, a caret move, or a pasted line.
+    fn refilter_mentions(&mut self) {
+        let Some(view) = self.focused_view() else {
+            self.mentions = None;
+            return;
+        };
+        let Some((start, query)) = self
+            .composers
+            .get(&view)
+            .and_then(|c| c.mention_query())
+            .map(|(start, query)| (start, query.to_owned()))
+        else {
+            self.mentions = None;
+            return;
+        };
+
+        let members = self.members.get(&view.room_id).map(Vec::as_slice);
+        let matches = rank_members(members.unwrap_or_default(), &query);
+        // An armed `@` with nothing behind it draws no popup, but stays armed: the next
+        // character may well match, and closing here would mean the picker never opens
+        // for a room whose roster arrives late.
+        let selected = match &self.mentions {
+            // Keep the highlight where the user put it while the query is unchanged.
+            Some(open) if open.start == start && open.matches == matches => {
+                open.selected.min(matches.len().saturating_sub(1))
+            }
+            _ => 0,
+        };
+        self.mentions = Some(MentionPicker {
+            start,
+            matches,
+            selected,
+        });
+        self.needs_redraw = true;
+    }
+
+    /// Members of `room_id` whose name is written in `body`, as user IDs.
+    ///
+    /// Read off the finished message rather than remembered from the picker, so that a
+    /// name typed out in full counts and one deleted afterwards does not. The cost is
+    /// that writing *about* someone mentions them, which is how every other client
+    /// behaves and which `m.mentions` makes no worse than a notification.
+    fn mentioned_in(&self, room_id: &str, body: &str) -> Vec<String> {
+        let Some(members) = self.members.get(room_id) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for word in mention_words(body) {
+            if let Some(member) = resolve_mention(members, word) {
+                if !out.contains(&member.user_id) {
+                    out.push(member.user_id.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Put the highlighted member into the composer, replacing what was typed.
+    fn accept_mention(&mut self) {
+        let Some(picker) = self.mentions.take() else {
+            return;
+        };
+        let Some(view) = self.focused_view() else {
+            return;
+        };
+        let Some(member) = picker
+            .matches
+            .get(picker.selected)
+            .and_then(|&i| self.members.get(&view.room_id).and_then(|m| m.get(i)))
+        else {
+            return;
+        };
+
+        let text = format!("{} ", mention_text(member, self.members_of(&view.room_id)));
+        let start = picker.start;
+        if let Some(composer) = self.composers.get_mut(&view) {
+            composer.replace_mention(start, &text);
+        }
+        self.needs_redraw = true;
+    }
+
+    fn members_of(&self, room_id: &str) -> &[MemberSummary] {
+        self.members.get(room_id).map_or(&[], Vec::as_slice)
+    }
+
+    /// The members the open picker is offering, in match order.
+    pub fn mention_matches(&self) -> Vec<&MemberSummary> {
+        let Some(picker) = &self.mentions else {
+            return Vec::new();
+        };
+        let Some(view) = self.focused_view() else {
+            return Vec::new();
+        };
+        let members = self.members_of(&view.room_id);
+        picker
+            .matches
+            .iter()
+            .filter_map(|&i| members.get(i))
+            .collect()
     }
 
     /// The largest meaningful scroll offset: one screen short of the oldest line.
@@ -2112,12 +2346,276 @@ fn Workspace_focused_tab_mut(w: &mut heddle_layout::Workspace) -> Option<&mut Ta
     w.focused_tab_mut()
 }
 
+/// Whether an action can have changed the composer's text or caret.
+///
+/// The mention picker is recomputed after exactly these, and after nothing else: a
+/// pane split or a scroll leaves the buffer alone, and re-deriving the popup from an
+/// unchanged buffer would reopen a picker the user had just dismissed.
+fn touches_composer(action: Action) -> bool {
+    matches!(
+        action,
+        Action::Insert(_)
+            | Action::Backspace
+            | Action::Delete
+            | Action::DeleteWord
+            | Action::DeleteToLineStart
+            | Action::Newline
+            | Action::CaretLeft
+            | Action::CaretRight
+            | Action::CaretWordLeft
+            | Action::CaretWordRight
+            | Action::CaretHome
+            | Action::CaretEnd
+            | Action::CaretUp
+            | Action::CaretDown
+    )
+}
+
+/// The text heddle writes into the message for a mention.
+///
+/// The localpart, not the display name, and never the raw display name of someone whose
+/// name is shared. Two reasons, both about the message being readable back:
+///
+/// - A display name may contain spaces, and a mention that contains a space cannot be
+///   found again by [`mention_words`], so it would be offered by the picker and then
+///   silently fail to mention anyone.
+/// - Two members can show the same name. `@alex` would then name nobody in particular,
+///   and the reader has no way to tell which was meant.
+///
+/// So an unambiguous member gets `@localpart` and everyone else gets their full ID.
+/// `m.mentions` carries the authoritative user ID either way; this is what a human sees.
+fn mention_text(member: &MemberSummary, room: &[MemberSummary]) -> String {
+    let own = localpart(&member.user_id);
+    let shared = room
+        .iter()
+        .filter(|other| localpart(&other.user_id) == own)
+        .count()
+        > 1;
+    if shared {
+        // Already carries its own sigil.
+        member.user_id.clone()
+    } else {
+        format!("@{own}")
+    }
+}
+
+/// The localpart of a user ID, without its leading sigil.
+fn localpart(user_id: &str) -> &str {
+    user_id
+        .strip_prefix('@')
+        .unwrap_or(user_id)
+        .split(':')
+        .next()
+        .unwrap_or_default()
+}
+
+/// Every `@word` in a message, without its sigil.
+///
+/// Word here means what [`Composer::mention_query`] means by it, so that what the picker
+/// wrote can be read back: a run starting at a word boundary and ending at whitespace.
+///
+/// Trailing punctuation is trimmed, because "thanks @bob!" mentions bob and so does
+/// "ask @bob." — including the full-stop case, which also leaves a trailing dot off a
+/// homeserver name without eating the dots inside it. Underscore and hyphen survive:
+/// they end no sentence and they are ordinary in a localpart.
+fn mention_words(body: &str) -> Vec<&str> {
+    let trailing = |c: char| c.is_ascii_punctuation() && c != '_' && c != '-';
+    body.split_whitespace()
+        .filter_map(|word| word.strip_prefix('@'))
+        .map(|word| word.trim_end_matches(trailing))
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Which member, if any, a written `@word` names.
+///
+/// Tried as a full user ID, then a localpart, then a display name. Each step only
+/// answers when it names exactly one member: two people can share a localpart across
+/// homeservers and two more can share a display name, and picking the first of them
+/// would put a notification in front of somebody who was never addressed. A name that
+/// names two people names neither, and the message goes out mentioning nobody rather
+/// than mentioning the wrong person.
+fn resolve_mention<'a>(members: &'a [MemberSummary], word: &str) -> Option<&'a MemberSummary> {
+    let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+
+    only(members, |m| eq(m.user_id.trim_start_matches('@'), word))
+        .or_else(|| only(members, |m| eq(localpart(&m.user_id), word)))
+        .or_else(|| only(members, |m| !m.ambiguous && eq(&m.display_name, word)))
+}
+
+/// The one member matching `f`, or `None` if none or several do.
+fn only(members: &[MemberSummary], f: impl Fn(&MemberSummary) -> bool) -> Option<&MemberSummary> {
+    let mut hits = members.iter().filter(|m| f(m));
+    match (hits.next(), hits.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
+    }
+}
+
+/// Members matching `query`, best first, as indices into `members`.
+///
+/// An empty query offers everyone, in the order the worker sorted them. Otherwise both
+/// the display name and the localpart are scored and the better of the two wins, so
+/// `@qui` finds "Quintin" and `@wri` finds a bot whose display name is "Retinue".
+fn rank_members(members: &[MemberSummary], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..members.len()).collect();
+    }
+
+    let mut scored: Vec<_> = members
+        .iter()
+        .enumerate()
+        .filter_map(|(i, member)| {
+            let by_name = crate::palette::rank(&member.display_name, query);
+            let by_id = crate::palette::rank(localpart(&member.user_id), query);
+            let best = match (by_name, by_id) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }?;
+            Some((best, i))
+        })
+        .collect();
+    // Stable, so members that score the same keep the worker's alphabetical order.
+    scored.sort_by_key(|(score, _)| *score);
+    scored.into_iter().map(|(_, i)| i).collect()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
     use heddle_agent::{AgentEvent, Approval, Kind, Tool, ToolStatus};
     use heddle_matrix::{AgentPayload, EntryKind, Message};
+
+    fn members() -> Vec<MemberSummary> {
+        vec![
+            MemberSummary {
+                user_id: "@quintin:example.org".into(),
+                display_name: "Quintin".into(),
+                ambiguous: false,
+            },
+            MemberSummary {
+                user_id: "@wright:example.org".into(),
+                display_name: "Retinue".into(),
+                ambiguous: false,
+            },
+            MemberSummary {
+                user_id: "@alex:example.org".into(),
+                display_name: "Alex".into(),
+                ambiguous: true,
+            },
+            MemberSummary {
+                user_id: "@alex:other.example".into(),
+                display_name: "Alex".into(),
+                ambiguous: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_mention_is_written_as_a_localpart() {
+        // Not the display name: it may contain a space, and a mention with a space in it
+        // cannot be found again when the message is read back.
+        let m = members();
+        assert_eq!(mention_text(&m[0], &m), "@quintin");
+    }
+
+    #[test]
+    fn a_shared_localpart_is_written_out_in_full() {
+        // Two Alexes on different homeservers. `@alex` would name neither of them.
+        let m = members();
+        assert_eq!(mention_text(&m[2], &m), "@alex:example.org");
+        assert_eq!(mention_text(&m[3], &m), "@alex:other.example");
+    }
+
+    #[test]
+    fn a_written_mention_resolves_to_a_user_id() {
+        let m = members();
+        assert_eq!(
+            resolve_mention(&m, "quintin").map(|x| x.user_id.as_str()),
+            Some("@quintin:example.org")
+        );
+        // By display name too, which is what someone typing without the picker does.
+        assert_eq!(
+            resolve_mention(&m, "Retinue").map(|x| x.user_id.as_str()),
+            Some("@wright:example.org")
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_display_name_resolves_to_nobody() {
+        // Guessing between two people called Alex would notify the wrong one.
+        assert!(resolve_mention(&members(), "Alex").is_none());
+        // The full ID still works, because it names exactly one of them.
+        assert_eq!(
+            resolve_mention(&members(), "alex:other.example").map(|x| x.user_id.as_str()),
+            Some("@alex:other.example")
+        );
+    }
+
+    #[test]
+    fn mentions_are_read_out_of_a_finished_message() {
+        let mut app = app();
+        app.members.insert("!r:x".into(), members());
+        assert_eq!(
+            app.mentioned_in("!r:x", "morning @quintin and @wright, ready?"),
+            vec![
+                "@quintin:example.org".to_owned(),
+                "@wright:example.org".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mention_at_the_end_of_a_sentence_still_counts() {
+        let mut app = app();
+        app.members.insert("!r:x".into(), members());
+        assert_eq!(
+            app.mentioned_in("!r:x", "please look at this, @quintin."),
+            vec!["@quintin:example.org".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_email_address_mentions_nobody() {
+        let mut app = app();
+        app.members.insert("!r:x".into(), members());
+        assert!(app
+            .mentioned_in("!r:x", "write to quintin@example.org")
+            .is_empty());
+    }
+
+    #[test]
+    fn the_same_person_is_mentioned_once() {
+        // m.mentions is a set; sending a duplicate would be sending a malformed event.
+        let mut app = app();
+        app.members.insert("!r:x".into(), members());
+        assert_eq!(
+            app.mentioned_in("!r:x", "@quintin @quintin @quintin:example.org"),
+            vec!["@quintin:example.org".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_room_with_no_roster_mentions_nobody() {
+        // Rather than inventing a user ID from the text, which would be a mention the
+        // server rejects and a send that fails.
+        assert!(app().mentioned_in("!r:x", "hello @quintin").is_empty());
+    }
+
+    #[test]
+    fn ranking_finds_a_member_by_name_or_by_id() {
+        let m = members();
+        // "wri" is nowhere in the display name "Retinue", but it starts the localpart.
+        assert_eq!(rank_members(&m, "wri"), vec![1]);
+        // And the other way about.
+        assert_eq!(rank_members(&m, "retin"), vec![1]);
+    }
+
+    #[test]
+    fn ranking_with_no_query_offers_the_whole_room() {
+        assert_eq!(rank_members(&members(), ""), vec![0, 1, 2, 3]);
+    }
 
     fn app() -> App {
         let mut app = App::new(Config::default(), Layout::default());
@@ -2135,6 +2633,200 @@ mod tests {
         // Paginate. Tests asserting on commands want to see only what they triggered.
         let _ = app.take_commands();
         app
+    }
+
+    /// An app with a focused room and a known roster.
+    fn app_with_members() -> App {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Members {
+            room_id: "!r:x".into(),
+            members: members(),
+        });
+        app.mode = Mode::Insert;
+        app
+    }
+
+    #[test]
+    fn the_room_roster_is_asked_for_when_a_room_is_focused() {
+        let mut app = App::new(Config::default(), Layout::default());
+        app.apply_worker_event(WorkerEvent::Rooms(vec![RoomSummary {
+            room_id: "!r:x".into(),
+            display_name: "#backend".into(),
+            is_space: false,
+            parents: Vec::new(),
+            is_direct: false,
+            is_encrypted: false,
+            notification_count: 0,
+            highlight_count: 0,
+        }]));
+        assert!(
+            app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::ListMembers { room_id } if room_id == "!r:x")),
+            "the picker needs a roster before the user types @, not after"
+        );
+    }
+
+    #[test]
+    fn the_roster_is_only_asked_for_once() {
+        let mut app = app_with_members();
+        app.open_focused_view();
+        assert!(!app
+            .take_commands()
+            .iter()
+            .any(|c| matches!(c, Command::ListMembers { .. })));
+    }
+
+    #[test]
+    fn typing_an_at_opens_the_picker_and_a_space_closes_it() {
+        let mut app = app_with_members();
+        type_into(&mut app, "hi @");
+        assert!(app.mentions.is_some(), "@ arms the picker");
+        assert_eq!(app.mention_matches().len(), 4, "and offers the whole room");
+
+        type_into(&mut app, "qu");
+        assert_eq!(
+            app.mention_matches().first().map(|m| m.user_id.as_str()),
+            Some("@quintin:example.org")
+        );
+
+        type_into(&mut app, "x ");
+        assert!(app.mentions.is_none(), "a space ends the mention");
+    }
+
+    #[test]
+    fn tab_completes_the_highlighted_member() {
+        let mut app = app_with_members();
+        type_into(&mut app, "morning @qu");
+        app.apply_action(Action::Complete);
+        assert_eq!(
+            app.composer().map(Composer::text),
+            Some("morning @quintin ")
+        );
+        assert!(app.mentions.is_none(), "completing closes the picker");
+    }
+
+    #[test]
+    fn enter_completes_rather_than_sending_while_the_picker_is_open() {
+        let mut app = app_with_members();
+        type_into(&mut app, "@qu");
+        app.apply_action(Action::Submit);
+        assert_eq!(app.composer().map(Composer::text), Some("@quintin "));
+        assert!(
+            app.take_commands().is_empty(),
+            "the half-typed name must not go out as a message"
+        );
+    }
+
+    #[test]
+    fn escape_dismisses_the_picker_without_leaving_the_composer() {
+        let mut app = app_with_members();
+        type_into(&mut app, "@qu");
+        // `keymap` sets Normal on the way in; the handler has to put it back.
+        app.mode = Mode::Normal;
+        app.apply_action(Action::Cancel);
+        assert!(app.mentions.is_none());
+        assert_eq!(
+            app.mode,
+            Mode::Insert,
+            "escape closed the popup, not the composer"
+        );
+        assert_eq!(
+            app.composer().map(Composer::text),
+            Some("@qu"),
+            "the text survives"
+        );
+
+        // And now enter sends, because there is no completion in the way.
+        app.apply_action(Action::Submit);
+        assert!(app
+            .take_commands()
+            .iter()
+            .any(|c| matches!(c, Command::SendMessage { .. })));
+    }
+
+    #[test]
+    fn up_and_down_move_the_highlight_instead_of_the_caret() {
+        let mut app = app_with_members();
+        type_into(&mut app, "@");
+        app.apply_action(Action::CaretDown);
+        assert_eq!(app.mentions.as_ref().map(|m| m.selected), Some(1));
+        app.apply_action(Action::CaretUp);
+        assert_eq!(app.mentions.as_ref().map(|m| m.selected), Some(0));
+    }
+
+    #[test]
+    fn a_sent_message_carries_the_mention_on_the_wire() {
+        let mut app = app_with_members();
+        type_into(&mut app, "@qu");
+        app.apply_action(Action::Complete);
+        type_into(&mut app, "any news?");
+        app.apply_action(Action::Submit);
+
+        let commands = app.take_commands();
+        let sent = commands
+            .iter()
+            .find_map(|c| match c {
+                Command::SendMessage { body, mentions, .. } => Some((body, mentions)),
+                _ => None,
+            })
+            .expect("a message went out");
+        assert_eq!(sent.0, "@quintin any news?");
+        // The part that actually notifies. Without it the text is decoration.
+        assert_eq!(sent.1, &vec!["@quintin:example.org".to_owned()]);
+    }
+
+    #[test]
+    fn an_at_that_matches_nobody_does_not_swallow_the_return_key() {
+        // The popup draws nothing when it has no matches, and a popup nobody can see
+        // must not eat the send. Otherwise the message simply refuses to go, silently.
+        let mut app = app_with_members();
+        type_into(&mut app, "email me @ 5pm");
+        app.apply_action(Action::Submit);
+        assert!(
+            app.take_commands()
+                .iter()
+                .any(|c| matches!(c, Command::SendMessage { .. })),
+            "the message has to send even with an armed but empty picker"
+        );
+    }
+
+    #[test]
+    fn the_mouse_wheel_scrolls_the_transcript_not_the_picker() {
+        let mut app = app_with_members();
+        type_into(&mut app, "@");
+        app.apply_action(Action::ScrollUp(3));
+        assert_eq!(
+            app.mentions.as_ref().map(|m| m.selected),
+            Some(0),
+            "reaching for the mouse does not mean picking a name"
+        );
+    }
+
+    #[test]
+    fn moving_pane_closes_the_picker() {
+        let mut app = app_with_members();
+        type_into(&mut app, "@qu");
+        assert!(app.mentions.is_some());
+        app.open_thread_pane("$root".into(), "a thread".into());
+        assert!(
+            app.mentions.is_none(),
+            "a picker left open would offer the last pane's name over this one"
+        );
+    }
+
+    #[test]
+    fn the_picker_works_in_a_thread_pane_too() {
+        // A thread can have more than two participants, and its roster is the room's.
+        let mut app = app_with_members();
+        app.open_thread_pane("$root".into(), "a thread".into());
+        app.mode = Mode::Insert;
+        type_into(&mut app, "@wri");
+        assert_eq!(
+            app.mention_matches().first().map(|m| m.user_id.as_str()),
+            Some("@wright:example.org"),
+            "the mention picker is not special-cased by pane kind"
+        );
     }
 
     fn agent_entry(event_id: &str, event: AgentEvent) -> Entry {
@@ -2258,7 +2950,7 @@ mod tests {
         assert!(app.composer().expect("composer").text().is_empty());
         let commands = app.take_commands();
         match commands.as_slice() {
-            [Command::SendMessage { view, body }] => {
+            [Command::SendMessage { view, body, .. }] => {
                 assert_eq!(view, &View::room("!r:x"));
                 assert_eq!(body, "hello");
             }

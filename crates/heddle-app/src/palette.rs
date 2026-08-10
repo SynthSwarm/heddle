@@ -173,6 +173,16 @@ impl Palette {
     }
 }
 
+/// How well a query fits a name, as a sortable penalty. Lower is better.
+///
+/// Shared with the mention picker, which ranks display names and localparts by exactly
+/// the same rules: a name is a name, and two pickers that disagree about which match is
+/// best would be two pickers to learn.
+pub fn rank(name: &str, query: &str) -> Option<(u16, u16, u16)> {
+    let query = query.to_lowercase();
+    score(name, &query).map(|s| (s.strays, s.gaps, s.start))
+}
+
 /// How well a query fits a name. Every field is a penalty, so lower is better.
 struct Score {
     /// Matched characters that neither start a word nor continue the previous match.

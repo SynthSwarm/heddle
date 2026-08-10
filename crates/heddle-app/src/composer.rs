@@ -90,6 +90,41 @@ impl Composer {
         self.cursor += c.len_utf8();
     }
 
+    /// The `@mention` being typed at the caret, if there is one.
+    ///
+    /// Returns the byte offset of the `@` and the text between it and the caret, so the
+    /// caller can filter on the one and replace from the other.
+    ///
+    /// The `@` has to start a word. Without that rule an email address arms the picker
+    /// halfway through being typed, and every `a@b` in a code snippet is a false start.
+    /// A mention also cannot span a line break or contain a space, which is what makes
+    /// [`Self::replace_mention`] and the send-time scan agree about where one ends.
+    pub fn mention_query(&self) -> Option<(usize, &str)> {
+        let before = &self.text[..self.cursor];
+        // Everything back to the nearest whitespace: the run the caret sits inside.
+        let start = before.rfind(char::is_whitespace).map_or(0, |i| i + 1);
+        let run = &before[start..];
+        let rest = run.strip_prefix('@')?;
+        // A second `@` means this is no longer a name being typed.
+        if rest.contains('@') {
+            return None;
+        }
+        Some((start, rest))
+    }
+
+    /// Replace the mention starting at `from` with `text`, and leave the caret after it.
+    ///
+    /// A trailing space is the caller's business: it is part of what gets inserted, so
+    /// that accepting a completion and carrying on typing does not need a second key.
+    pub fn replace_mention(&mut self, from: usize, text: &str) {
+        if from > self.cursor || !self.text.is_char_boundary(from) {
+            return;
+        }
+        self.stop_browsing();
+        self.text.replace_range(from..self.cursor, text);
+        self.cursor = from + text.len();
+    }
+
     pub fn insert_newline(&mut self) {
         self.insert('\n');
     }
@@ -392,6 +427,72 @@ mod tests {
             c.insert(ch);
         }
         c
+    }
+
+    #[test]
+    fn a_mention_arms_at_the_start_of_a_word() {
+        assert_eq!(typed("@qu").mention_query(), Some((0, "qu")));
+        assert_eq!(typed("hi @qu").mention_query(), Some((3, "qu")));
+    }
+
+    #[test]
+    fn a_bare_at_offers_everyone() {
+        // The picker has to open on the sigil alone, or it never opens: nobody types a
+        // name before deciding to mention someone.
+        assert_eq!(typed("@").mention_query(), Some((0, "")));
+    }
+
+    #[test]
+    fn an_email_address_does_not_arm_a_mention() {
+        // The whole reason the sigil has to start a word.
+        assert_eq!(typed("mail bob@example").mention_query(), None);
+        assert_eq!(typed("@bob@example").mention_query(), None);
+    }
+
+    #[test]
+    fn a_mention_ends_at_a_space() {
+        assert_eq!(typed("@bob ").mention_query(), None);
+    }
+
+    #[test]
+    fn a_mention_does_not_reach_across_a_line_break() {
+        let mut c = typed("@bob");
+        c.insert_newline();
+        assert_eq!(c.mention_query(), None);
+    }
+
+    #[test]
+    fn a_mention_is_read_from_the_caret_not_the_end() {
+        // Someone who moved back to fix a name is still typing that name.
+        let mut c = typed("@quintin and @wright");
+        for _ in 0.." and @wright".len() {
+            c.left();
+        }
+        assert_eq!(c.mention_query(), Some((0, "quintin")));
+    }
+
+    #[test]
+    fn accepting_a_completion_replaces_only_the_mention() {
+        let mut c = typed("hi @qu");
+        let (from, _) = c.mention_query().expect("armed");
+        c.replace_mention(from, "@quintin ");
+        assert_eq!(c.text(), "hi @quintin ");
+        // The caret follows the insertion, so typing carries straight on.
+        c.insert('o');
+        assert_eq!(c.text(), "hi @quintin o");
+        // And the picker is disarmed by the trailing space rather than re-matching.
+        assert_eq!(c.mention_query(), None);
+    }
+
+    #[test]
+    fn accepting_a_completion_keeps_what_came_after_the_caret() {
+        let mut c = typed("@qu, morning");
+        for _ in 0..", morning".len() {
+            c.left();
+        }
+        let (from, _) = c.mention_query().expect("armed");
+        c.replace_mention(from, "@quintin");
+        assert_eq!(c.text(), "@quintin, morning");
     }
 
     #[test]

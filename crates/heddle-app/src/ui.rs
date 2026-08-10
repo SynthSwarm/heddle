@@ -8,7 +8,7 @@ use crate::composer::Composer;
 use crate::keymap::{self, Mode};
 use crate::palette::keys_for;
 use heddle_agent::AgentState;
-use heddle_matrix::{SyncState, View};
+use heddle_matrix::{MemberSummary, SyncState, View};
 use heddle_render::transcript::Anchor;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -54,8 +54,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_workspace_bar(frame, app, chunks[0]);
     draw_tab_bar(frame, app, chunks[1]);
     draw_panes(frame, app, chunks[2]);
-    draw_composer(frame, app, chunks[3]);
+    let caret = draw_composer(frame, app, chunks[3]);
     draw_status(frame, app, chunks[4]);
+
+    // Before the modal overlays: this one belongs to the composer, and a palette or a
+    // verification opened over the top of it must cover it rather than sit under it.
+    if app.mentions.is_some() {
+        if let Some(caret) = caret {
+            draw_mentions(frame, app, frame.area(), caret);
+        }
+    }
 
     if app.threads.is_some() {
         draw_threads(frame, app, frame.area());
@@ -571,6 +579,113 @@ fn draw_palette(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// Rows the mention popup will show at most. Enough to choose from, short enough to
+/// leave the conversation visible behind it.
+const MENTION_ROWS: usize = 8;
+
+/// Place a popup against a point rather than in the middle of the screen.
+///
+/// The first anchored overlay in heddle: every other one is a modal dialogue, and the
+/// middle of the screen is the right place for those. A completion list is not a
+/// dialogue, it is an annotation on the word being typed, and it has to be next to it.
+///
+/// Sits above the anchor by preference, because the anchor is in the composer and the
+/// composer is at the bottom; drops below only when there is genuinely no room, and
+/// slides left rather than overflowing the right edge.
+fn anchored(area: Rect, anchor: (u16, u16), width: u16, height: u16) -> Rect {
+    let (ax, ay) = anchor;
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+
+    let x = ax.min(area.right().saturating_sub(width)).max(area.x);
+    let y = if ay >= area.y + height {
+        ay - height
+    } else {
+        // No room above: below the anchor, still inside the screen.
+        (ay + 1).min(area.bottom().saturating_sub(height))
+    };
+
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// The mention picker, anchored to the word being typed.
+fn draw_mentions(frame: &mut Frame, app: &App, area: Rect, caret: (u16, u16)) {
+    let Some(picker) = &app.mentions else {
+        return;
+    };
+    let matches = app.mention_matches();
+    // An armed `@` that matches nobody draws nothing at all. A box saying "no matches"
+    // under every word beginning with @ would be an overlay that punishes typing.
+    if matches.is_empty() {
+        return;
+    }
+
+    // Scrolled so the highlight stays visible once the selection walks past the rows,
+    // the same way the palette and the emoji picker do it.
+    let rows = matches.len().min(MENTION_ROWS);
+    let first = picker.selected.saturating_sub(rows.saturating_sub(1));
+
+    let visible: Vec<(usize, &&MemberSummary)> =
+        matches.iter().enumerate().skip(first).take(rows).collect();
+
+    let lines: Vec<Line> = visible
+        .iter()
+        .map(|(i, member)| {
+            let (marker, style) = if *i == picker.selected {
+                ("\u{258e}", app.theme.accent_style())
+            } else {
+                (" ", app.theme.dim_style())
+            };
+            let mut spans = vec![
+                Span::styled(marker.to_owned(), app.theme.accent_style()),
+                Span::styled(member.display_name.clone(), style),
+            ];
+            // The full ID only where the name alone would not say who this is. Showing
+            // it always would bury the names it is there to disambiguate.
+            if member.ambiguous {
+                spans.push(Span::styled(
+                    format!("  {}", member.user_id),
+                    app.theme.dim_style(),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+
+    let widest = visible
+        .iter()
+        .map(|(_, member)| {
+            UnicodeWidthStr::width(member.display_name.as_str())
+                + if member.ambiguous {
+                    UnicodeWidthStr::width(member.user_id.as_str()) + 2
+                } else {
+                    0
+                }
+        })
+        .max()
+        .unwrap_or(0);
+
+    // Marker, text, and the two borders.
+    let width = (widest as u16).saturating_add(4).clamp(12, area.width);
+    let height = (rows as u16).saturating_add(2);
+    // One column left of the caret, so the list lines up under the word rather than
+    // under the letter after it.
+    let popup = anchored(area, (caret.0.saturating_sub(1), caret.1), width, height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style(true))
+        .title(Span::styled(" mention ", app.theme.accent_style()));
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 /// How tall the composer needs to be, borders included.
 ///
 /// Measured after wrapping, not by counting newlines: a single long paragraph occupies
@@ -1016,7 +1131,12 @@ fn dimmed(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
+/// Draw the composer, and report where the caret landed in absolute screen columns.
+///
+/// The caret position is returned rather than recomputed by the caller because only the
+/// wrap knows which display row a byte offset fell on, and the mention popup has to
+/// point at the word being typed.
+fn draw_composer(frame: &mut Frame, app: &App, area: Rect) -> Option<(u16, u16)> {
     // What the composer is about to do outranks which mode it is in: sending an edit
     // when you meant to send a message is not recoverable.
     let (label, style) = match (&app.composing, app.mode) {
@@ -1045,16 +1165,13 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
             )),
             inner,
         );
-        return;
+        return None;
     }
 
     // Wrap in the composer rather than leaving it to Paragraph, because the caret is a
     // byte offset and only the wrap knows which display row it landed on. Letting the
     // widget wrap would put the text in one place and the caret in another.
-    let wrapped = app.composer().map(|c| c.wrapped(inner.width));
-    let Some(wrapped) = wrapped else {
-        return;
-    };
+    let wrapped = app.composer().map(|c| c.wrapped(inner.width))?;
 
     // Keep the caret in view when the message is taller than the box.
     let height = inner.height.max(1);
@@ -1068,14 +1185,16 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
 
-    if app.mode == Mode::Insert {
-        let (row, column) = wrapped.caret;
-        let x = inner.x + column;
-        let y = inner.y + row.saturating_sub(first);
-        if x < inner.right() && y < inner.bottom() {
-            frame.set_cursor_position((x, y));
-        }
+    let (row, column) = wrapped.caret;
+    let x = inner.x + column;
+    let y = inner.y + row.saturating_sub(first);
+    let on_screen = x < inner.right() && y < inner.bottom();
+
+    if app.mode == Mode::Insert && on_screen {
+        frame.set_cursor_position((x, y));
     }
+
+    on_screen.then_some((x, y))
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {

@@ -381,12 +381,33 @@ chosen to avoid collision when nested inside a `ctrl+b` multiplexer.
 | `:` | command palette |
 | `i` / `esc` | insert / normal mode |
 | `y` / `n` | approve / deny the focused approval |
-| `<tab>` | toggle focused tool card |
+| `<tab>` | toggle focused tool card, or take the offered mention |
+| `@` | mention someone in the room (insert mode) |
 | `g g` / `G` | top / bottom of transcript |
 | `<c-u>` / `<c-d>` | half-page scroll |
 
 Mouse is first-class: click to focus, drag borders to resize, wheel to scroll.
 Hypertile provides this natively.
+
+### 5.3.1 Mentions
+
+Typing `@` in the composer offers the room's joined members, filtered as you type and
+ranked on both display name and localpart, so `@wri` finds a bot called "Retinue".
+`tab` or `enter` takes the highlighted name; `esc` dismisses the list and leaves the
+text, so a second `enter` sends it as written. It is the same composer in every pane,
+so mentions work in a thread exactly as they do in a room — a thread can have more
+than two participants, and routing is the agent's business rather than the client's.
+
+**A mention is not text.** Since spec v1.7 the push rules read `m.mentions`, so heddle
+sends the user ID there and writes the name in the body only so the transcript reads
+like one. An `@name` that appeared solely in the body would notify nobody and would
+never reach an agent waiting to be called.
+
+Which IDs go into `m.mentions` is read back off the finished message rather than
+remembered while typing, so a name typed out in full counts and one deleted afterwards
+does not. Names are written as `@localpart`, or in full when two members share a
+localpart. A name that would name two people names neither: heddle would rather mention
+nobody than put a notification in front of the wrong person.
 
 ### 5.4 Configuration
 

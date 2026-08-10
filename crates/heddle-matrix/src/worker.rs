@@ -402,28 +402,28 @@ impl Worker {
                 result?;
             }
 
-            Command::SendMessage { view, body } => {
+            Command::SendMessage {
+                view,
+                body,
+                mentions,
+            } => {
                 // For a thread view the timeline is thread-focused, so `send` adds the
                 // m.thread relation itself. That is what keeps Hermes' session routing
                 // intact.
                 let timeline = self.timeline(&view)?;
-                timeline
-                    .send(RoomMessageEventContent::text_markdown(&body).into())
-                    .await?;
+                timeline.send(mention(&body, &mentions)?.into()).await?;
             }
 
             Command::SendReply {
                 view,
                 in_reply_to,
                 body,
+                mentions,
             } => {
                 let timeline = self.timeline(&view)?;
                 let event_id = EventId::parse(in_reply_to.as_str())?;
                 timeline
-                    .send_reply(
-                        RoomMessageEventContent::text_markdown(&body).into(),
-                        event_id.to_owned(),
-                    )
+                    .send_reply(mention(&body, &mentions)?.into(), event_id.to_owned())
                     .await?;
             }
 
@@ -431,6 +431,7 @@ impl Worker {
                 view,
                 event_id,
                 body,
+                mentions,
             } => {
                 use matrix_sdk::room::edit::EditedContent;
                 let timeline = self.timeline(&view)?;
@@ -447,9 +448,7 @@ impl Worker {
                 timeline
                     .edit(
                         &item.identifier(),
-                        EditedContent::RoomMessage(
-                            RoomMessageEventContent::text_markdown(&body).into(),
-                        ),
+                        EditedContent::RoomMessage(mention(&body, &mentions)?.into()),
                     )
                     .await?;
             }
@@ -469,6 +468,14 @@ impl Worker {
                 let _ = self
                     .events
                     .send(WorkerEvent::Threads { room_id, threads })
+                    .await;
+            }
+
+            Command::ListMembers { room_id } => {
+                let members = collect_members(&self.room(&room_id)?).await?;
+                let _ = self
+                    .events
+                    .send(WorkerEvent::Members { room_id, members })
                     .await;
             }
 
@@ -1019,6 +1026,64 @@ async fn collect_threads(room: &Room) -> anyhow::Result<Vec<ThreadSummary>> {
         });
     }
     Ok(out)
+}
+
+/// Fetch the room's joined members for the mention picker.
+///
+/// Joined only: mentioning someone who has left notifies nobody, so offering them would
+/// be offering a dead end. `members` rather than `members_no_sync` because a room whose
+/// member list was lazily loaded has nothing in the store yet, and a picker that is
+/// empty until some unrelated event fills it is worse than one that takes a moment.
+async fn collect_members(room: &Room) -> anyhow::Result<Vec<MemberSummary>> {
+    use matrix_sdk::RoomMemberships;
+
+    let mut out: Vec<MemberSummary> = room
+        .members(RoomMemberships::JOIN)
+        .await?
+        .into_iter()
+        .map(|member| MemberSummary {
+            user_id: member.user_id().to_string(),
+            display_name: member.name().to_owned(),
+            // The SDK has already worked out who collides with whom across the whole
+            // room, which is not a judgement worth re-deriving from a partial list.
+            ambiguous: member.name_ambiguous(),
+        })
+        .collect();
+
+    // Sorted by name so the picker's unfiltered order is predictable; by user ID after
+    // that so two members sharing a name do not swap places between openings.
+    out.sort_by(|a, b| {
+        a.display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase())
+            .then_with(|| a.user_id.cmp(&b.user_id))
+    });
+    Ok(out)
+}
+
+/// Build message content that mentions `mentions`.
+///
+/// The user IDs travel in `m.mentions`, not in the text. Since spec v1.7 that field is
+/// what the push rules read, so a body containing `@someone` and nothing else notifies
+/// nobody -- and an agent waiting to be called never hears. heddle writes both: the name
+/// in the body because a transcript should read like one, and the ID in `m.mentions`
+/// because that is the part that means anything.
+///
+/// An unparseable user ID fails the send rather than being dropped. Silently sending a
+/// message whose mention does not work is the failure mode this function exists to stop.
+fn mention(body: &str, mentions: &[String]) -> anyhow::Result<RoomMessageEventContent> {
+    use matrix_sdk::ruma::{events::Mentions, UserId};
+
+    let content = RoomMessageEventContent::text_markdown(body);
+    if mentions.is_empty() {
+        return Ok(content);
+    }
+
+    let ids = mentions
+        .iter()
+        .map(|id| UserId::parse(id.as_str()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(content.add_mentions(Mentions::with_user_ids(ids)))
 }
 
 /// Map each room to the Spaces that list it as a child.
