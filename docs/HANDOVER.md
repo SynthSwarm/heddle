@@ -8,7 +8,7 @@ built, what is broken, what was got wrong, and what to do next.
 |                |                                                   |
 | -------------- | ------------------------------------------------- |
 | **Date**       | 2026-08-10                                        |
-| **Commit**     | `df331e1`                                         |
+| **Commit**     | `d181893`                                         |
 | **Branch**     | `main`, pushed, worktree clean                    |
 | **Tests**      | 365 passing; `fmt` and `clippy -D warnings` clean |
 | **Size**       | 16,843 lines across five crates                   |
@@ -45,8 +45,7 @@ fills the log with tens of thousands of `tui_markdown` warnings.
 
 These are the reason this handover exists. **All were found by running the client,
 not by reading it.** Do not fix any of them from inspection alone — see §5 for why
-that warning is here. §2.1, §2.2 and §2.3 are fixed and confirmed in a live run on
-2026-08-10. §2.4 is fixed but has not been run yet.
+that warning is here. All four are fixed and confirmed in live runs on 2026-08-10.
 
 ### 2.1 Blank panes after reacting — diagnosed and fixed
 
@@ -173,10 +172,10 @@ anything being dropped and the comment claiming it can is wrong.
 
 ---
 
-## 3. What was built, and what has never been run
+## 3. What was built, and what has been run
 
-M0–M4 are closed and the test suite is green, but **the test suite is the only
-thing that has exercised most of this session's work.**
+M0–M4 are closed. Everything below has now been exercised against a real homeserver
+rather than only by its own tests, which was not true when this table was written.
 
 | Feature                                   | Commit    | Verified live?   |
 | ----------------------------------------- | --------- | ---------------- |
@@ -185,18 +184,18 @@ thing that has exercised most of this session's work.**
 | Tiling, workspaces, zoom, keyboard resize | M4        | Yes              |
 | Mouse drag-to-resize                      | `42510ef` | Yes              |
 | Scrolling in multi-pane                   | `42510ef` | Yes              |
-| Unread badges                             | `2c95555` | **No**           |
+| Unread badges                             | `2c95555` | Yes              |
 | Layout persistence                        | `99d600b` | Yes              |
 | Command palette (`:`)                     | `d774c36` | Yes              |
-| Agent adapter layer                       | `9b6b71c` | **No**           |
+| Agent adapter layer                       | `9b6b71c` | Yes              |
 | `--check` doctor                          | `9e51f72` | Yes              |
 | @mentions and the room roster             | this run  | Yes              |
 
-The adapter refactor is the one to be most careful about: it changed the type that
-every single message flows through. It is well covered by unit tests and has never
-rendered a real room.
+The adapter refactor was the one to be most careful about: it changed the type every
+message flows through. It has since rendered real Hermes rooms — tool cards, running
+state and `clarify` all draw — so it is no longer the open risk it was.
 
-**Before tagging anything, do a shakedown run of the bottom fiddve rows.**
+**Before tagging anything, do a shakedown run of anything still marked No.**
 
 ---
 
@@ -285,12 +284,8 @@ Things that were decided and are easy to undo by accident:
 
 Ordered by what should happen first.
 
-1. **Shakedown of the §2.4 fix against a live homeserver**, which is the only place it
-   was ever wrong. §2.1–§2.3 and mentions (§4.2) are confirmed there; Hermes does wake
-   on `m.mentions`.
-2. **Fixtures from the deduplicated capture** (§4.1), and prune dead chrome tests.
-3. **Shakedown of the unverified features** (§3).
-4. Fix capture duplication by keying on event id.
+1. **Fixtures from the deduplicated capture** (§4.1), and prune dead chrome tests.
+2. Fix capture duplication by keying on event id.
 
 Then the genuinely absent features, each currently documented as absent rather
 than half-built — which is the right state for them to be in:

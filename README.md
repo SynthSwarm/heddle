@@ -7,11 +7,14 @@ session* — streaming output, collapsible tool cards, inline diffs and keypress
 approvals, laid out with the multi-pane, multi-workspace ergonomics of a terminal
 workspace manager.
 
-> Status: pre-release. M0 to M4 are complete — read, write, threads, encryption with
-> interactive verification and key backup, and BSP tiling with persistent layouts. What
-> is *not* done is the structured agent extension (M5): today heddle recovers agent
-> structure from the text agents already print, which is lossy. See
-> [`docs/PLAN.md`](docs/PLAN.md).
+> Status: v1. Read, write, threads, mentions, encryption with interactive verification
+> and key backup, and BSP tiling with persistent layouts.
+>
+> Agents are not patched to suit heddle. Where one emits the structured extension
+> heddle renders it losslessly; where one does not — which today is everywhere — heddle
+> recovers what it can from the tool chrome already printed and marks those panes `~`,
+> so the loss is visible rather than pretended away. That is the design, not a stopgap.
+> See [`docs/PLAN.md`](docs/PLAN.md).
 
 ---
 
@@ -54,6 +57,10 @@ session.
 Pane state — `blocked`, `working`, `done`, `idle` — is derived from the event stream and
 rolls up to tab and workspace badges, so a screen full of agents tells you at a glance
 which one needs you.
+
+Typing `@` offers the room's members and sends a real Matrix mention (`m.mentions`),
+which is what actually wakes an agent — a name that appears only in the message body
+notifies nobody.
 
 ## Requirements
 
@@ -117,11 +124,22 @@ Prefix-based, so muscle memory transfers from tmux and herdr. Default prefix `ct
 | `<prefix> H J K L` | resize pane |
 | `<prefix> z` / `x` | zoom / close pane |
 | `<prefix> n` / `p` | next / previous room |
-| `<prefix> q` | quit |
+| `<prefix> w` / `W` | next / previous workspace |
+| `<prefix> c` / `t` | start a thread on the selection / thread picker |
+| `<prefix> e` / `r` | emoji into composer / react to the selection |
+| `<prefix> v` / `R` | verify this device / unlock with recovery key |
+| `<prefix> ?` / `q` | key overlay / quit |
+| `k` / `j` | select older / newer message |
+| `r` / `e` / `D` | reply / edit / delete the selection |
 | `i` / `esc` | insert / normal mode |
+| `@` | mention someone (insert mode) |
 | `y` / `n` | approve / deny the focused prompt |
-| `<tab>` | toggle the focused tool card |
+| `<tab>` | toggle the focused tool card, or take the offered mention |
+| `:` | command palette |
 | `g` / `G`, `ctrl+u` / `ctrl+d` | scroll |
+
+Every command is also reachable by name from the palette (`:`), which teaches its key
+binding beside it, and `<prefix> ?` lists the lot.
 
 Mouse is first-class: click to focus, wheel to scroll.
 
@@ -143,6 +161,7 @@ All Matrix SDK I/O runs on a dedicated worker task. The render thread never hold
 
 - [`docs/SPEC.md`](docs/SPEC.md) — design, wire format, security model
 - [`docs/PLAN.md`](docs/PLAN.md) — milestones and risk register
+- [`CHANGELOG.md`](CHANGELOG.md) — what shipped, and what is deliberately absent
 
 ## Licence
 
