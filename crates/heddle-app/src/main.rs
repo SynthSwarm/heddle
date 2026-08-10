@@ -302,6 +302,35 @@ fn save_layout(app: &App, path: &std::path::Path) {
     }
 }
 
+/// Blank the screen and make the next draw rewrite every cell.
+///
+/// Needed when the screen and ratatui's model of it have diverged: a glyph that paints
+/// wider than it was measured leaves stale cells that ratatui believes are already
+/// correct. See `App::focus_moved`.
+///
+/// Both halves matter, and getting either wrong is silent.
+///
+/// The clear is issued as a plain escape sequence rather than through
+/// `Terminal::clear`, which first reads the cursor position back from the terminal: it
+/// writes `ESC[6n` and waits for the reply on stdin. heddle's own `EventStream` owns
+/// stdin, so it swallows the reply as an ordinary input event, crossterm times out after
+/// two seconds, and the error takes the whole client down.
+///
+/// `swap_buffers` then resets ratatui's record of what is on screen, so the next frame
+/// is painted in full rather than diffed against a screen that has just been blanked.
+///
+/// One call, not two: `Terminal::draw` already swaps at the end of every frame, so the
+/// current buffer is empty and the previous one holds the last frame before this runs.
+/// The single swap here resets that previous buffer as well, leaving both blank.
+fn force_full_redraw(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+    )?;
+    terminal.swap_buffers();
+    Ok(())
+}
+
 async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
@@ -329,13 +358,7 @@ async fn event_loop(
         // redraws every cell and `ui::draw` places the cursor itself -- so the buffer is
         // reset directly and the clear is issued as a plain escape sequence.
         if app.needs_redraw {
-            crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
-            )?;
-            // Resets the "previous" buffer, so the next draw diffs against a blank slate
-            // and rewrites every cell.
-            terminal.swap_buffers();
+            force_full_redraw(terminal)?;
             app.needs_redraw = false;
         }
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -484,4 +507,43 @@ fn init_tracing(dirs: &Dirs) -> Result<tracing_appender::non_blocking::WorkerGua
         .init();
 
     Ok(guard)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    use ratatui::backend::{Backend, ClearType, TestBackend};
+    use ratatui::text::Line;
+    use ratatui::widgets::Paragraph;
+    use ratatui::Terminal;
+
+    /// Draw the same frame twice with a forced redraw in between, having blanked the
+    /// backend to stand in for the escape sequence heddle writes to the real terminal.
+    ///
+    /// The frame deliberately does not change between draws. A test that varied the
+    /// content would pass whether or not the redraw path works, since changed cells get
+    /// repainted either way; the whole question is whether *unchanged* cells survive
+    /// having the screen cleared underneath them.
+    #[test]
+    fn a_forced_redraw_rewrites_cells_that_did_not_change() {
+        let backend = TestBackend::new(12, 1);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        let render = |frame: &mut ratatui::Frame| {
+            frame.render_widget(Paragraph::new(Line::from("hello")), frame.area());
+        };
+
+        terminal.draw(render).expect("first draw");
+        terminal.backend().assert_buffer_lines(["hello       "]);
+
+        // Stand in for the physical clear: the screen is now blank.
+        terminal
+            .backend_mut()
+            .clear_region(ClearType::All)
+            .expect("clear");
+        terminal.swap_buffers();
+
+        terminal.draw(render).expect("second draw");
+        terminal.backend().assert_buffer_lines(["hello       "]);
+    }
 }

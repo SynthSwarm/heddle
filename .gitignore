@@ -7,3 +7,7 @@
 
 # local runtime state
 *.log
+
+# HEDDLE_CAPTURE output. Decrypted message bodies in the clear: never committed, and
+# better written outside the repository altogether.
+*.jsonl
