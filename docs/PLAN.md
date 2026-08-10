@@ -187,9 +187,6 @@ Work in a fork of `hermes-agent`, not the installed checkout.
 - [ ] Packaging: crates.io, AUR, nix
 - [ ] README with asciinema
 - [ ] Fuzzy jump across workspace, room, thread and agent, deferred from M2 and M4
-- [ ] Per-pane scroll geometry — `rendered_lines` and `viewport_height` are single
-      fields overwritten by whichever pane drew last, so with splits open the wrong
-      pane's geometry drives scrolling and pagination
 
 `ui.theme`, `ui.images` and the whole `[notify]` section were parsed and silently
 ignored from M1 to M4. They have been removed rather than left pretending, and the
