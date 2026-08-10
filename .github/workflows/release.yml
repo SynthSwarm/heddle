@@ -1,12 +1,22 @@
 name: release
 
-# Builds on a version tag and attaches the binary to the GitHub release. v1.0.0 was
-# tagged without artefacts, which meant the only way to get heddle was to build it.
+# Publishes binaries to the GitHub release for a version tag.
+#
+# `workflow_dispatch` takes the tag as an input rather than reading `github.ref_name`.
+# Dispatched from a branch the latter is the branch name, which would have built
+# `heddle-main-…` and tried to publish a release against something that is not a tag —
+# so backfilling artefacts onto an existing tag, which is the reason to dispatch this at
+# all, was the one thing it could not do.
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish, e.g. v1.0.0"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,37 +25,113 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  binary:
-    runs-on: ubuntu-latest
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One target failing must not withhold the others from the release. A missing
+      # musl build is a nuisance; a missing release is a broken announcement.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # Statically linked, because the gnu build is tied to the glibc of whatever
+          # ubuntu-latest happens to be and will not run on an older distribution. For a
+          # binary people copy onto a server, that is the difference between working and
+          # not.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # `bundled-sqlite` compiles SQLite from source, so a musl build needs a musl C
+      # compiler as well as the Rust std for the target. Without it cc-rs fails looking
+      # for x86_64-linux-musl-gcc.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
 
       # `--locked` so the published binary is built from the dependency versions that
       # were tested, not from whatever resolved on the day of the tag.
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      # x86_64 gnu only. Cross-compiling this tree means cross-compiling bundled SQLite
-      # and the crypto crates, which is a build system rather than a workflow step; musl
-      # and aarch64 are worth doing when someone actually needs them.
       - name: Package
+        shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          name="heddle-${version}-x86_64-unknown-linux-gnu"
+          tag="${{ inputs.tag || github.ref_name }}"
+          name="heddle-${tag#v}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
-          cp target/release/heddle "dist/${name}/"
+          cp "target/${{ matrix.target }}/release/heddle" "dist/${name}/"
           cp README.md LICENSE NOTICE CHANGELOG.md "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
 
-      - name: Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  # Separate from the build matrix so that several jobs do not race to create the same
+  # release. They collect here, and one job publishes.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Just this version's section. Passing the whole changelog would make every
+      # release note grow by the length of the project's history.
+      #
+      # Matched on the whole version field rather than on a prefix, because a prefix
+      # match for 1.0.1 also finds 1.0.10 and would publish the wrong notes.
+      - name: Extract release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          awk -v v="$version" '
+            $1 == "##" && $2 == v { found = 1; print; next }
+            found && $1 == "##" { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          # An empty file would silently publish a release with no description.
+          if [ ! -s notes.md ]; then
+            echo "no CHANGELOG.md section found for ${version}" >&2
+            exit 1
+          fi
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          body_path: notes.md
           files: |
             dist/*.tar.gz
             dist/*.sha256
-          body_path: CHANGELOG.md
           fail_on_unmatched_files: true
