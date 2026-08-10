@@ -1,0 +1,37 @@
+name: audit
+
+# Advisories are published after your last commit, so a push-triggered audit goes stale
+# the moment it passes. The schedule is the point of this workflow; the other two
+# triggers just stop a dependency change from landing unexamined.
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  checks: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This client holds an access token and every Megolm key the device has seen. A
+      # vulnerable dependency is not an abstract problem here, and the whole tree is
+      # third-party crypto and networking.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

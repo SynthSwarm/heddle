@@ -817,12 +817,18 @@ impl Worker {
                 // relative to reimplementing VectorDiff application, and cannot drift.
                 let items = forward_timeline.items().await;
                 let entries = convert(items.iter(), &agents);
-                // The only way to tell "nothing arrived" from "something arrived and
-                // was dropped in conversion".
+                // `messages` rather than a second count of the same thing. `convert` is
+                // one entry per item, so `items` and `entries` were always equal and the
+                // pair could not distinguish anything, whatever the old comment claimed.
+                // What a reader of this log actually wants to know is whether the pane
+                // has anything to read, which dividers, markers and notices do not
+                // answer. A pane of thirty items and no messages is the shape of a room
+                // whose recent history is all threaded, and that took a second bug to
+                // notice for want of this number.
                 tracing::debug!(
                     view = ?forward_view,
                     items = items.len(),
-                    entries = entries.len(),
+                    messages = messages(&entries),
                     "timeline snapshot"
                 );
                 // At trace level, say what is actually in the snapshot. Counts alone
@@ -868,6 +874,17 @@ impl Worker {
         self.views.insert(view, OpenView { timeline, forward });
         Ok(())
     }
+}
+
+/// How many entries a reader would call messages.
+///
+/// Dividers, read markers and notices fill a pane without giving it anything to say, so
+/// they are exactly what a count meant to answer "is this pane empty?" must leave out.
+fn messages(entries: &[Entry]) -> usize {
+    entries
+        .iter()
+        .filter(|e| matches!(e.kind, EntryKind::Message(_)))
+        .count()
 }
 
 /// Whether a pane that still has nothing to show is worth another page.
@@ -1553,6 +1570,7 @@ fn decode_agent(
     // case a fixture is wanted for.
     if crate::capture::enabled() {
         crate::capture::record(&crate::capture::Record {
+            event_id: event.event_id().map(|id| id.as_str()),
             sender: event.sender().as_str(),
             body,
             verdict: match &payload {

@@ -157,6 +157,29 @@ crates/
 All Matrix SDK I/O runs on a dedicated worker task. The render thread never holds a
 `Client`, so no frame can block on the network or on crypto.
 
+## Development
+
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+cargo run -- --check          # doctor: terminal, store, homeserver
+```
+
+To see what the client is actually doing:
+
+```sh
+HEDDLE_LOG=heddle=trace heddle
+```
+
+`heddle` is a prefix match, so it covers `heddle_matrix`, `heddle_agent` and the rest.
+Setting it also drops the global `warn` directive, which otherwise fills the log with
+tens of thousands of `tui_markdown` warnings.
+
+`HEDDLE_CAPTURE=<path>` records every agent message conversion as JSONL, for building
+fixtures from real traffic. It writes decrypted message bodies to disk, so it is off by
+default and says so loudly when set.
+
 ## Docs
 
 - [`docs/SPEC.md`](docs/SPEC.md) — design, wire format, security model

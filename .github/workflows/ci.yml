@@ -30,11 +30,13 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      # `--locked` throughout, so a Cargo.toml edited without regenerating the lockfile
+      # fails here rather than resolving to something nobody has built.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   # Split out rather than tacked onto `check`. The release profile shares no artefacts
   # with the debug builds clippy and test produce, so running it in sequence added a
@@ -56,5 +58,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
       - name: Check MSRV
-        run: cargo check --workspace
-
+        run: cargo check --workspace --locked

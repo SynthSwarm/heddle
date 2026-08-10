@@ -1,0 +1,51 @@
+name: release
+
+# Builds on a version tag and attaches the binary to the GitHub release. v1.0.0 was
+# tagged without artefacts, which meant the only way to get heddle was to build it.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `--locked` so the published binary is built from the dependency versions that
+      # were tested, not from whatever resolved on the day of the tag.
+      - name: Build
+        run: cargo build --release --locked
+
+      # x86_64 gnu only. Cross-compiling this tree means cross-compiling bundled SQLite
+      # and the crypto crates, which is a build system rather than a workflow step; musl
+      # and aarch64 are worth doing when someone actually needs them.
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          name="heddle-${version}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${name}"
+          cp target/release/heddle "dist/${name}/"
+          cp README.md LICENSE NOTICE CHANGELOG.md "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          body_path: CHANGELOG.md
+          fail_on_unmatched_files: true

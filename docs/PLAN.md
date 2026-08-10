@@ -3,6 +3,11 @@
 Companion to [`SPEC.md`](./SPEC.md). Milestones are sequenced so that each one ends at a
 state that is independently useful, and so that the riskiest unknowns are retired first.
 
+**v1.0.0 shipped on 2026-08-10.** M0–M4 and M6's release work are done; M5 was
+deliberately skipped, for the reason recorded in SPEC §10.2. What remains below is the
+convenience work, and [`CHANGELOG.md`](../CHANGELOG.md) is the record of what actually
+went out.
+
 ---
 
 ## M0 — Pre-flight ✅ complete
@@ -181,12 +186,17 @@ Work in a fork of `hermes-agent`, not the installed checkout.
 - [ ] Desktop notifications, debounced, configurable triggers
 - [ ] Theming, custom keybindings beyond the prefix
 - [ ] Multiple profiles and account switching
-- [ ] Secret redaction rules for `tool.args`
-- [ ] `--check` doctor command (terminal protocols, store health; homeserver done)
+- [x] `--check` doctor command: terminal protocols, store health and homeserver
+- [x] Mentions: a member picker and real `m.mentions` on the wire
 - [x] Packaging metadata: licence, repository, keywords, categories
 - [ ] Packaging: crates.io, AUR, nix
 - [ ] README with asciinema
+- [x] Release workflow: tagged builds with a checksummed tarball
 - [ ] Fuzzy jump across workspace, room, thread and agent, deferred from M2 and M4
+
+Secret redaction for `tool.args` was dropped rather than deferred: the agents handle it,
+and a client-side scrubber would be security theatre over data the agent already chose to
+send. SPEC §10.2 records it as decided.
 
 `ui.theme`, `ui.images` and the whole `[notify]` section were parsed and silently
 ignored from M1 to M4. They have been removed rather than left pretending, and the
@@ -195,7 +205,8 @@ accepted but was not is the one failure mode a config file must not have.
 
 Chat-client parity, moved down from M2 because the agent path does not depend on it:
 
-- [ ] Image rendering via `ratatui-image` with protocol probing and block fallback
+- [ ] Image rendering with protocol probing and block fallback (`ratatui-image` is the
+  candidate, and is deliberately not a declared dependency until it is used)
 - [ ] Attachment upload and download
 - [ ] Room join / leave / invite / accept
 

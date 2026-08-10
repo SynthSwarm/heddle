@@ -485,3 +485,72 @@ The working directory is `elementui`, which collides with both Element (the Matr
 client) and Element UI (the Vue library). The project is named **heddle** — the part of
 a loom that guides individual threads through the warp. Matrix threads are the core
 abstraction, so the metaphor holds, and the name is unclaimed on crates.io.
+
+---
+
+## 10. Implementation notes
+
+Things established the hard way, kept here because rediscovering them costs more than
+recording them. The narrative of how each was found is in the commit that fixed it.
+
+### 10.1 Library behaviour worth knowing
+
+- `Terminal::clear()` calls `get_cursor_position()`, which writes `ESC[6n` and blocks on
+  stdin — it **deadlocks** against a `crossterm` `EventStream`. Never call it during the
+  TUI. `--check` may, because it has no event stream.
+- `TestBackend` has `clear_region(ClearType::All)`, not `clear()`.
+- `toml` 0.9: `str::parse::<toml::Value>()` parses a bare *value*, not a document. Use
+  `toml::from_str::<toml::Table>()`. This silently made `config::unknown_keys` approve of
+  everything until a test caught it.
+- `ratatui-hypertile` 0.4.1 ships serde for its node tree behind the `serde` feature;
+  `set_root` revalidates and rejects duplicate pane ids.
+- `EnvFilter` matches targets by prefix (`starts_with`), hence `heddle=trace`.
+
+The Matrix SDK ones are the expensive ones:
+
+- A **gappy sync** — one the server marks `limited` with a fresh prev-batch token — makes
+  matrix-sdk 0.18 unload the room's linked chunk down to its last chunk *and* invalidate
+  every thread in that room, because it cannot know which threads the gap touched. Every
+  timeline for the room then reports itself empty, and nothing refills one until
+  something asks for a page. This is intended behaviour, not a fault, and any client
+  mirroring snapshots verbatim must handle it. See `909ee28`.
+- `TimelineBuilder::build` takes a room event cache subscriber per timeline. Dropping the
+  *last* one triggers `auto_shrink_if_no_subscribers`, which produces a clear
+  indistinguishable from the one above — worth knowing when telling the two apart.
+- `Timeline::paginate_backwards` is **not one page**. A live timeline shows only the last
+  twenty items it holds and will spend a call lowering that skip count without ever
+  reaching the event cache; and a pane built with `hide_threaded_events` draws none of a
+  page that is all thread replies. Ask until the pane has something.
+- `Timeline::mark_as_read` chooses the event as well as the receipt's thread, and can
+  choose one the server considers in-thread — an aggregation of a threaded event carries
+  no thread relation of its own. `Timeline::send_single_receipt` infers the thread the
+  same way but takes the event from the caller, and still skips requests an existing
+  receipt covers. Prefer it, and choose the event from what the pane drew.
+
+### 10.2 Decisions that should not be relitigated
+
+| Decision | Reason |
+|---|---|
+| M5 (patching Hermes to emit structured events) is skipped | heddle should work with agents as they are. The fallback parser is the product, not a stopgap. |
+| Wire key is `dev.heddle.agent.v1` | Renamed from `dev.hermes.agent.v1`, which is still read for compatibility. |
+| Secret redaction in `tool.args` is not heddle's job | The agents handle it. A client-side scrubber would be security theatre over data the agent already chose to send. |
+| No close-tab | Tabs are rooms. There is no way to open one, so closing is a trapdoor. |
+| Only EAW=Wide glyphs in the UI | Everything else mismeasures across terminals. Unread badges are ASCII `(3)` / `(@3)` for the same reason. |
+| No real homeserver in docs or tests | `example.org` throughout. |
+| Mentions ride in `m.mentions`, not in the body text | It is what the push rules read since spec v1.7, and what an agent waiting to be called actually sees. |
+| Enter takes the completion when the mention picker is open | What every client with an autocomplete does. `esc` first sends the text as written. |
+
+### 10.3 Invariants that are easy to break by accident
+
+- **The render thread never holds a `Client`.** Everything crosses the
+  `Command`/`WorkerEvent` channel pair. Keep it that way.
+- **The mention picker is not modal.** Every other overlay swallows keys or switches
+  mode; this one lets editing through and is recomputed from the buffer afterwards, which
+  is what makes it survive a paste or a caret move rather than only the keystrokes it
+  expected.
+- **An overlay that draws nothing must steal nothing.** A mention picker with no matches
+  is invisible; left intercepting, it ate the return key and turned "email me @ 5pm" into
+  a message that silently refused to send.
+- **A name that names two people names nobody.** Two members can share a localpart across
+  homeservers and two more can share a display name. Mentioning nobody is the right
+  failure; the alternative notifies someone who was never addressed.
