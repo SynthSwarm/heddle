@@ -9,6 +9,7 @@
 mod app;
 mod composer;
 mod config;
+mod doctor;
 mod emoji;
 mod keymap;
 mod palette;
@@ -186,7 +187,7 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
             })?;
 
     if cli.check {
-        return check(&profile.homeserver).await;
+        return check(&profile_name, &profile.homeserver, &dirs).await;
     }
 
     let paths = session::Paths::for_profile(&dirs.data, &profile_name);
@@ -204,25 +205,59 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
     tui(app, handle, layout_path).await
 }
 
-/// Verify the homeserver supports everything heddle needs.
-async fn check(homeserver: &str) -> Result<()> {
-    let caps = heddle_matrix::check_homeserver(homeserver).await?;
+/// Verify the environment and exit.
+///
+/// Three independent things can be wrong before the first frame, and the symptom is the
+/// same for all of them. Every section is run even when an earlier one fails, because a
+/// user with two problems should learn about both in one go.
+async fn check(profile_name: &str, homeserver: &str, dirs: &Dirs) -> Result<()> {
+    let mut fatal = false;
 
     println!("homeserver: {homeserver}");
-    println!("  sliding sync (MSC4186):  {}", tick(caps.sliding_sync));
-    println!("  threads (MSC3440):       {}", tick(caps.threads));
-    println!("  cross-signing:           {}", tick(caps.cross_signing));
-    println!("  spec versions:           {}", caps.versions.join(", "));
-
-    for problem in caps.problems() {
-        eprintln!("warning: {problem}");
+    match heddle_matrix::check_homeserver(homeserver).await {
+        Ok(caps) => {
+            println!("  sliding sync (MSC4186):  {}", tick(caps.sliding_sync));
+            println!("  threads (MSC3440):       {}", tick(caps.threads));
+            println!("  cross-signing:           {}", tick(caps.cross_signing));
+            println!("  spec versions:           {}", caps.versions.join(", "));
+            for problem in caps.problems() {
+                println!("  ! {problem}");
+            }
+            fatal |= !caps.is_usable();
+        }
+        Err(e) => {
+            // Unreachable is not the same as unusable, and saying so saves someone
+            // hunting for a capability problem that is really a network one.
+            println!("  unreachable:             {e}");
+            fatal = true;
+        }
     }
 
-    if !caps.is_usable() {
-        anyhow::bail!("homeserver is not usable by heddle");
+    println!("\nterminal:");
+    fatal |= report(&doctor::terminal());
+
+    let paths = session::Paths::for_profile(&dirs.data, profile_name);
+    println!("\nstore (profile `{profile_name}`):");
+    fatal |= report(&doctor::store(profile_name, &paths.store, &paths.session));
+
+    if fatal {
+        anyhow::bail!("heddle will not run correctly until the failures above are fixed");
     }
     println!("\nok");
     Ok(())
+}
+
+/// Print findings, returning whether any of them was fatal.
+fn report(findings: &[doctor::Finding]) -> bool {
+    let mut fatal = false;
+    for finding in findings {
+        println!("  {:24} {}", format!("{}:", finding.name), finding.status);
+        if let Some(detail) = &finding.detail {
+            println!("      {detail}");
+        }
+        fatal |= finding.status == doctor::Status::Fail;
+    }
+    fatal
 }
 
 fn tick(ok: bool) -> &'static str {

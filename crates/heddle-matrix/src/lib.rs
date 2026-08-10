@@ -13,6 +13,7 @@
 // when combined with our own futures.
 #![recursion_limit = "512"]
 
+pub mod capture;
 pub mod model;
 pub mod session;
 pub mod worker;

@@ -1272,12 +1272,40 @@ fn decode_agent(
         return AgentPayload::None;
     };
 
-    match agents.ingest(content, body) {
+    let payload = match agents.ingest(content, body) {
         Ingest::Structured { adapter, event } => AgentPayload::Structured { adapter, event },
         Ingest::Degraded { adapter, parsed } => AgentPayload::Degraded {
             adapter,
             parsed: Box::new(parsed),
         },
         Ingest::Plain => AgentPayload::None,
+    };
+
+    // Recording is opt-in and off by default; see `capture`. Every message is offered,
+    // including the plain ones, because "heddle showed nothing for this" is exactly the
+    // case a fixture is wanted for.
+    if crate::capture::enabled() {
+        crate::capture::record(&crate::capture::Record {
+            sender: event.sender().as_str(),
+            body,
+            verdict: match &payload {
+                AgentPayload::Structured { .. } => "structured",
+                AgentPayload::Degraded { .. } => "degraded",
+                AgentPayload::None => "plain",
+            },
+            adapter: payload.adapter(),
+            tools: match &payload {
+                AgentPayload::Structured { event, .. } => {
+                    event.tool.iter().map(|t| t.name.clone()).collect()
+                }
+                AgentPayload::Degraded { parsed, .. } => {
+                    parsed.tools.iter().map(|t| t.name.clone()).collect()
+                }
+                AgentPayload::None => Vec::new(),
+            },
+            content,
+        });
     }
+
+    payload
 }
