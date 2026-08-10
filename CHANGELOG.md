@@ -3,7 +3,11 @@
 Notable changes, newest first. The git history is the detailed record — each commit
 explains what was wrong and what was ruled out. This file is the summary.
 
-## 1.0.0 — 2026-08-10
+Versions are pre-1.0 and mean what that usually means: the thing runs, and its shape
+can still change. Breaking changes to config keys, keybindings and the agent wire
+format are possible in any 0.x release, and will be listed here.
+
+## 0.2.0 — 2026-08-10
 
 First release. An agent-native Matrix client for the terminal: a room is an agent
 session rather than a chat log.
@@ -48,6 +52,8 @@ upload and download, room join/leave/invite, and fuzzy jump.
 
 ### Known limits
 
+- **Beta.** It is used daily against a real homeserver, but the corners are not all
+  walked. Nothing here has been run by anyone who did not write it.
 - A homeserver with native sliding sync is a hard requirement; `matrix-sdk-ui` has no
   `/sync` fallback. `heddle --check` will tell you before you start.
 - Only EAW=Wide glyphs are used in the interface. Everything else mismeasures across

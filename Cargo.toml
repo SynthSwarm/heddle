@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "0.2.0"
 edition = "2021"
 # The floor is set by matrix-sdk 0.18, which requires 1.93. Declaring anything lower
 # is a fiction: the workspace has never built on it.

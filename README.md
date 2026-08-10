@@ -7,8 +7,11 @@ session* — streaming output, collapsible tool cards, inline diffs and keypress
 approvals, laid out with the multi-pane, multi-workspace ergonomics of a terminal
 workspace manager.
 
-> Status: v1. Read, write, threads, mentions, encryption with interactive verification
-> and key backup, and BSP tiling with persistent layouts.
+> Status: **0.2.0 — beta.** Read, write, threads, mentions, encryption with interactive
+> verification and key backup, and BSP tiling with persistent layouts. Used daily
+> against a real homeserver, but pre-1.0 in the way the number implies: interfaces,
+> config keys and the wire format may change, and there are corners nobody has walked
+> into yet. v1 is when the shape has stopped moving.
 >
 > Agents are not patched to suit heddle. Where one emits the structured extension
 > heddle renders it losslessly; where one does not — which today is everywhere — heddle
