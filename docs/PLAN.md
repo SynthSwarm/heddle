@@ -141,13 +141,18 @@ end to end until Hermes is emitting the events in M5; only the unread half is li
 
 **Goal:** the actual point of the project.
 
+Agent support is a registry, not a format. [`heddle-agent`'s adapter layer](../crates/heddle-agent/src/adapter.rs)
+already ships two — `heddle` for the published schema and `hermes` for the legacy key
+plus chrome recovery — so a second agent is a chrome table and a name. What follows is
+what it takes to get one agent onto the *lossless* path.
+
 ### 5a — Hermes patch
 
 Work in a fork of `hermes-agent`, not the installed checkout.
 
 - [ ] `MATRIX_AGENT_EVENTS` flag, default off
 - [ ] `format_tool_event` Matrix override returns `(human, structured)`
-- [ ] `_build_text_message_content` attaches `dev.hermes.agent.v1`
+- [ ] `_build_text_message_content` attaches `dev.heddle.agent.v1`
 - [ ] `edit_message` mirrors the key into `m.new_content`
 - [ ] Round-trip tests extending `tests/gateway/test_matrix*.py`
 - [ ] Propose upstream
@@ -172,20 +177,34 @@ Work in a fork of `hermes-agent`, not the installed checkout.
 
 ## M6 — Polish and release
 
+- [x] Config file honesty: every key heddle reads is acted on, and anything else warns
 - [ ] Desktop notifications, debounced, configurable triggers
-- [ ] Config file, theming, custom keybindings
+- [ ] Theming, custom keybindings beyond the prefix
 - [ ] Multiple profiles and account switching
 - [ ] Secret redaction rules for `tool.args`
-- [ ] `--check` doctor command (homeserver capabilities, terminal protocols, store health)
+- [ ] `--check` doctor command (terminal protocols, store health; homeserver done)
+- [x] Packaging metadata: licence, repository, keywords, categories
 - [ ] Packaging: crates.io, AUR, nix
 - [ ] README with asciinema
 - [ ] Fuzzy jump across workspace, room, thread and agent, deferred from M2 and M4
+- [ ] Per-pane scroll geometry — `rendered_lines` and `viewport_height` are single
+      fields overwritten by whichever pane drew last, so with splits open the wrong
+      pane's geometry drives scrolling and pagination
+
+`ui.theme`, `ui.images` and the whole `[notify]` section were parsed and silently
+ignored from M1 to M4. They have been removed rather than left pretending, and the
+loader now warns about any key it does not act on: a setting that appears to have been
+accepted but was not is the one failure mode a config file must not have.
 
 Chat-client parity, moved down from M2 because the agent path does not depend on it:
 
 - [ ] Image rendering via `ratatui-image` with protocol probing and block fallback
 - [ ] Attachment upload and download
 - [ ] Room join / leave / invite / accept
+
+**These are v1 blockers if the agent framing is ever dropped.** They were deferred on
+the strength of M5 making heddle something other than a general chat client. Ship
+without both M5 and these, and what remains is a Matrix TUI that cannot join a room.
 
 ---
 

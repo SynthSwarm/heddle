@@ -122,7 +122,12 @@ Attach the structured payload under a reverse-DNS namespaced key on the same
 and ignored by other clients, so Element, gomuks and iamb continue to render the plain
 `body` unchanged.
 
-**Namespace:** `dev.hermes.agent.v1`
+**Namespace:** `dev.heddle.agent.v1`
+
+The schema is heddle's, not any one agent's, and is named accordingly. An agent asked
+to write `dev.hermes.agent.v1` in order to be understood by a client it has no
+relationship with is being asked to lie about who it is. `dev.hermes.agent.v1` is still
+accepted on read, since the Hermes patch in §3.3 was specified against it.
 
 ```json
 {
@@ -130,7 +135,7 @@ and ignored by other clients, so Element, gomuks and iamb continue to render the
   "body": "🔧 edit: \"src/main.rs\"",
   "m.relates_to": { "rel_type": "m.thread", "event_id": "$root" },
 
-  "dev.hermes.agent.v1": {
+  "dev.heddle.agent.v1": {
     "v": 1,
     "session_id": "proj-b/thread-$root",
     "turn_id": "01JQ8XKQ2W9YHVB0ZC7T5N3E4M",
@@ -196,19 +201,37 @@ Three additive edits, gated behind `MATRIX_AGENT_EVENTS` (default `false`).
 
 | Location | Change |
 |---|---|
-| `gateway/platforms/matrix.py` → `_build_text_message_content` | Accept optional `agent_event: dict`; attach under `dev.hermes.agent.v1`. |
+| `gateway/platforms/matrix.py` → `_build_text_message_content` | Accept optional `agent_event: dict`; attach under `dev.heddle.agent.v1`. |
 | `gateway/platforms/matrix.py` → `edit_message` | Mirror the key into `m.new_content`. |
 | `gateway/platforms/base.py` → `format_tool_event` | Matrix adapter override returns `(human_string, structured_dict)` instead of `str`. |
 
 Zero behavioural change when the flag is off. Existing `tests/gateway/test_matrix*.py`
 extended with round-trip coverage.
 
-### 3.4 Fallback parser
+### 3.4 Adapters and the fallback parser
 
-For rooms without the extension — OpenCode bots, bridges, humans — heddle runs a
-degraded parser: emoji-chrome regex against the known tool-progress format plus fenced
-code block extraction. It yields tool cards without results. This is a compatibility
-path, never the primary one. Panes fed by the fallback show a dim `~` marker.
+heddle is an agent client, not a client for one agent, so agent support is a registry
+rather than a hardcoded format. An **adapter** answers two questions about one agent:
+which structured key it writes, if any, and which shapes of human-readable tool chrome
+it prints. Adding an integration is a table and a name, not another parser.
+
+Two ship in the box:
+
+| Adapter | Structured | Textual |
+|---|---|---|
+| `heddle` | `dev.heddle.agent.v1` | — |
+| `hermes` | `dev.hermes.agent.v1` | Hermes' `format_tool_event` chrome |
+
+Selected and ordered with `agent.adapters` in the config. Every adapter is asked for a
+structured read before any is asked about text, so a lossless answer from the second
+always beats a lossy one from the first.
+
+The textual path is emoji-chrome matching against the shapes an agent declares, plus
+fenced code block extraction. It yields tool cards without results, exit codes or
+durations, because none of those are on the wire. It is a compatibility path, never the
+primary one, and panes fed by it show a dim `~` marker. Until an agent emits the
+extension it is also the *only* path, which is the honest position for v1: heddle works
+with agents exactly as they are, and works better with any that adopt §3.2.
 
 ---
 
@@ -247,7 +270,7 @@ latency will otherwise stall frame rendering.
 heddle/
 ├─ crates/
 │  ├─ heddle-matrix/   session, login, SyncService, E2EE, Timeline subscriptions
-│  ├─ heddle-agent/    dev.hermes.agent.v1 codec, fallback parser, AgentStore
+│  ├─ heddle-agent/    agent adapters, wire codec, chrome parser, AgentStore
 │  ├─ heddle-render/   tool cards, diffs, markdown, images, transcript widget
 │  ├─ heddle-layout/   Hypertile wrapper, workspace model, layout persistence
 │  └─ heddle-app/      binary: event loop, actions, keymap, config, commands
@@ -371,26 +394,28 @@ Hypertile provides this natively.
 
 ```toml
 [profile.work]
-user_id     = "@quintin:matrix.example.org"
+user_id     = "@you:example.org"
 homeserver  = "https://matrix.example.org"
 default     = true
 
 [agent]
 # User IDs treated as agents rather than humans.
-ids            = ["@hermes:matrix.example.org"]
+ids            = ["@hermes:example.org"]
+adapters       = ["heddle", "hermes"]
 auto_expand    = "running"     # never | running | always
 fallback_parse = true
+show_commentary = true
 
 [ui]
-prefix       = "ctrl+a"
-theme        = "default"
-images       = "auto"          # auto | kitty | sixel | iterm2 | blocks | off
+prefix       = "ctrl+a"        # the only rebindable key
 mouse        = true
-
-[notify]
-enabled = true
-on      = ["blocked", "done", "mention"]
 ```
+
+Every key heddle reads is listed above. Anything else in the file is warned about on
+startup rather than silently ignored, because a setting that appears to have been
+accepted but was not is the one failure mode a config file must not have. Theming,
+image protocol selection and desktop notifications are **not** configurable and are not
+implemented; they are M6 work and the keys were removed rather than left pretending.
 
 ---
 

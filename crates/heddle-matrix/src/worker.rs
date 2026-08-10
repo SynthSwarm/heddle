@@ -14,6 +14,7 @@
 
 use crate::model::*;
 use futures_util::{pin_mut, StreamExt};
+use heddle_agent::{Adapters, Ingest};
 use matrix_sdk::{
     encryption::verification::VerificationRequest,
     ruma::{
@@ -100,7 +101,10 @@ impl Handle {
 }
 
 /// Spawn the worker for an authenticated client.
-pub async fn spawn(client: Client) -> Result<Handle, matrix_sdk_ui::sync_service::Error> {
+pub async fn spawn(
+    client: Client,
+    agents: Adapters,
+) -> Result<Handle, matrix_sdk_ui::sync_service::Error> {
     let (command_tx, command_rx) = mpsc::channel(COMMAND_BUFFER);
     let (event_tx, event_rx) = mpsc::channel(EVENT_BUFFER);
 
@@ -115,6 +119,7 @@ pub async fn spawn(client: Client) -> Result<Handle, matrix_sdk_ui::sync_service
             sync_service,
             views: HashMap::new(),
             events: event_tx,
+            agents: Arc::new(agents),
             verification: None,
             verification_driver: None,
             verified_watch: None,
@@ -150,6 +155,9 @@ struct Worker {
     sync_service: SyncService,
     views: HashMap<View, OpenView>,
     events: mpsc::Sender<WorkerEvent>,
+    /// The agent integrations consulted for every message. Shared with the per-view
+    /// forwarding tasks, which decode on their own.
+    agents: Arc<Adapters>,
     /// The verification in progress, if any. Held so the user's answers have something
     /// to act on; the flow itself is followed on `verification_driver`.
     verification: Option<VerificationRequest>,
@@ -355,7 +363,7 @@ impl Worker {
                 // silently dropped: scrolling up stops loading history until some
                 // unrelated event happens to produce a snapshot. Emit one ourselves,
                 // including on failure, so the flag always clears.
-                let entries = convert(timeline.items().await.iter());
+                let entries = convert(timeline.items().await.iter(), &self.agents);
                 let _ = self
                     .events
                     .send(WorkerEvent::Timeline { view, entries })
@@ -725,6 +733,7 @@ impl Worker {
         let events = self.events.clone();
         let forward_timeline = timeline.clone();
         let forward_view = view.clone();
+        let agents = Arc::clone(&self.agents);
 
         let forward = tokio::spawn(async move {
             let (initial, stream) = forward_timeline.subscribe().await;
@@ -738,7 +747,7 @@ impl Worker {
                 }
             };
 
-            emit(convert(initial.iter())).await;
+            emit(convert(initial.iter(), &agents)).await;
 
             while stream.next().await.is_some() {
                 // A snapshot rather than an incremental patch. The SDK has already done
@@ -746,7 +755,7 @@ impl Worker {
                 // into stable item identities -- so rebuilding the view is cheap
                 // relative to reimplementing VectorDiff application, and cannot drift.
                 let items = forward_timeline.items().await;
-                let entries = convert(items.iter());
+                let entries = convert(items.iter(), &agents);
                 // The only way to tell "nothing arrived" from "something arrived and
                 // was dropped in conversion".
                 tracing::debug!(
@@ -888,11 +897,12 @@ async fn collect_rooms(client: &Client) -> Vec<RoomSummary> {
 
 fn convert<'a>(
     items: impl Iterator<Item = &'a Arc<matrix_sdk_ui::timeline::TimelineItem>>,
+    agents: &Adapters,
 ) -> Vec<Entry> {
-    items.map(|item| convert_item(item)).collect()
+    items.map(|item| convert_item(item, agents)).collect()
 }
 
-fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem) -> Entry {
+fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem, agents: &Adapters) -> Entry {
     let id = item.unique_id().0.clone();
 
     let Some(event) = item.as_event() else {
@@ -924,7 +934,7 @@ fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem) -> Entry {
                             .unwrap_or_else(|| event.sender().localpart().to_owned()),
                         _ => event.sender().localpart().to_owned(),
                     },
-                    agent: decode_agent(event, &body),
+                    agent: decode_agent(event, &body, agents),
                     shield: shield_of(event),
                     body,
                     timestamp: event.timestamp().0.into(),
@@ -1203,8 +1213,8 @@ fn describe(entry: &Entry) -> String {
                 m.thread_root,
                 m.thread_replies,
                 match &m.agent {
-                    AgentPayload::Structured(_) => "structured",
-                    AgentPayload::Degraded(_) => "degraded",
+                    AgentPayload::Structured { .. } => "structured",
+                    AgentPayload::Degraded { .. } => "degraded",
                     AgentPayload::None => "plain",
                 },
             )
@@ -1247,7 +1257,11 @@ fn event_type(event: &matrix_sdk_ui::timeline::EventTimelineItem) -> String {
 /// Uses `latest_json`, which resolves to the newest edit. Hermes streams by
 /// progressively editing one event, so the original JSON would only ever show the first
 /// frame of a turn.
-fn decode_agent(event: &matrix_sdk_ui::timeline::EventTimelineItem, body: &str) -> AgentPayload {
+fn decode_agent(
+    event: &matrix_sdk_ui::timeline::EventTimelineItem,
+    body: &str,
+    agents: &Adapters,
+) -> AgentPayload {
     let Some(raw) = event.latest_json() else {
         return AgentPayload::None;
     };
@@ -1258,9 +1272,12 @@ fn decode_agent(event: &matrix_sdk_ui::timeline::EventTimelineItem, body: &str) 
         return AgentPayload::None;
     };
 
-    match heddle_agent::ingest(content, body, true) {
-        heddle_agent::Ingest::Structured(ev) => AgentPayload::Structured(ev),
-        heddle_agent::Ingest::Degraded(p) => AgentPayload::Degraded(p),
-        heddle_agent::Ingest::Plain => AgentPayload::None,
+    match agents.ingest(content, body) {
+        Ingest::Structured { adapter, event } => AgentPayload::Structured { adapter, event },
+        Ingest::Degraded { adapter, parsed } => AgentPayload::Degraded {
+            adapter,
+            parsed: Box::new(parsed),
+        },
+        Ingest::Plain => AgentPayload::None,
     }
 }

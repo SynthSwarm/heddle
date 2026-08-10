@@ -22,7 +22,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The reverse-DNS content key an agent event is attached under.
-pub const CONTENT_KEY: &str = "dev.hermes.agent.v1";
+pub const CONTENT_KEY: &str = "dev.heddle.agent.v1";
+
+/// The key Hermes' own patch was specified against, accepted for compatibility.
+///
+/// The schema is heddle's, not any one agent's. Naming it after the first agent to
+/// carry it discourages the second from adopting it, and an agent that has to write
+/// `dev.hermes.agent.v1` to be understood by a client it has no relationship with is
+/// being asked to lie about who it is. Both keys are read; [`CONTENT_KEY`] is what
+/// anything heddle documents should write.
+pub const LEGACY_CONTENT_KEY: &str = "dev.hermes.agent.v1";
 
 /// The schema major this build understands. Envelopes with a higher `v` are rejected
 /// rather than misinterpreted.
@@ -295,11 +304,23 @@ pub enum DecodeError {
 ///
 /// Handles the edit case transparently: when the content is an `m.replace` the
 /// authoritative payload lives in `m.new_content`, so that is preferred when present.
+///
+/// Reads [`CONTENT_KEY`] and then [`LEGACY_CONTENT_KEY`]. An adapter written for one
+/// specific agent should call [`decode_under`] with that agent's key instead, so that
+/// two agents sharing a room are never confused for one another.
 pub fn decode(content: &serde_json::Value) -> Result<AgentEvent, DecodeError> {
+    match decode_under(content, CONTENT_KEY) {
+        Err(DecodeError::Absent) => decode_under(content, LEGACY_CONTENT_KEY),
+        other => other,
+    }
+}
+
+/// Extract an [`AgentEvent`] from one named key of a content object.
+pub fn decode_under(content: &serde_json::Value, key: &str) -> Result<AgentEvent, DecodeError> {
     let raw = content
         .get("m.new_content")
-        .and_then(|c| c.get(CONTENT_KEY))
-        .or_else(|| content.get(CONTENT_KEY))
+        .and_then(|c| c.get(key))
+        .or_else(|| content.get(key))
         .ok_or(DecodeError::Absent)?;
 
     // Check the version before full deserialisation so a future schema produces a
@@ -319,10 +340,12 @@ pub fn decode(content: &serde_json::Value) -> Result<AgentEvent, DecodeError> {
 ///
 /// Cheaper than [`decode`] when all that is needed is a routing decision.
 pub fn is_agent_event(content: &serde_json::Value) -> bool {
-    content.get(CONTENT_KEY).is_some()
-        || content
-            .get("m.new_content")
-            .is_some_and(|c| c.get(CONTENT_KEY).is_some())
+    [CONTENT_KEY, LEGACY_CONTENT_KEY].iter().any(|key| {
+        content.get(key).is_some()
+            || content
+                .get("m.new_content")
+                .is_some_and(|c| c.get(key).is_some())
+    })
 }
 
 #[cfg(test)]

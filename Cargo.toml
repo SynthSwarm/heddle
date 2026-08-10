@@ -15,8 +15,12 @@ edition = "2021"
 # is a fiction: the workspace has never built on it.
 rust-version = "1.93"
 license = "Apache-2.0"
-repository = "https://github.com/quintin/heddle"
+repository = "https://github.com/SynthSwarm/heddle"
+homepage = "https://github.com/SynthSwarm/heddle"
 authors = ["Quintin"]
+readme = "README.md"
+keywords = ["matrix", "tui", "agent", "chat", "ratatui"]
+categories = ["command-line-utilities", "network-programming"]
 
 [workspace.dependencies]
 heddle-matrix = { path = "crates/heddle-matrix" }

@@ -1,9 +1,13 @@
 //! Best-effort recovery of agent structure from human-readable text.
 //!
 //! This is the compatibility path for agents that do not emit
-//! [`crate::protocol::CONTENT_KEY`] — OpenCode bots, bridges, an unpatched Hermes. It
-//! reverse-engineers the tool-progress chrome that Hermes' `format_tool_event` produces
-//! in `gateway/platforms/base.py`:
+//! [`crate::protocol::CONTENT_KEY`] — an unpatched Hermes, OpenCode, OpenClaw, a bridge.
+//! It reverse-engineers the tool-progress chrome an agent prints for humans, which is
+//! the only structure on the wire when there is no extension.
+//!
+//! The shapes are a [`Chrome`] table rather than a hardcoded parser, because every agent
+//! prints slightly differently and the difference is nearly always *which* of a handful
+//! of forms it uses, not a new form entirely. Hermes' `format_tool_event` produces:
 //!
 //! ```text
 //! f"{emoji} {event.tool_name}: \"{preview}\""     # "all" / "new" mode
@@ -11,13 +15,66 @@
 //! f"{emoji} {event.tool_name}({keys})\n{args}"    # "verbose" mode
 //! ```
 //!
-//! It is structurally lossy: there is no tool result, exit code or duration on the wire
-//! to recover. Panes fed by this parser are marked `~` in the UI so the degradation is
+//! Adding an agent means declaring which of those it emits, not writing another parser.
+//! See [`crate::adapter`] for how a new one is registered.
+//!
+//! This path is structurally lossy: there is no tool result, exit code or duration on
+//! the wire to recover. Panes fed by it are marked `~` in the UI so the degradation is
 //! visible rather than silent.
 //!
 //! See `docs/SPEC.md` §3.4.
 
 use crate::protocol::{Tool, ToolStatus};
+
+/// Which shapes of tool-progress line an agent produces.
+///
+/// Every flag costs false positives when it is wrong, and a false positive silently
+/// eats a line of the agent's reply. Enabling only what an agent actually emits is
+/// worth more than enabling everything and hoping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chrome {
+    /// Require a leading emoji before the tool name.
+    ///
+    /// Hermes prefixes every progress line with one, and it is the only cheap signal
+    /// separating chrome from prose. Clearing this makes the parser far more eager and
+    /// should only be done for an agent whose output has some other reliable shape.
+    pub leading_emoji: bool,
+    /// Recognise `name: "preview"`.
+    pub preview: bool,
+    /// Recognise `name...`.
+    pub ellipsis: bool,
+    /// Recognise `name(args)`.
+    pub call: bool,
+}
+
+impl Chrome {
+    /// Everything Hermes emits, which is also the most permissive useful setting.
+    pub const HERMES: Self = Self {
+        leading_emoji: true,
+        preview: true,
+        ellipsis: true,
+        call: true,
+    };
+
+    /// Recognise nothing. For an agent that speaks only the structured extension.
+    pub const NONE: Self = Self {
+        leading_emoji: true,
+        preview: false,
+        ellipsis: false,
+        call: false,
+    };
+
+    /// Whether this table can recognise anything at all.
+    pub const fn is_off(self) -> bool {
+        !self.preview && !self.ellipsis && !self.call
+    }
+}
+
+impl Default for Chrome {
+    fn default() -> Self {
+        Self::HERMES
+    }
+}
 
 /// A fenced code block lifted out of a message body.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,14 +106,19 @@ impl Parsed {
     }
 }
 
-/// Parse a plain message body into tool cards, code blocks and remaining prose.
+/// Parse a plain message body with Hermes' chrome rules.
 pub fn parse(body: &str) -> Parsed {
+    parse_with(body, Chrome::HERMES)
+}
+
+/// Parse a plain message body into tool cards, code blocks and remaining prose.
+pub fn parse_with(body: &str, chrome: Chrome) -> Parsed {
     let (blocks, without_blocks) = extract_code_blocks(body);
 
     let mut tools = Vec::new();
     let mut prose_lines = Vec::new();
     for line in without_blocks.lines() {
-        match parse_tool_line(line) {
+        match parse_tool_line(line, chrome) {
             Some(tool) => tools.push(tool),
             None => prose_lines.push(line),
         }
@@ -78,53 +140,64 @@ pub fn parse(body: &str) -> Parsed {
 ///
 /// Returns `None` for ordinary prose. Deliberately conservative: a false positive
 /// silently eats a line of the agent's reply, which is worse than missing a card.
-fn parse_tool_line(line: &str) -> Option<Tool> {
+fn parse_tool_line(line: &str, chrome: Chrome) -> Option<Tool> {
+    if chrome.is_off() {
+        return None;
+    }
+
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    // Chrome always begins with an emoji, which is the only cheap signal that
+    // Chrome usually begins with an emoji, which is the only cheap signal that
     // distinguishes it from prose. `get_tool_emoji` defaults to ⚙️ but returns a wide
     // range, so test the general property rather than a fixed set.
-    let mut chars = trimmed.chars();
-    let first = chars.next()?;
-    if !is_emoji_like(first) {
-        return None;
-    }
-
-    // Skip the emoji plus any variation selectors / ZWJ sequence that follows it.
-    let rest = trimmed
-        .trim_start_matches(|c: char| is_emoji_like(c) || c == '\u{fe0f}' || c == '\u{200d}')
-        .trim_start();
+    let rest = if chrome.leading_emoji {
+        let first = trimmed.chars().next()?;
+        if !is_emoji_like(first) {
+            return None;
+        }
+        // Skip the emoji plus any variation selectors / ZWJ sequence that follows it.
+        trimmed
+            .trim_start_matches(|c: char| is_emoji_like(c) || c == '\u{fe0f}' || c == '\u{200d}')
+            .trim_start()
+    } else {
+        trimmed
+    };
     if rest.is_empty() {
         return None;
     }
 
     // `name: "preview"`
-    if let Some((name, preview)) = rest.split_once(": ") {
-        let name = name.trim();
-        if !is_tool_name(name) {
-            return None;
+    if chrome.preview {
+        if let Some((name, preview)) = rest.split_once(": ") {
+            let name = name.trim();
+            if is_tool_name(name) {
+                let preview = preview.trim().trim_matches('"');
+                return Some(tool(name, Some(preview)));
+            }
         }
-        let preview = preview.trim().trim_matches('"');
-        return Some(tool(name, Some(preview)));
     }
 
     // `name(arg_keys)` -- verbose mode. The args line beneath is left as prose; without
     // the extension there is no reliable way to associate it.
-    if let Some((name, _)) = rest.split_once('(') {
-        let name = name.trim();
-        if is_tool_name(name) {
-            return Some(tool(name, None));
+    if chrome.call {
+        if let Some((name, _)) = rest.split_once('(') {
+            let name = name.trim();
+            if is_tool_name(name) {
+                return Some(tool(name, None));
+            }
         }
     }
 
     // `name...`
-    if let Some(name) = rest.strip_suffix("...") {
-        let name = name.trim();
-        if is_tool_name(name) {
-            return Some(tool(name, None));
+    if chrome.ellipsis {
+        if let Some(name) = rest.strip_suffix("...") {
+            let name = name.trim();
+            if is_tool_name(name) {
+                return Some(tool(name, None));
+            }
         }
     }
 
@@ -150,7 +223,10 @@ fn tool(name: &str, preview: Option<&str>) -> Tool {
 
 /// Tool names are identifiers. Requiring that shape keeps prose like
 /// "Note: this is fine" from being mistaken for a call.
-fn is_tool_name(s: &str) -> bool {
+///
+/// Public so an adapter with its own line rules can reuse the same test rather than
+/// inventing a second, subtly different idea of what a tool is called.
+pub fn is_tool_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 48
         && s.chars()
@@ -161,7 +237,7 @@ fn is_tool_name(s: &str) -> bool {
 ///
 /// Covers the Miscellaneous Symbols, Dingbats, Misc Symbols & Pictographs, Transport,
 /// and Supplemental Symbols blocks, which is where `get_tool_emoji` draws from.
-fn is_emoji_like(c: char) -> bool {
+pub fn is_emoji_like(c: char) -> bool {
     matches!(c as u32,
         0x2190..=0x21FF   // arrows
         | 0x2300..=0x23FF // misc technical (⚙ is 0x2699)
@@ -175,7 +251,10 @@ fn is_emoji_like(c: char) -> bool {
 }
 
 /// Split fenced code blocks out of a body, returning the blocks and the remaining text.
-fn extract_code_blocks(body: &str) -> (Vec<CodeBlock>, String) {
+///
+/// Public because every adapter needs it and none of them should be re-deriving where
+/// a fence ends: chrome inside a code block is a sample, not a call.
+pub fn extract_code_blocks(body: &str) -> (Vec<CodeBlock>, String) {
     let mut blocks = Vec::new();
     let mut remainder = String::new();
     let mut current: Option<(Option<String>, Vec<&str>)> = None;

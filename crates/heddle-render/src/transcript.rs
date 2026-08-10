@@ -144,12 +144,12 @@ fn render_message(
     let mut out = Vec::new();
 
     match &message.agent {
-        AgentPayload::Structured(event) => {
+        AgentPayload::Structured { event, .. } => {
             out.extend(render_agent_event(
                 event, event_id, theme, options, overrides,
             ));
         }
-        AgentPayload::Degraded(parsed) => {
+        AgentPayload::Degraded { parsed, .. } => {
             for (i, tool) in parsed.tools.iter().enumerate() {
                 let expanded = card::is_expanded(
                     tool,
@@ -466,7 +466,10 @@ mod tests {
             usage: None,
         };
         let out = render(
-            &[message(AgentPayload::Structured(Box::new(event)))],
+            &[message(AgentPayload::Structured {
+                adapter: "test",
+                event: Box::new(event),
+            })],
             &Theme::default(),
             &Options::default(),
             &Overrides::new(),
@@ -508,7 +511,10 @@ mod tests {
             picker: None,
             usage: None,
         };
-        let entry = message(AgentPayload::Structured(Box::new(event)));
+        let entry = message(AgentPayload::Structured {
+            adapter: "test",
+            event: Box::new(event),
+        });
 
         let collapsed = render(
             std::slice::from_ref(&entry),
@@ -543,7 +549,10 @@ mod tests {
             truncated: false,
         });
         let out = render(
-            &[message(AgentPayload::Degraded(parsed))],
+            &[message(AgentPayload::Degraded {
+                adapter: "test",
+                parsed: Box::new(parsed),
+            })],
             &Theme::default(),
             &Options::default(),
             &Overrides::new(),
@@ -571,7 +580,10 @@ mod tests {
             picker: None,
             usage: None,
         };
-        let entry = message(AgentPayload::Structured(Box::new(event)));
+        let entry = message(AgentPayload::Structured {
+            adapter: "test",
+            event: Box::new(event),
+        });
         let theme = Theme::default();
 
         let shown = render(
@@ -782,7 +794,10 @@ mod tests {
         });
 
         let out = render(
-            &[message(AgentPayload::Degraded(parsed))],
+            &[message(AgentPayload::Degraded {
+                adapter: "test",
+                parsed: Box::new(parsed),
+            })],
             &Theme::default(),
             &Options::default(),
             &Overrides::new(),
@@ -815,7 +830,10 @@ mod tests {
             usage: None,
         };
         let out = render(
-            &[message(AgentPayload::Structured(Box::new(event)))],
+            &[message(AgentPayload::Structured {
+                adapter: "test",
+                event: Box::new(event),
+            })],
             &Theme::default(),
             &Options::default(),
             &Overrides::new(),

@@ -13,7 +13,6 @@ pub struct Config {
     pub profile: BTreeMap<String, Profile>,
     pub agent: Agent,
     pub ui: Ui,
-    pub notify: Notify,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -30,10 +29,15 @@ pub struct Profile {
 pub struct Agent {
     /// Matrix user IDs treated as agents rather than humans.
     pub ids: Vec<String>,
+    /// Agent integrations to consult, in order. See `heddle_agent::adapter`.
+    ///
+    /// `heddle` reads the published structured schema from any agent that emits it;
+    /// `hermes` reads Hermes' legacy key and recovers its tool chrome from plain text.
+    pub adapters: Vec<String>,
     /// When to auto-expand tool cards: `never`, `running` or `always`.
     pub auto_expand: String,
-    /// Recover agent structure from human-readable chrome when the
-    /// `dev.hermes.agent.v1` extension is absent.
+    /// Recover agent structure from human-readable chrome when no structured extension
+    /// is present. This is the only path in use until an agent emits the schema.
     pub fallback_parse: bool,
     /// Show reasoning/commentary blocks.
     pub show_commentary: bool,
@@ -43,6 +47,7 @@ impl Default for Agent {
     fn default() -> Self {
         Self {
             ids: Vec::new(),
+            adapters: vec!["heddle".into(), "hermes".into()],
             auto_expand: "running".into(),
             fallback_parse: true,
             show_commentary: true,
@@ -51,6 +56,11 @@ impl Default for Agent {
 }
 
 impl Agent {
+    /// The agent integrations this config asks for.
+    pub fn adapters(&self) -> heddle_agent::Adapters {
+        heddle_agent::Adapters::by_id(self.adapters.iter().map(String::as_str))
+            .textual(self.fallback_parse)
+    }
     pub fn auto_expand(&self) -> heddle_render::AutoExpand {
         match self.auto_expand.as_str() {
             "never" => heddle_render::AutoExpand::Never,
@@ -76,10 +86,9 @@ impl Agent {
 #[serde(default)]
 pub struct Ui {
     /// Prefix key, in crossterm-ish notation.
+    ///
+    /// The only rebindable key. Everything else is fixed; see `docs/SPEC.md` §5.3.
     pub prefix: String,
-    pub theme: String,
-    /// `auto`, `kitty`, `sixel`, `iterm2`, `blocks` or `off`.
-    pub images: String,
     pub mouse: bool,
 }
 
@@ -89,35 +98,99 @@ impl Default for Ui {
             // ctrl+a rather than ctrl+b, so heddle does not fight tmux or herdr when
             // nested inside one.
             prefix: "ctrl+a".into(),
-            theme: "default".into(),
-            images: "auto".into(),
             mouse: true,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Notify {
-    pub enabled: bool,
-    /// Any of `blocked`, `done`, `mention`.
-    pub on: Vec<String>,
-}
+/// Every section and key heddle acts on.
+///
+/// Used to warn about anything else in the file. A config key that is read, ignored and
+/// never mentioned is worse than one that does not exist: it tells the user their
+/// preference was applied when it was not. Warning is preferred to rejecting, because a
+/// stale key left over from an older version should cost a line in the log rather than
+/// a client that will not start.
+const KNOWN: &[(&str, &[&str])] = &[
+    ("profile", &["user_id", "homeserver", "default"]),
+    (
+        "agent",
+        &[
+            "ids",
+            "adapters",
+            "auto_expand",
+            "fallback_parse",
+            "show_commentary",
+        ],
+    ),
+    ("ui", &["prefix", "mouse"]),
+];
 
-impl Default for Notify {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            on: vec!["blocked".into(), "mention".into()],
+/// Report keys heddle does not act on.
+///
+/// Returns human-readable complaints rather than logging directly, so the behaviour can
+/// be tested without capturing a subscriber.
+pub fn unknown_keys(text: &str) -> Vec<String> {
+    // `toml::from_str`, not `str::parse`: in toml 0.9 the `FromStr` impl on `Value`
+    // parses a bare value rather than a document, so parsing a config file through it
+    // fails and this function silently approves of everything.
+    let Ok(root) = toml::from_str::<toml::Table>(text) else {
+        // Unparseable is not this function's problem to report; the caller's own
+        // deserialisation will fail with a better message.
+        return Vec::new();
+    };
+
+    let mut complaints = Vec::new();
+    for (section, value) in &root {
+        let Some(known) = KNOWN.iter().find(|(name, _)| name == section) else {
+            complaints.push(format!("[{section}] is not a section heddle reads"));
+            continue;
+        };
+        let Some(table) = value.as_table() else {
+            continue;
+        };
+
+        // `[profile.<name>]` nests one level deeper than the others.
+        let entries: Vec<(String, &toml::Value)> = if section == "profile" {
+            table
+                .iter()
+                .filter_map(|(name, v)| v.as_table().map(|t| (name.clone(), t)))
+                .flat_map(|(name, t)| {
+                    t.iter()
+                        .map(move |(k, v)| (format!("profile.{name}.{k}"), v))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        } else {
+            table
+                .iter()
+                .map(|(k, v)| (format!("{section}.{k}"), v))
+                .collect()
+        };
+
+        for (path, _) in entries {
+            let leaf = path.rsplit('.').next().unwrap_or(&path);
+            if !known.1.contains(&leaf) {
+                complaints.push(format!("`{path}` is not a setting heddle reads"));
+            }
         }
     }
+    complaints
 }
 
 impl Config {
     /// Load from `path`, or return defaults when it does not exist.
+    ///
+    /// Anything in the file heddle does not act on is warned about rather than ignored
+    /// in silence. A setting that appears to have been accepted but was not is the one
+    /// failure mode a config file must not have.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(text) => Ok(toml::from_str(&text)?),
+            Ok(text) => {
+                for complaint in unknown_keys(&text) {
+                    tracing::warn!(file = %path.display(), "{complaint}");
+                }
+                Ok(toml::from_str(&text)?)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }
@@ -259,12 +332,12 @@ mod tests {
     fn parses_a_realistic_config() {
         let text = r#"
             [profile.work]
-            user_id = "@quintin:matrix.example.org"
+            user_id = "@you:example.org"
             homeserver = "https://matrix.example.org"
             default = true
 
             [agent]
-            ids = ["@hermes:matrix.example.org"]
+            ids = ["@hermes:example.org"]
             auto_expand = "always"
 
             [ui]
@@ -279,7 +352,91 @@ mod tests {
         assert!(!cfg.ui.mouse);
         // Unspecified keys keep their defaults rather than zeroing out.
         assert!(cfg.agent.fallback_parse);
-        assert_eq!(cfg.ui.theme, "default");
+        assert_eq!(cfg.agent.adapters, vec!["heddle", "hermes"]);
+    }
+
+    #[test]
+    fn every_documented_key_is_a_key_heddle_reads() {
+        // The config example in SPEC.md §5.4 is what people copy. If it contains a key
+        // that does nothing, that is the lie this whole table exists to prevent.
+        let documented = r#"
+            [profile.work]
+            user_id = "@you:example.org"
+            homeserver = "https://matrix.example.org"
+            default = true
+
+            [agent]
+            ids = ["@hermes:example.org"]
+            adapters = ["heddle", "hermes"]
+            auto_expand = "running"
+            fallback_parse = true
+            show_commentary = true
+
+            [ui]
+            prefix = "ctrl+a"
+            mouse = true
+        "#;
+        assert!(
+            unknown_keys(documented).is_empty(),
+            "{:?}",
+            unknown_keys(documented)
+        );
+        toml::from_str::<Config>(documented).expect("the documented config must parse");
+    }
+
+    #[test]
+    fn a_setting_heddle_does_not_act_on_is_complained_about() {
+        // These three were parsed and silently ignored for the whole of M1 to M4:
+        // theming, image protocols and desktop notifications were all configurable and
+        // none of them did anything.
+        let stale = r#"
+            [ui]
+            prefix = "ctrl+a"
+            theme = "dracula"
+            images = "kitty"
+
+            [notify]
+            enabled = true
+        "#;
+        let complaints = unknown_keys(stale);
+        assert!(complaints.iter().any(|c| c.contains("ui.theme")));
+        assert!(complaints.iter().any(|c| c.contains("ui.images")));
+        assert!(complaints.iter().any(|c| c.contains("[notify]")));
+
+        // And the file still loads: a stale key costs a warning, not a launch.
+        toml::from_str::<Config>(stale).expect("still parses");
+    }
+
+    #[test]
+    fn a_typo_in_a_profile_is_caught_too() {
+        let text = r#"
+            [profile.work]
+            user_id = "@you:example.org"
+            homserver = "https://matrix.example.org"
+        "#;
+        let complaints = unknown_keys(text);
+        assert!(
+            complaints
+                .iter()
+                .any(|c| c.contains("profile.work.homserver")),
+            "{complaints:?}"
+        );
+    }
+
+    #[test]
+    fn adapters_are_resolved_from_config() {
+        let cfg = Agent {
+            adapters: vec!["hermes".into()],
+            ..Agent::default()
+        };
+        assert_eq!(cfg.adapters().ids(), vec!["hermes"]);
+
+        // Switching the lossy path off must not switch off the whole integration.
+        let no_fallback = Agent {
+            fallback_parse: false,
+            ..Agent::default()
+        };
+        assert_eq!(no_fallback.adapters().ids(), vec!["heddle", "hermes"]);
     }
 
     #[test]

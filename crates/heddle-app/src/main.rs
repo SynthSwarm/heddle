@@ -194,7 +194,7 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
         .await
         .with_context(|| format!("restoring profile `{profile_name}`"))?;
 
-    let handle = heddle_matrix::spawn(client)
+    let handle = heddle_matrix::spawn(client, config.agent.adapters())
         .await
         .context("starting the matrix worker")?;
 

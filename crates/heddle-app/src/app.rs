@@ -1161,8 +1161,8 @@ impl App {
                 continue;
             }
             match &message.agent {
-                AgentPayload::Structured(event) => self.agents.apply(event),
-                AgentPayload::Degraded(_) => {
+                AgentPayload::Structured { event, .. } => self.agents.apply(event),
+                AgentPayload::Degraded { .. } => {
                     if let Some(root) = &view.thread_root {
                         self.agents.mark_degraded(root);
                     }
@@ -2004,7 +2004,7 @@ impl App {
             let EntryKind::Message(message) = &entry.kind else {
                 return None;
             };
-            let AgentPayload::Structured(event) = &message.agent else {
+            let AgentPayload::Structured { event, .. } = &message.agent else {
                 return None;
             };
             let tool = event.tool.as_ref()?;
@@ -2089,7 +2089,7 @@ impl App {
             let EntryKind::Message(message) = &entry.kind else {
                 return None;
             };
-            let AgentPayload::Structured(event) = &message.agent else {
+            let AgentPayload::Structured { event, .. } = &message.agent else {
                 return None;
             };
             let approval = event.approval.as_ref()?;
@@ -2152,7 +2152,10 @@ mod tests {
                 thread_root: Some("$root".into()),
                 thread_replies: None,
                 reactions: Vec::new(),
-                agent: AgentPayload::Structured(Box::new(event)),
+                agent: AgentPayload::Structured {
+                    adapter: "test",
+                    event: Box::new(event),
+                },
             }),
         }
     }

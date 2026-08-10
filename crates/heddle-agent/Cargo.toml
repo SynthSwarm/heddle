@@ -1,11 +1,15 @@
 [package]
 name = "heddle-agent"
-description = "Agent event protocol (dev.hermes.agent.v1) codec, fallback parser and store"
+description = "Pluggable agent integrations: wire codec, tool-chrome recovery and turn assembly"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde.workspace = true

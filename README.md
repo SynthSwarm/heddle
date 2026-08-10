@@ -7,8 +7,11 @@ session* — streaming output, collapsible tool cards, inline diffs and keypress
 approvals, laid out with the multi-pane, multi-workspace ergonomics of a terminal
 workspace manager.
 
-> Status: early. M0 (pre-flight) and the M1 spine are in place; see
-> [`docs/PLAN.md`](docs/PLAN.md) for what lands when.
+> Status: pre-release. M0 to M4 are complete — read, write, threads, encryption with
+> interactive verification and key backup, and BSP tiling with persistent layouts. What
+> is *not* done is the structured agent extension (M5): today heddle recovers agent
+> structure from the text agents already print, which is lossy. See
+> [`docs/PLAN.md`](docs/PLAN.md).
 
 ---
 
@@ -25,9 +28,16 @@ tool calls, results and durations internally, then flattens them to:
 No result. No diff. No exit code. A client reading only that is permanently capped at
 "pretty chat".
 
-heddle fixes this at the source with a namespaced content extension
-(`dev.hermes.agent.v1`) carried alongside the human-readable body — other Matrix clients
-are unaffected — and renders the result properly.
+heddle addresses this from both ends. Where an agent will carry a namespaced content
+extension (`dev.heddle.agent.v1`) alongside the human-readable body, heddle renders the
+structure losslessly and other Matrix clients are unaffected. Where it will not — which
+today is everywhere — heddle recovers what it can from the tool chrome the agent already
+prints, and marks those panes `~` so the degradation is visible rather than pretended
+away.
+
+Agent support is a registry rather than a hardcoded format. An *adapter* declares which
+structured key an agent writes and which shapes of chrome it prints; Hermes is the first
+one, and adding another is a table and a name rather than a second parser.
 
 ## Concepts
 
@@ -119,7 +129,7 @@ Mouse is first-class: click to focus, wheel to scroll.
 
 ```
 crates/
-  heddle-agent/    dev.hermes.agent.v1 codec, fallback parser, derived state
+  heddle-agent/    agent adapters, wire codec, chrome parser, derived state
   heddle-matrix/   session, sliding sync, E2EE, thread-focused timelines
   heddle-layout/   workspace model + BSP tiling facade
   heddle-render/   tool cards, diffs, markdown, transcript

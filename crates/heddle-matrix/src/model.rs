@@ -37,10 +37,19 @@ pub struct RoomSummary {
 /// Whether an entry carried agent structure, and at what fidelity.
 #[derive(Debug, Clone)]
 pub enum AgentPayload {
-    /// Full fidelity, from the `dev.hermes.agent.v1` extension.
-    Structured(Box<AgentEvent>),
+    /// Full fidelity, from the structured extension.
+    Structured {
+        /// Which adapter understood it.
+        adapter: &'static str,
+        event: Box<AgentEvent>,
+    },
     /// Recovered from human-readable chrome. Lossy; surfaced with a `~` marker.
-    Degraded(fallback::Parsed),
+    Degraded {
+        adapter: &'static str,
+        /// Boxed to match `Structured`: three vectors inline would make every
+        /// `EntryKind::Message` pay for the lossy path whether or not it used it.
+        parsed: Box<fallback::Parsed>,
+    },
     /// An ordinary message.
     None,
 }
@@ -51,7 +60,15 @@ impl AgentPayload {
     }
 
     pub fn is_degraded(&self) -> bool {
-        matches!(self, Self::Degraded(_))
+        matches!(self, Self::Degraded { .. })
+    }
+
+    /// Which agent integration claimed this message, if any did.
+    pub fn adapter(&self) -> Option<&'static str> {
+        match self {
+            Self::Structured { adapter, .. } | Self::Degraded { adapter, .. } => Some(adapter),
+            Self::None => None,
+        }
     }
 }
 
@@ -394,7 +411,10 @@ mod tests {
     fn agent_payload_reports_fidelity() {
         assert!(!AgentPayload::None.is_agent());
         assert!(!AgentPayload::None.is_degraded());
-        let degraded = AgentPayload::Degraded(fallback::Parsed::default());
+        let degraded = AgentPayload::Degraded {
+            adapter: "test",
+            parsed: Box::new(fallback::Parsed::default()),
+        };
         assert!(degraded.is_agent());
         assert!(degraded.is_degraded());
     }

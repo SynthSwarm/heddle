@@ -359,10 +359,7 @@ mod tests {
     fn profile_paths_are_namespaced() {
         let p = Paths::for_profile(Path::new("/data"), "work");
         assert_eq!(p.store, Path::new("/data/profiles/work/store"));
-        assert_eq!(
-            p.session,
-            Path::new("/data/profiles/work/session.json")
-        );
+        assert_eq!(p.session, Path::new("/data/profiles/work/session.json"));
     }
 
     #[test]

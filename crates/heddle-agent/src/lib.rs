@@ -1,65 +1,42 @@
 //! Agent event protocol for heddle.
 //!
-//! Three layers, in decreasing order of fidelity:
+//! heddle is an agent client rather than a client for any one agent. What it needs from
+//! an agent is structure — which tool ran, what it returned, whether a human is being
+//! waited on — and agents supply that at two very different fidelities:
 //!
-//! 1. [`protocol`] — the `dev.hermes.agent.v1` wire format. Structured tool calls,
-//!    results, diffs, approvals and usage. Requires the Hermes patch described in
-//!    `docs/SPEC.md` §3.3.
-//! 2. [`fallback`] — best-effort recovery from human-readable tool chrome, for agents
-//!    that do not emit the extension. Structurally lossy.
-//! 3. [`store`] — turn assembly and the derived [`store::AgentState`] machine that
-//!    drives pane, tab and workspace badges.
+//! 1. [`protocol`] — the `dev.heddle.agent.v1` wire format. Structured tool calls,
+//!    results, diffs, approvals and usage, carried beside the human-readable body so
+//!    that other Matrix clients still show something sensible. Lossless, and requires
+//!    the agent to emit it.
+//! 2. [`fallback`] — best-effort recovery from the tool chrome an agent already prints
+//!    for humans. Structurally lossy, and requires nothing of the agent at all. This is
+//!    the only path in use today, since no agent yet emits the extension.
+//!
+//! [`adapter`] binds the two together: an [`adapter::Adapter`] is one agent's answer to
+//! both questions, and [`adapter::Adapters`] is the ordered set heddle consults. Hermes
+//! is the first integration; adding a second is a chrome table and a name rather than
+//! another parser.
+//!
+//! [`store`] then folds whatever came out into turns and the derived
+//! [`store::AgentState`] that drives pane, tab and workspace badges — and it neither
+//! knows nor cares which adapter produced the input.
 //!
 //! This crate is deliberately free of any Matrix dependency: it operates on
 //! `serde_json::Value` content objects so it can be tested without a homeserver.
 
+pub mod adapter;
 pub mod fallback;
 pub mod protocol;
 pub mod store;
 
+pub use adapter::{Adapter, Adapters, Ingest};
+pub use fallback::Chrome;
 pub use protocol::{
-    decode, is_agent_event, AgentEvent, AgentInfo, Approval, ApprovalChoice, DecodeError, Kind,
-    Notice, Picker, PickerOption, ResultKind, Tool, ToolStatus, Usage, CONTENT_KEY, SCHEMA_VERSION,
+    decode, decode_under, is_agent_event, AgentEvent, AgentInfo, Approval, ApprovalChoice,
+    DecodeError, Kind, Notice, Picker, PickerOption, ResultKind, Tool, ToolStatus, Usage,
+    CONTENT_KEY, LEGACY_CONTENT_KEY, SCHEMA_VERSION,
 };
 pub use store::{AgentState, AgentStore, Pending, Session, Turn};
-
-/// Outcome of feeding one message body through both layers.
-#[derive(Debug, Clone)]
-pub enum Ingest {
-    /// A structured event was present. Full fidelity.
-    Structured(Box<AgentEvent>),
-    /// No extension, but agent-shaped chrome was recovered from the text.
-    Degraded(fallback::Parsed),
-    /// An ordinary message. Render as chat.
-    Plain,
-}
-
-/// Decode a message content object, falling back to text parsing.
-///
-/// `body` is the human-readable `m.room.message` body, used only when the extension is
-/// absent. Pass `fallback_enabled = false` to disable the lossy path entirely.
-pub fn ingest(content: &serde_json::Value, body: &str, fallback_enabled: bool) -> Ingest {
-    match decode(content) {
-        Ok(ev) => return Ingest::Structured(Box::new(ev)),
-        Err(DecodeError::Absent) => {}
-        Err(e) => {
-            // A malformed or future-versioned event is not fatal: the human-readable
-            // body is still on the wire, so fall through and render what we can.
-            tracing::warn!(error = %e, "agent event present but unusable; falling back");
-        }
-    }
-
-    if !fallback_enabled {
-        return Ingest::Plain;
-    }
-
-    let parsed = fallback::parse(body);
-    if parsed.is_empty() {
-        Ingest::Plain
-    } else {
-        Ingest::Degraded(parsed)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -68,8 +45,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn prefers_the_structured_path() {
-        let content = json!({
+    fn the_crate_is_usable_without_naming_an_adapter() {
+        // The default set is what a caller who has not configured anything gets, and it
+        // has to understand both registers out of the box.
+        let agents = Adapters::new();
+
+        let structured = json!({
             "body": "🔧 edit: \"src/main.rs\"",
             CONTENT_KEY: {
                 "v": 1, "session_id": "s", "turn_id": "t", "seq": 1,
@@ -78,44 +59,17 @@ mod tests {
             }
         });
         assert!(matches!(
-            ingest(&content, "🔧 edit: \"src/main.rs\"", true),
-            Ingest::Structured(_)
+            agents.ingest(&structured, "🔧 edit: \"src/main.rs\""),
+            Ingest::Structured { .. }
         ));
-    }
 
-    #[test]
-    fn falls_back_when_the_extension_is_absent() {
-        let content = json!({ "body": "🔧 edit: \"src/main.rs\"" });
-        match ingest(&content, "🔧 edit: \"src/main.rs\"", true) {
-            Ingest::Degraded(p) => assert_eq!(p.tools.len(), 1),
-            other => panic!("expected degraded, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn ordinary_chat_stays_plain() {
-        let content = json!({ "body": "morning" });
-        assert!(matches!(ingest(&content, "morning", true), Ingest::Plain));
-    }
-
-    #[test]
-    fn fallback_can_be_switched_off() {
-        let content = json!({ "body": "🔧 edit: \"x\"" });
+        let chrome = json!({ "body": "🔧 edit: \"src/main.rs\"" });
         assert!(matches!(
-            ingest(&content, "🔧 edit: \"x\"", false),
-            Ingest::Plain
+            agents.ingest(&chrome, "🔧 edit: \"src/main.rs\""),
+            Ingest::Degraded { .. }
         ));
-    }
 
-    #[test]
-    fn a_future_schema_degrades_rather_than_dropping_the_message() {
-        let content = json!({
-            "body": "🔧 edit: \"src/main.rs\"",
-            CONTENT_KEY: { "v": 99, "session_id": "s", "turn_id": "t", "seq": 1, "kind": "tool.call" }
-        });
-        match ingest(&content, "🔧 edit: \"src/main.rs\"", true) {
-            Ingest::Degraded(p) => assert_eq!(p.tools.len(), 1),
-            other => panic!("expected degraded, got {other:?}"),
-        }
+        let plain = json!({ "body": "morning" });
+        assert!(matches!(agents.ingest(&plain, "morning"), Ingest::Plain));
     }
 }
