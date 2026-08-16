@@ -33,12 +33,18 @@ pub enum AgentState {
 
 impl AgentState {
     /// The glyph shown in badges.
+    ///
+    /// All four are text-presentation geometric shapes, laid out at one cell. `⚠` was
+    /// the obvious choice for `Blocked` and was used here for a while, but it is
+    /// East\_Asian\_Width=Neutral and terminals commonly promote it to a two-cell
+    /// emoji, which leaves a cell the renderer thinks it has already written. See
+    /// `heddle_render::glyphs`.
     pub fn glyph(self) -> &'static str {
         match self {
             Self::Idle => "·",
             Self::Done => "✓",
             Self::Working => "●",
-            Self::Blocked => "⚠",
+            Self::Blocked => "▲",
         }
     }
 

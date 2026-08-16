@@ -142,14 +142,25 @@ fn render_message(
     overrides: &Overrides,
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
+    let mut drawn_elsewhere = false;
 
     match &message.agent {
         AgentPayload::Structured { event, .. } => {
+            drawn_elsewhere = drawn_as_prompt(&event.kind);
             out.extend(render_agent_event(
                 event, event_id, theme, options, overrides,
             ));
         }
         AgentPayload::Degraded { parsed, .. } => {
+            // The sender line leads the message, and carries the `~` whenever the
+            // payload is degraded -- not only when there is prose left over.
+            //
+            // It used to sit between the cards and the prose, inside an
+            // `if !parsed.prose.is_empty()`. Hermes' canonical progress message is all
+            // chrome and no prose, so the commonest degraded message in existence drew
+            // a bare card with no sender and no marker: the one shape the marker exists
+            // to mark was the one shape that never got it.
+            out.push(sender_line(message, theme, options.mark_degraded));
             for (i, tool) in parsed.tools.iter().enumerate() {
                 let expanded = card::is_expanded(
                     tool,
@@ -159,7 +170,6 @@ fn render_message(
                 out.extend(card::render(tool, expanded, theme));
             }
             if !parsed.prose.is_empty() {
-                out.push(sender_line(message, theme, options.mark_degraded));
                 out.extend(markdown(&parsed.prose));
             }
             // The parser lifts fenced blocks out of the prose. Putting them back is not
@@ -178,7 +188,13 @@ fn render_message(
     // Never render a message as nothing. Any path that yields no lines — an event kind
     // we do not draw, a parse that swallowed the text — would drop the message from the
     // transcript silently, which reads as the agent having said nothing at all.
-    if out.is_empty() && !message.body.trim().is_empty() {
+    //
+    // Except where the app is drawing it as a live prompt. Those events carry a
+    // human-readable body too ("⚠ Dangerous command requires approval"), so without
+    // `drawn_elsewhere` this fallback printed the approval into the transcript *as well
+    // as* the prompt, and the comment on the match arm saying they are not transcript
+    // rows was contradicted twenty lines below it.
+    if out.is_empty() && !drawn_elsewhere && !message.body.trim().is_empty() {
         out.push(sender_line(message, theme, false));
         out.extend(markdown(&message.body));
     }
@@ -261,6 +277,8 @@ fn render_agent_event(
             .unwrap_or_default(),
         // Approvals and pickers are drawn as interactive prompts by the app, not as
         // transcript rows, so that they can carry a live countdown and keybindings.
+        // See `drawn_as_prompt`, which is what stops the empty-output fallback in
+        // `render_message` from drawing them a second time.
         Kind::ApprovalRequest
         | Kind::ApprovalResolved
         | Kind::ModelPicker
@@ -268,6 +286,15 @@ fn render_agent_event(
         | Kind::Commentary
         | Kind::Unknown => Vec::new(),
     }
+}
+
+/// Whether the app draws this event itself, as a live prompt.
+///
+/// Only these two. `ApprovalResolved` and `Unknown` produce no rows of their own but
+/// are *not* drawn anywhere else, so they still want the fallback in `render_message`
+/// rather than vanishing.
+fn drawn_as_prompt(kind: &Kind) -> bool {
+    matches!(kind, Kind::ApprovalRequest | Kind::ModelPicker)
 }
 
 fn override_for(overrides: &Overrides, event_id: Option<&str>, index: u32) -> Option<bool> {
@@ -286,11 +313,12 @@ fn sender_line(message: &Message, theme: &Theme, mark_degraded: bool) -> Line<'s
     // the distinction is worth more than a name alone: it is the difference between a
     // colleague and a process, and the eye finds a glyph before it reads a word.
     //
-    // Every emoji here is East_Asian_Width=Wide. That is not decoration policy, it is a
-    // correctness requirement: `unicode-width` reports Neutral emoji as one cell while
-    // terminals paint two, and a sender line that measures short leaves stale cells the
-    // renderer believes are already correct. The obvious glyphs for this job -- ⚠ and
-    // 🛡 -- are both Neutral, and both would rot the transcript.
+    // Both are East_Asian_Width=Wide, and that is a correctness requirement rather
+    // than a taste: `unicode-width` decides how many cells ratatui reserves, so a glyph
+    // the terminal paints wider leaves a cell the renderer believes it has already
+    // written, and the row rots as the transcript scrolls under it. The tempting
+    // glyphs for this job -- ⚠ and 🛡 -- are Neutral, and terminals promote both to
+    // two-cell emoji. See `crate::glyphs`, which is the table the doctor probes.
     let who = if message.agent.is_agent() {
         "🤖"
     } else {
@@ -564,6 +592,90 @@ mod tests {
     }
 
     #[test]
+    fn a_degraded_message_that_is_all_chrome_is_still_marked() {
+        // The shape this marker exists for, and the one it used to miss. Hermes'
+        // canonical progress message is `{emoji} {tool}: "{preview}"` and nothing else,
+        // so `parsed.prose` is empty -- and the `~` was emitted inside
+        // `if !parsed.prose.is_empty()`. The commonest degraded message in existence
+        // drew a bare card with no sender line and no marker.
+        let parsed = heddle_agent::fallback::Parsed {
+            prose: String::new(),
+            tools: vec![Tool {
+                name: "edit".into(),
+                index: 0,
+                args: None,
+                preview: Some("x.rs".into()),
+                status: ToolStatus::Ok,
+                duration_ms: None,
+                mime: None,
+                body: None,
+                truncated: false,
+            }],
+            ..Default::default()
+        };
+
+        let out = render(
+            &[message(AgentPayload::Degraded {
+                adapter: "test",
+                parsed: Box::new(parsed),
+            })],
+            &Theme::default(),
+            &Options::default(),
+            &Overrides::new(),
+            None,
+        );
+
+        let text = text_of(&out);
+        assert!(text.contains('~'), "degradation must be visible: {text}");
+        assert!(text.contains("hermes"), "and it must say who: {text}");
+    }
+
+    #[test]
+    fn an_approval_is_drawn_by_the_app_and_not_also_in_the_transcript() {
+        // `render_agent_event` returns no rows for an approval because the app draws it
+        // as a live prompt with a countdown and keybindings. But the event carries a
+        // human-readable body for other Matrix clients, and the "never render a message
+        // as nothing" fallback then printed that body as a transcript row -- so the
+        // approval appeared twice, once as a prompt and once as chrome.
+        let event = AgentEvent {
+            v: 1,
+            session_id: "s".into(),
+            turn_id: "t".into(),
+            seq: 1,
+            kind: Kind::ApprovalRequest,
+            agent: None,
+            text: None,
+            final_: None,
+            tool: None,
+            notice: None,
+            approval: None,
+            picker: None,
+            usage: None,
+        };
+        let mut entry = message(AgentPayload::Structured {
+            adapter: "test",
+            event: Box::new(event),
+        });
+        if let EntryKind::Message(m) = &mut entry.kind {
+            m.body = "⚠ Dangerous command requires approval\n$ rm -rf ./build".into();
+        }
+
+        let out = render(
+            &[entry],
+            &Theme::default(),
+            &Options::default(),
+            &Overrides::new(),
+            None,
+        );
+
+        let text = text_of(&out);
+        assert!(
+            !text.contains("rm -rf"),
+            "the prompt draws this; the transcript must not: {text}"
+        );
+    }
+
+    #[test]
     fn commentary_can_be_hidden() {
         let event = AgentEvent {
             v: 1,
@@ -631,22 +743,24 @@ mod tests {
     }
 
     #[test]
-    fn every_glyph_the_transcript_prints_is_measured_as_it_is_painted() {
+    fn every_glyph_the_transcript_prints_is_in_the_table_that_measures_them() {
         use unicode_width::UnicodeWidthStr;
 
-        // `unicode-width` reports East_Asian_Width=Neutral emoji as one cell while every
-        // terminal heddle targets paints them as two. A glyph that measures short leaves
-        // cells the renderer believes are already correct, so they are never repainted
-        // and the transcript rots as it scrolls.
+        // This used to loop over four hardcoded emoji, under a name promising it
+        // covered everything the transcript prints. It could not fail when a glyph was
+        // added, which is the only thing it was for -- and while it passed, `⚠` was the
+        // Blocked badge in every pane, tab and workspace header.
         //
-        // The tempting glyphs for a security warning -- ⚠ and 🛡 -- are both Neutral.
-        // This test exists because the next person to reach for one will not know that.
-        for glyph in ["👤", "🤖", "⛔", "🔒"] {
-            assert_eq!(
-                UnicodeWidthStr::width(glyph),
-                2,
-                "{glyph} is not measured as two cells; it will desynchronise the renderer"
+        // The table lives in `crate::glyphs` now and is what the doctor probes. What is
+        // worth asserting *here* is that the transcript's own glyphs are in it.
+        let table: Vec<&str> = crate::glyphs::PRINTED.iter().map(|g| g.glyph).collect();
+
+        for glyph in ["👤", "🤖", "⛔", "🔒", "▎", "⤷", "┊", "~"] {
+            assert!(
+                table.contains(&glyph),
+                "{glyph} is drawn by the transcript but not measured by the doctor"
             );
+            assert!(UnicodeWidthStr::width(glyph) > 0);
         }
     }
 

@@ -10,7 +10,6 @@
 
 use std::fmt;
 use std::path::Path;
-use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -64,19 +63,6 @@ impl Finding {
         }
     }
 }
-
-/// Glyphs the transcript actually prints, with the width the renderer assumes.
-///
-/// Every one of these is East Asian Width `Wide`, chosen in M3 precisely because
-/// `unicode-width` and terminals agree about them. The probe exists to catch the
-/// terminal that does not.
-pub const PRINTED_GLYPHS: &[(&str, &str)] = &[
-    ("\u{1F464}", "human sender"),
-    ("\u{1F916}", "agent sender"),
-    ("\u{26D4}", "unverified shield"),
-    ("\u{2753}", "unknown shield"),
-    ("\u{1F512}", "encrypted room"),
-];
 
 /// What heddle assumes about the terminal.
 ///
@@ -139,8 +125,8 @@ pub fn terminal() -> Vec<Finding> {
 fn glyph_widths() -> Finding {
     let mut disagreements = Vec::new();
 
-    for (glyph, what) in PRINTED_GLYPHS {
-        let expected = UnicodeWidthStr::width(*glyph);
+    for heddle_render::Glyph { glyph, what, cells } in heddle_render::PRINTED {
+        let expected = *cells;
         match measure(glyph) {
             Ok(actual) if actual == expected => {}
             Ok(actual) => disagreements.push(format!(
@@ -284,6 +270,7 @@ fn permissions(what: &str, _path: &Path, _most: u32) -> Finding {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     fn scratch(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -390,14 +377,20 @@ mod tests {
     }
 
     #[test]
-    fn every_glyph_the_doctor_probes_is_one_the_transcript_prints() {
-        // If these lists drift, the probe measures glyphs nobody draws and stays silent
-        // about the ones that matter.
-        for (glyph, _) in PRINTED_GLYPHS {
+    fn the_doctor_probes_every_glyph_heddle_prints() {
+        // The point of the probe is to catch the terminal that disagrees with
+        // `unicode-width`. It can only do that for glyphs it is given, so it is given
+        // the table rather than a copy of part of it.
+        //
+        // The copy it used to hold had five entries. One of them was `❓`, which the
+        // transcript explicitly refuses to draw, and it omitted every one-cell glyph --
+        // so the probe reported an all-clear on a set that was mostly not the set.
+        assert!(heddle_render::PRINTED.len() > 5);
+        for heddle_render::Glyph { glyph, what, cells } in heddle_render::PRINTED {
             assert_eq!(
                 UnicodeWidthStr::width(*glyph),
-                2,
-                "{glyph} is not wide; the transcript only prints glyphs terminals agree are two cells"
+                *cells,
+                "{glyph} ({what}) is probed at a width it is not laid out at"
             );
         }
     }
