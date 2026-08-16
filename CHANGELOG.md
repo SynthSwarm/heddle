@@ -7,6 +7,45 @@ Versions are pre-1.0 and mean what that usually means: the thing runs, and its s
 can still change. Breaking changes to config keys, keybindings and the agent wire
 format are possible in any 0.x release, and will be listed here.
 
+## Unreleased
+
+### Fixed
+
+- Quitting could hang for ever. `Handle::shutdown` held the event receiver across the
+  join while the worker blocked sending into it — a deadlock reachable by quitting
+  during a sync burst, which is when people quit.
+- A command dropped because the worker's queue was full was reported to the caller as
+  sent. A message the user typed could vanish with only a line in a log. The warning
+  also `Debug`-printed the command, writing decrypted bodies to disk.
+- The fallback parser recovered `Note:`, `Done:`, `Warning:` and similar as tool calls,
+  which *deleted* those lines from the transcript and replaced them with phantom cards.
+  It now requires the quoting and spacing the emitter actually produces.
+- Fence extraction mangled a code block containing a shorter fence.
+- `<prefix> H`/`L` moved whichever border the pane's parent split happened to own, so in
+  a vertical stack asking for narrower made the pane shorter.
+- Closing a pane below the focused one silently moved focus to a different pane.
+- The `~` degraded marker was omitted from exactly the message shape it exists for:
+  all chrome, no prose, which is what Hermes emits.
+- Approvals were drawn twice — once as the interactive prompt, once as raw chrome.
+- `⚠` was the `Blocked` badge despite being a width-ambiguous glyph the code elsewhere
+  documented as unusable. It is `▲`.
+- Diff summaries under-reported changes in files whose content lines begin `---`/`+++`.
+- `application/json` tool bodies are pretty-printed, as the docs had claimed since 0.1.
+
+### Changed
+
+- Overlays are one `Option<Modal>` rather than six independent fields. Two could be open
+  at once, the key overlay swallowed nothing, and the draw order disagreed with the
+  dispatch order for the two security panels.
+- The release workflow no longer interpolates a `workflow_dispatch` tag into a shell
+  script, `contents: write` is scoped to the publishing job, actions are pinned to
+  commit SHAs, and a dispatched release runs the tests.
+
+### Removed
+
+- `diff::render_pair` and the `similar` dependency; nothing produced a before/after pair.
+- `Tiling::len` and `is_empty`, which had no callers and counted the layout cache.
+
 ## 0.2.0 — 2026-08-10
 
 First release. An agent-native Matrix client for the terminal: a room is an agent
@@ -56,7 +95,9 @@ upload and download, room join/leave/invite, and fuzzy jump.
   walked. Nothing here has been run by anyone who did not write it.
 - A homeserver with native sliding sync is a hard requirement; `matrix-sdk-ui` has no
   `/sync` fallback. `heddle --check` will tell you before you start.
-- Only EAW=Wide glyphs are used in the interface. Everything else mismeasures across
-  terminals, which is also why unread badges are ASCII.
+- Every glyph in the interface is measured as it is painted. The hazard is
+  `unicode-width` and the terminal *disagreeing*, not narrowness, so what is banned is a
+  codepoint terminals promote to emoji presentation. Unread badges are ASCII for the
+  same reason. `heddle --check` probes the whole set against your terminal.
 - `HEDDLE_CAPTURE` writes decrypted message bodies to disk. It is off by default and
   warns loudly when set.

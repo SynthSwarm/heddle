@@ -212,56 +212,58 @@ pub struct Binding {
     /// Keys, without the prefix.
     pub keys: &'static str,
     pub action: &'static str,
-    /// Whether the prefix must be pressed first.
-    pub prefixed: bool,
+    /// The mode the binding is live in.
+    ///
+    /// This was a `prefixed: bool`, which could not distinguish Normal from Insert --
+    /// so the table listed `enter` twice ("send" and "open the selected message's
+    /// thread") and `up / down` twice ("scroll a line" and "line, then history"), and
+    /// the overlay drew all four rows with nothing to say which was which. It also
+    /// meant the drift test could only check prefixed rows, because it had no way to
+    /// know which mode to look the others up in.
+    pub mode: Mode,
 }
 
 /// Shorthand for a table entry.
-const fn b(keys: &'static str, action: &'static str, prefixed: bool) -> Binding {
-    Binding {
-        keys,
-        action,
-        prefixed,
-    }
+const fn b(keys: &'static str, action: &'static str, mode: Mode) -> Binding {
+    Binding { keys, action, mode }
 }
 
 /// Every binding worth documenting, in the order the overlay lists them.
 pub const BINDINGS: &[Binding] = &[
-    b("i", "write a message", false),
-    b("enter", "send", false),
-    b("shift+enter", "newline", false),
-    b("esc", "normal mode", false),
-    b("k / j", "select older / newer message", false),
-    b("r", "reply to the selection", false),
-    b("e", "edit the selection", false),
-    b("D", "delete the selection (twice)", false),
-    b("enter", "open the selected message's thread", false),
-    b("y / n", "approve / deny", false),
-    b("tab", "toggle tool card", false),
-    b("up / down", "scroll a line", false),
-    b("^u / ^d", "half-page scroll", false),
-    b("g / G", "top / bottom", false),
-    b(":", "command palette", false),
-    b("^l", "redraw the screen", false),
-    b("left / right", "move the caret", false),
-    b("^left / ^right", "move a word", false),
-    b("up / down", "line, then history", false),
-    b("^w / ^u", "delete word / to line start", false),
-    b("@", "mention someone, tab or enter to pick", false),
-    b("n / p", "next / prev tab", true),
-    b("| / -", "split right / down", true),
-    b("h j k l", "focus pane", true),
-    b("H J K L", "resize pane", true),
-    b("z", "zoom pane", true),
-    b("x", "close pane (not the last)", true),
-    b("c", "new thread", true),
-    b("t", "thread picker", true),
-    b("e", "emoji into composer", true),
-    b("r", "react to selected", true),
-    b("w / W", "next / prev workspace", true),
-    b("f", "fuzzy jump", true),
-    b("?", "this help", true),
-    b("q", "quit", true),
+    b("i", "write a message", Mode::Normal),
+    b("enter", "send", Mode::Insert),
+    b("shift+enter", "newline", Mode::Insert),
+    b("esc", "normal mode", Mode::Insert),
+    b("k / j", "select older / newer message", Mode::Normal),
+    b("r", "reply to the selection", Mode::Normal),
+    b("e", "edit the selection", Mode::Normal),
+    b("D", "delete the selection (twice)", Mode::Normal),
+    b("enter", "open the selected message's thread", Mode::Normal),
+    b("y / n", "approve / deny", Mode::Normal),
+    b("tab", "toggle tool card", Mode::Normal),
+    b("up / down", "scroll a line", Mode::Normal),
+    b("^u / ^d", "half-page scroll", Mode::Normal),
+    b("g / G", "top / bottom", Mode::Normal),
+    b(":", "command palette", Mode::Normal),
+    b("^l", "redraw the screen", Mode::Normal),
+    b("left / right", "move the caret", Mode::Insert),
+    b("^left / ^right", "move a word", Mode::Insert),
+    b("up / down", "line, then history", Mode::Insert),
+    b("^w / ^u", "delete word / to line start", Mode::Insert),
+    b("@", "mention someone, tab or enter to pick", Mode::Insert),
+    b("n / p", "next / prev tab", Mode::Prefix),
+    b("| / -", "split right / down", Mode::Prefix),
+    b("h j k l", "focus pane", Mode::Prefix),
+    b("H J K L", "resize pane", Mode::Prefix),
+    b("z", "zoom pane", Mode::Prefix),
+    b("x", "close pane (not the last)", Mode::Prefix),
+    b("c", "new thread", Mode::Prefix),
+    b("t", "thread picker", Mode::Prefix),
+    b("e", "emoji into composer", Mode::Prefix),
+    b("r", "react to selected", Mode::Prefix),
+    b("w / W", "next / prev workspace", Mode::Prefix),
+    b("?", "this help", Mode::Prefix),
+    b("q", "quit", Mode::Prefix),
 ];
 
 /// The handful of bindings terse enough for the status bar, most useful first.
@@ -272,11 +274,11 @@ pub const BINDINGS: &[Binding] = &[
 ///
 /// Ordered by usefulness, because a narrow terminal drops them from the end.
 pub const HINTS: &[Binding] = &[
-    b("i", "write", false),
-    b("k / j", "pick", false),
-    b("n", "tab", true),
-    b("?", "help", true),
-    b("|", "split", true),
+    b("i", "write", Mode::Normal),
+    b("k / j", "pick", Mode::Normal),
+    b("n", "tab", Mode::Prefix),
+    b("?", "help", Mode::Prefix),
+    b("|", "split", Mode::Prefix),
 ];
 
 /// Translate a key press into an [`Action`], given the current mode.
@@ -590,20 +592,59 @@ mod tests {
     fn every_documented_binding_is_actually_bound() {
         // The overlay and the status hints read these tables. A row that no key
         // produces would be a lie told in the UI.
+        //
+        // This used to skip every row that was not a single prefixed key -- 28 of the
+        // 40, including every `a / b` pair and everything outside Prefix mode. It
+        // splits the pairs now and looks each row up in the mode the table says it
+        // belongs to, which is a question `prefixed: bool` could not answer.
         let p = Prefix::default();
+
         for binding in BINDINGS.iter().chain(HINTS) {
-            // Only single-key prefixed rows are mechanically checkable; the rest
-            // document chords and ranges.
-            if !binding.prefixed || binding.keys.chars().count() != 1 {
-                continue;
+            // `k / j` and `h j k l` both list several keys in one row.
+            for token in binding.keys.split(['/', ' ']).filter(|t| !t.is_empty()) {
+                let mode = binding.mode;
+
+                // `^x` and `shift+enter` name modified keys, so they carry their
+                // modifier into the event rather than being skipped.
+                let event = if let Some(rest) = token.strip_prefix('^') {
+                    let code = code_of(rest).unwrap_or_else(|| panic!("`{token}` unmapped"));
+                    KeyEvent::new(code, KeyModifiers::CONTROL)
+                } else if let Some(rest) = token.strip_prefix("shift+") {
+                    let code = code_of(rest).unwrap_or_else(|| panic!("`{token}` unmapped"));
+                    KeyEvent::new(code, KeyModifiers::SHIFT)
+                } else {
+                    let code = code_of(token).unwrap_or_else(|| panic!("`{token}` unmapped"));
+                    KeyEvent::from(code)
+                };
+
+                assert_ne!(
+                    map(event, mode, p).0,
+                    Action::None,
+                    "a table documents `{token}` but {mode:?} mode ignores it"
+                );
             }
-            let c = binding.keys.chars().next().expect("one char");
-            assert_ne!(
-                map(key(c), Mode::Prefix, p).0,
-                Action::None,
-                "a table documents `{c}` but map_prefix ignores it"
-            );
         }
+    }
+
+    /// The `KeyCode` a documented token names, where there is one.
+    fn code_of(token: &str) -> Option<KeyCode> {
+        Some(match token {
+            "enter" => KeyCode::Enter,
+            "esc" => KeyCode::Esc,
+            "tab" => KeyCode::Tab,
+            "up" => KeyCode::Up,
+            "down" => KeyCode::Down,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            _ => {
+                let mut chars = token.chars();
+                let c = chars.next()?;
+                if chars.next().is_some() {
+                    return None;
+                }
+                KeyCode::Char(c)
+            }
+        })
     }
 
     #[test]

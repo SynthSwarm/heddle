@@ -693,10 +693,13 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let rows: Vec<(String, &str)> = keymap::BINDINGS
         .iter()
         .map(|b| {
-            let keys = if b.prefixed {
-                format!("{prefix} {}", b.keys)
-            } else {
-                b.keys.to_owned()
+            let keys = match b.mode {
+                keymap::Mode::Prefix => format!("{prefix} {}", b.keys),
+                // The mode is part of the binding: `enter` sends in insert mode and
+                // opens a thread in normal mode, and the overlay listed both with
+                // nothing to tell them apart.
+                keymap::Mode::Insert => format!("i {}", b.keys),
+                keymap::Mode::Normal => b.keys.to_owned(),
             };
             (keys, b.action)
         })
@@ -1228,10 +1231,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let mut hints: Vec<(String, &str)> = keymap::HINTS
         .iter()
         .map(|b| {
-            let keys = if b.prefixed {
-                format!("{prefix} {}", b.keys)
-            } else {
-                b.keys.to_owned()
+            let keys = match b.mode {
+                keymap::Mode::Prefix => format!("{prefix} {}", b.keys),
+                // The mode is part of the binding: `enter` sends in insert mode and
+                // opens a thread in normal mode, and the overlay listed both with
+                // nothing to tell them apart.
+                keymap::Mode::Insert => format!("i {}", b.keys),
+                keymap::Mode::Normal => b.keys.to_owned(),
             };
             (keys, b.action)
         })
