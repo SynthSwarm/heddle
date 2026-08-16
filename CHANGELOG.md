@@ -9,6 +9,14 @@ format are possible in any 0.x release, and will be listed here.
 
 ## Unreleased
 
+### Added
+
+- A pane looks busy while the agent is thinking. heddle now subscribes to each open
+  room's typing notifications, so a pane shows `working` from the moment the agent
+  starts composing rather than from its first token — which for a coding agent is five
+  to twenty seconds later. The state machine and the badge already handled this; nothing
+  had ever produced the event.
+
 ### Fixed
 
 - Quitting could hang for ever. `Handle::shutdown` held the event receiver across the

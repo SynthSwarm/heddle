@@ -984,11 +984,15 @@ impl App {
 
             WorkerEvent::Typing { room_id, users } => {
                 // `working` during model latency, before the first token lands.
+                //
+                // `m.typing` is room-scoped, so every thread pane on the room moves
+                // together: the protocol does not say which thread is being typed into.
+                // And with no configured `agent.ids`, `is_agent` accepts anyone, so a
+                // human typing reads as the agent working. Both are transient and
+                // self-correcting -- the next `m.typing` clears them.
                 let typing = users.iter().any(|u| self.config.agent.is_agent(u));
                 for session in self.session_ids_for_room(&room_id) {
-                    if let Some(s) = self.agents.get_mut(&session) {
-                        s.set_typing(typing);
-                    }
+                    self.agents.set_typing(&session, typing);
                 }
                 self.refresh_pane_states();
             }
@@ -2943,6 +2947,52 @@ mod tests {
             .expect("tab");
         assert_eq!(tab.state(), AgentState::Working);
         assert_eq!(app.badge().0, AgentState::Working);
+    }
+
+    #[test]
+    fn typing_from_an_agent_makes_the_pane_look_busy() {
+        let mut app = app();
+        app.open_thread_pane("$root".into(), "a thread".into());
+
+        app.apply_worker_event(WorkerEvent::Typing {
+            room_id: "!r:x".into(),
+            users: vec!["@agent:x".into()],
+        });
+
+        let tab = app
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab");
+        assert_eq!(
+            tab.state(),
+            AgentState::Working,
+            "typing is the only signal there is before the first token"
+        );
+    }
+
+    #[test]
+    fn typing_stopping_returns_the_pane_to_idle() {
+        let mut app = app();
+        app.open_thread_pane("$root".into(), "a thread".into());
+
+        app.apply_worker_event(WorkerEvent::Typing {
+            room_id: "!r:x".into(),
+            users: vec!["@agent:x".into()],
+        });
+        app.apply_worker_event(WorkerEvent::Typing {
+            room_id: "!r:x".into(),
+            users: Vec::new(),
+        });
+
+        let tab = app
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab");
+        assert_eq!(tab.state(), AgentState::Idle);
     }
 
     #[test]

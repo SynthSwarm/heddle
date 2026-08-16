@@ -84,7 +84,7 @@ have landed before it was possible to open a single Hermes thread.
 - [x] Composer: multi-line, cursor movement, per-room drafts, sent-message history
 - [x] Edit (`m.replace`), redact, reply
 - [x] Thread list per room; open a thread as its own pane
-- [x] Typing notifications out — inbound already drives agent state
+- [x] Typing notifications, both directions — inbound drives agent state
 - [x] Space enumeration via `m.space.child`, so workspaces stop being a single `~`
 
 **Exit:** an agent thread can be found, opened, read and replied to without leaving
