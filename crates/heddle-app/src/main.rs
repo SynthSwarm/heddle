@@ -27,7 +27,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures_util::StreamExt;
-use heddle_matrix::{session, Handle};
+use heddle_matrix::{session, Dispatch, Handle};
 use std::io::stdout;
 use std::time::Duration;
 
@@ -461,10 +461,20 @@ fn handle_input(app: &mut App, event: Event) {
 /// Forward the app's queued commands to the worker.
 fn dispatch(app: &mut App, handle: &Handle) {
     for command in app.take_commands() {
-        if !handle.send(command) {
-            app.status = Some("worker stopped".into());
-            app.should_quit = true;
-            return;
+        match handle.send(command) {
+            Dispatch::Queued => {}
+            // The worker is alive, so quitting would be an overreaction -- but something
+            // the user asked for did not happen, and previously this case was reported
+            // to the caller as success and then only mentioned in a log nobody reads.
+            // If that something was a message, they watched it vanish.
+            Dispatch::Dropped => {
+                app.status = Some("the worker is behind; a command was dropped".into());
+            }
+            Dispatch::Stopped => {
+                app.status = Some("worker stopped".into());
+                app.should_quit = true;
+                return;
+            }
         }
     }
 }

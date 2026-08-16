@@ -58,6 +58,29 @@ const EVENT_BUFFER: usize = 512;
 /// How many rooms the sliding sync list holds.
 const ROOM_LIST_PAGE: usize = 500;
 
+/// How long [`Handle::shutdown`] waits for the worker before abandoning it.
+///
+/// Long enough for an in-flight request to finish, short enough that a wedged worker
+/// does not hold the terminal after the user has asked to quit.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What became of a command handed to [`Handle::send`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Dispatch {
+    /// Handed to the worker.
+    Queued,
+    /// The worker is alive but its queue was full, so the command was discarded.
+    ///
+    /// Distinct from [`Dispatch::Stopped`] because it is recoverable: the worker is
+    /// still there and the next command may well get through. It is reported rather
+    /// than swallowed because a discarded `SendMessage` is a message the user typed
+    /// and watched disappear.
+    Dropped,
+    /// The worker has stopped. Nothing further will be delivered.
+    Stopped,
+}
+
 /// The app-side handle to the worker.
 pub struct Handle {
     commands: mpsc::Sender<Command>,
@@ -66,15 +89,22 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Queue a command. Returns `false` once the worker has stopped.
-    pub fn send(&self, command: Command) -> bool {
+    /// Queue a command.
+    ///
+    /// Never blocks: this is called from the render loop, where awaiting the worker
+    /// would be a frame spent not drawing.
+    pub fn send(&self, command: Command) -> Dispatch {
+        // The command is named but never logged whole. `Command` derives `Debug` and
+        // carries message bodies, so `?command` here wrote decrypted content into a log
+        // that `capture` goes to some length to keep opt-in and loud.
+        let kind = command.kind();
         match self.commands.try_send(command) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(c)) => {
-                tracing::warn!(?c, "worker command buffer full; dropping");
-                true
+            Ok(()) => Dispatch::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(kind, "worker command buffer full; dropping");
+                Dispatch::Dropped
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Err(mpsc::error::TrySendError::Closed(_)) => Dispatch::Stopped,
         }
     }
 
@@ -99,10 +129,32 @@ impl Handle {
     }
 
     /// Ask the worker to stop, and wait for it.
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         let _ = self.commands.send(Command::Shutdown).await;
         drop(self.commands);
-        let _ = self.task.await;
+
+        // Close the event channel before joining. The worker sends into it with `.await`
+        // in about twenty-five places, and by this point nothing drains it any more --
+        // the event loop has returned. With a full buffer the worker parked in
+        // `events.send()`, never reached `commands.recv()`, and the join below waited
+        // for a task that was waiting for us. Quitting during a sync burst is exactly
+        // when the buffer is full, which is to say exactly when people quit.
+        //
+        // `close` wakes those senders with an error rather than discarding what is
+        // already queued, so the worker unwinds through its normal `let _ = send(..)`
+        // paths instead of being cut off mid-command.
+        self.events.close();
+
+        // And a bound even so. `Shutdown` asks the worker to finish what it is doing,
+        // which involves the network; a homeserver that has stopped answering must not
+        // become a client that will not exit.
+        if tokio::time::timeout(SHUTDOWN_GRACE, &mut self.task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("matrix worker did not stop within the grace period; abandoning it");
+            self.task.abort();
+        }
     }
 }
 
@@ -1599,6 +1651,127 @@ fn decode_agent(
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
+
+    /// The channel halves a `Handle` is built from, without a homeserver behind them.
+    ///
+    /// The worker itself needs an authenticated `Client`, so the parts of `Handle` worth
+    /// testing -- what it does when a queue fills up, and whether it can be shut down --
+    /// were previously unreachable from a test. They are the parts that lose the user's
+    /// messages, so it is worth building the seam.
+    struct Rig {
+        commands: mpsc::Receiver<Command>,
+        events: mpsc::Sender<WorkerEvent>,
+        command_tx: mpsc::Sender<Command>,
+        event_rx: mpsc::Receiver<WorkerEvent>,
+    }
+
+    fn rig(command_buffer: usize, event_buffer: usize) -> Rig {
+        let (command_tx, commands) = mpsc::channel(command_buffer);
+        let (events, event_rx) = mpsc::channel(event_buffer);
+        Rig {
+            commands,
+            events,
+            command_tx,
+            event_rx,
+        }
+    }
+
+    impl Rig {
+        fn handle(self, task: JoinHandle<()>) -> (Handle, mpsc::Receiver<Command>) {
+            (
+                Handle {
+                    commands: self.command_tx,
+                    events: self.event_rx,
+                    task,
+                },
+                self.commands,
+            )
+        }
+    }
+
+    fn idle() -> JoinHandle<()> {
+        tokio::spawn(async {})
+    }
+
+    #[tokio::test]
+    async fn a_dropped_command_is_not_reported_as_sent() {
+        // It used to be. A full buffer logged a warning, discarded the command and
+        // returned the same `true` a delivered one did, so a `SendMessage` the user
+        // typed could vanish with nothing on screen to say so.
+        let (handle, _commands) = rig(1, 8).handle(idle());
+
+        assert_eq!(handle.send(Command::Shutdown), Dispatch::Queued);
+        assert_eq!(handle.send(Command::Shutdown), Dispatch::Dropped);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_worker_is_distinguished_from_a_busy_one() {
+        // The caller quits on one and carries on with the other, so collapsing them
+        // would either strand the user in a dead client or tear down a live one.
+        let (handle, commands) = rig(1, 8).handle(idle());
+        drop(commands);
+
+        assert_eq!(handle.send(Command::Shutdown), Dispatch::Stopped);
+    }
+
+    #[tokio::test]
+    async fn shutdown_returns_even_though_nothing_is_draining_events() {
+        // The deadlock this replaces: `shutdown` took `self` by value and dropped the
+        // command sender, but held the event *receiver* across the join. The worker
+        // sends into that channel with `.await`, so once it filled -- during a sync
+        // burst, which is when people quit -- the worker parked in `send` and never
+        // reached `recv`, and the join waited for a task that was waiting for it.
+        //
+        // The event buffer here is one slot and nothing ever drains it, which is the
+        // state the real channel reaches under load.
+        let rig = rig(4, 1);
+        let events = rig.events.clone();
+
+        let worker = tokio::spawn(async move {
+            // Exactly what the real worker does in about twenty-five places: push
+            // events and ignore the result. It notices shutdown only by the send
+            // failing, which is what closing the receiver arranges.
+            while events
+                .send(WorkerEvent::SyncState(SyncState::Running))
+                .await
+                .is_ok()
+            {}
+        });
+
+        let (handle, _commands) = rig.handle(worker);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown must not wait on a worker that is waiting on it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_gives_up_on_a_worker_that_will_not_stop() {
+        // A homeserver that has stopped answering must not become a client that will
+        // not exit. The clock is paused, so this proves the bound without spending
+        // SHUTDOWN_GRACE of real time on it.
+        let wedged = tokio::spawn(std::future::pending::<()>());
+        let (handle, _commands) = rig(4, 8).handle(wedged);
+
+        tokio::time::timeout(SHUTDOWN_GRACE * 4, handle.shutdown())
+            .await
+            .expect("shutdown must abandon a worker that will not stop");
+    }
+
+    #[test]
+    fn every_command_can_name_itself_without_quoting_its_payload() {
+        // `kind` exists so the log can say what was dropped without writing a decrypted
+        // message body to disk.
+        let body = "the plaintext nobody should find in a log file";
+        let command = Command::SendMessage {
+            view: View::room("!r:x"),
+            body: body.into(),
+            mentions: vec![],
+        };
+
+        assert_eq!(command.kind(), "SendMessage");
+        assert!(!command.kind().contains(body));
+    }
 
     #[test]
     fn a_pane_with_something_to_show_asks_for_one_page() {

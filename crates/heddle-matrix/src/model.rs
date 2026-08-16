@@ -368,6 +368,40 @@ pub enum Command {
     Shutdown,
 }
 
+impl Command {
+    /// The variant name, with nothing else attached.
+    ///
+    /// For logging. `Command` derives `Debug` for tests and for `WorkerEvent::Fatal`
+    /// context, but several variants carry a decrypted message body, and a client that
+    /// writes those into a log file has undone the point of encrypting them. Log this
+    /// instead.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Command::OpenView(..) => "OpenView",
+            Command::CloseView(..) => "CloseView",
+            Command::Paginate { .. } => "Paginate",
+            Command::SendMessage { .. } => "SendMessage",
+            Command::SendReply { .. } => "SendReply",
+            Command::Edit { .. } => "Edit",
+            Command::Redact { .. } => "Redact",
+            Command::ListThreads { .. } => "ListThreads",
+            Command::ListMembers { .. } => "ListMembers",
+            Command::ToggleReaction { .. } => "ToggleReaction",
+            Command::SendTyping { .. } => "SendTyping",
+            Command::MarkRead { .. } => "MarkRead",
+            Command::StartVerification => "StartVerification",
+            Command::AcceptVerification => "AcceptVerification",
+            Command::ConfirmVerification => "ConfirmVerification",
+            Command::MismatchVerification => "MismatchVerification",
+            Command::CancelVerification => "CancelVerification",
+            Command::RecoverWithKey(..) => "RecoverWithKey",
+            Command::EnableRecovery => "EnableRecovery",
+            Command::ResetRecoveryKey => "ResetRecoveryKey",
+            Command::Shutdown => "Shutdown",
+        }
+    }
+}
+
 /// Sent from the worker to the app.
 #[derive(Debug, Clone)]
 pub enum WorkerEvent {
