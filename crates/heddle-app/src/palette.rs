@@ -1,14 +1,11 @@
 //! The command palette.
 //!
-//! Every keybinding heddle has is one key behind a prefix, which is fast once learned
-//! and invisible until then. The palette is the other half of that bargain: a searchable
-//! list of the same commands, showing the key beside each one, so that using it teaches
-//! you how to stop using it.
+//! A searchable list of the same commands the prefix bindings run, showing the key
+//! beside each one.
 //!
-//! The commands are a table rather than a reflection of the keymap because not every
-//! documented binding is one command — `h j k l` is four — and not every command needs
-//! a key. A test asserts that each entry claiming a key really is what that key does,
-//! so the two cannot drift apart silently.
+//! A table rather than a reflection of the keymap: not every documented binding is one
+//! command -- `h j k l` is four -- and not every command needs a key. A test asserts
+//! that each entry claiming a key really is what that key does.
 //!
 //! See `docs/SPEC.md` §5.3.
 
@@ -35,11 +32,9 @@ const fn c(name: &'static str, keys: &'static str, prefixed: bool, action: Actio
     }
 }
 
-/// Everything the palette can run.
-///
-/// Ordered by how often it is wanted rather than alphabetically, since that is also the
-/// order shown before anything is typed. Deliberately excludes the composer's editing
-/// keys: they are only meaningful mid-typing, which is exactly when the palette is shut.
+/// Everything the palette can run, ordered by how often it is wanted -- which is also
+/// the order shown before anything is typed. Excludes the composer's editing keys, which
+/// are only meaningful while the palette is shut.
 pub const COMMANDS: &[Command] = &[
     c("split right", "|", true, Action::Split(Dir::Right)),
     c("split down", "-", true, Action::Split(Dir::Down)),
@@ -106,10 +101,8 @@ impl Palette {
 
     /// Recompute the matches for the current query.
     ///
-    /// Ranked by how tightly the query sits in the name: contiguous matches first, then
-    /// the earliest, then the table's own order. So "sp" puts "split right" above
-    /// "previous workspace", which contains the same two letters scattered across two
-    /// words.
+    /// Contiguous matches first, then the earliest, then the table's own order: "sp"
+    /// puts "split right" above "previous workspace".
     pub fn refilter(&mut self) {
         self.selected = 0;
 
@@ -175,9 +168,7 @@ impl Palette {
 
 /// How well a query fits a name, as a sortable penalty. Lower is better.
 ///
-/// Shared with the mention picker, which ranks display names and localparts by exactly
-/// the same rules: a name is a name, and two pickers that disagree about which match is
-/// best would be two pickers to learn.
+/// Shared with the mention picker, so the two rank names by the same rules.
 pub fn rank(name: &str, query: &str) -> Option<(u16, u16, u16)> {
     let query = query.to_lowercase();
     score(name, &query).map(|s| (s.strays, s.gaps, s.start))

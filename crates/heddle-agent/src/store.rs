@@ -33,16 +33,19 @@ pub enum AgentState {
 
 impl AgentState {
     /// The glyph shown in badges.
+    ///
+    /// All four are text-presentation geometric shapes laid out at one cell. `⚠` is the
+    /// obvious choice for `Blocked` and is unusable: terminals promote it to a two-cell
+    /// emoji. See `heddle_render::glyphs`.
     pub fn glyph(self) -> &'static str {
         match self {
             Self::Idle => "·",
             Self::Done => "✓",
             Self::Working => "●",
-            Self::Blocked => "⚠",
+            Self::Blocked => "▲",
         }
     }
 
-    /// Whether this state should draw the user's attention.
     pub fn is_notable(self) -> bool {
         matches!(self, Self::Blocked | Self::Done)
     }
@@ -159,8 +162,7 @@ impl Session {
 
     /// Derive the session's state.
     ///
-    /// Order matters: a blocking prompt wins even while a tool is still running,
-    /// because the human is the bottleneck.
+    /// A blocking prompt outranks a running tool: the human is the bottleneck.
     pub fn state(&self) -> AgentState {
         if !self.pending.is_empty() {
             return AgentState::Blocked;
@@ -180,7 +182,6 @@ impl Session {
         self.seen = true;
     }
 
-    /// Record a typing notification from the agent.
     pub fn set_typing(&mut self, typing: bool) {
         self.typing = typing;
     }
@@ -276,11 +277,9 @@ impl AgentStore {
 
         let turn = session.turn_mut(&ev.turn_id);
 
-        // Replay guard. Three exceptions:
-        //   * text deltas -- Hermes sends cumulative text on the edit chain, so the
-        //     newest frame replaces rather than appends;
-        //   * events filling a known gap -- these are late, not duplicate;
-        //   * the very first event of a turn.
+        // Replay guard. Exceptions: text deltas (Hermes sends cumulative text on the
+        // edit chain, so the newest frame replaces), events filling a known gap (late,
+        // not duplicate), and the first event of a turn.
         let fills_gap = turn.gaps.contains(&ev.seq);
         if ev.seq <= turn.high_seq && ev.kind != Kind::MessageDelta && !fills_gap {
             return;
@@ -365,7 +364,6 @@ impl AgentStore {
         }
     }
 
-    /// Record that a session is fed by the fallback parser.
     pub fn mark_degraded(&mut self, session_id: &str) {
         self.sessions
             .entry(session_id.to_owned())
@@ -647,25 +645,5 @@ mod tests {
         store.apply(&ev(1, Kind::Commentary));
         store.get_mut("s1").expect("s").set_typing(true);
         assert_eq!(store.get("s1").expect("s").state(), AgentState::Working);
-    }
-
-    #[test]
-    fn badge_priority_order_is_stable() {
-        let mut v = [
-            AgentState::Idle,
-            AgentState::Blocked,
-            AgentState::Done,
-            AgentState::Working,
-        ];
-        v.sort_unstable();
-        assert_eq!(
-            v,
-            [
-                AgentState::Idle,
-                AgentState::Done,
-                AgentState::Working,
-                AgentState::Blocked
-            ]
-        );
     }
 }

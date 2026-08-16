@@ -1,13 +1,12 @@
 //! Diff rendering for `tool.result` bodies with `mime: text/x-diff`.
 //!
-//! This is the payload that makes a Matrix agent session feel like a local one: without
-//! it a file edit is just the word "edit". Handles both a unified diff supplied by the
-//! agent and a before/after pair that heddle diffs itself.
+//! Without this a file edit is just the word "edit".
+//!
+//! Unified diffs only: nothing on the wire produces a before/after pair.
 
 use crate::theme::Theme;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use similar::{ChangeTag, TextDiff};
 
 /// Maximum lines shown before a diff is folded. Large refactors should not push the
 /// conversation off the screen.
@@ -18,32 +17,29 @@ pub const FOLD_THRESHOLD: usize = 24;
 /// Returns owned lines: transcripts are rebuilt from a worker-owned snapshot on every
 /// timeline update, so a rendered line must not borrow from it.
 pub fn render_unified(diff: &str, theme: &Theme) -> Vec<Line<'static>> {
-    diff.lines().map(|line| style_line(line, theme)).collect()
-}
-
-/// Diff two texts and render the result.
-pub fn render_pair(before: &str, after: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let diff = TextDiff::from_lines(before, after);
-    diff.iter_all_changes()
-        .map(|change| {
-            let (sign, style) = match change.tag() {
-                ChangeTag::Delete => ("-", Style::default().fg(theme.removed)),
-                ChangeTag::Insert => ("+", Style::default().fg(theme.added)),
-                ChangeTag::Equal => (" ", theme.dim_style()),
-            };
-            Line::from(vec![
-                Span::styled(sign, style),
-                Span::styled(change.value().trim_end_matches('\n').to_owned(), style),
-            ])
+    let mut in_hunk = false;
+    diff.lines()
+        .map(|line| {
+            let styled = style_line(line, theme, in_hunk);
+            in_hunk |= line.starts_with("@@");
+            styled
         })
         .collect()
 }
 
+/// Whether a `---`/`+++` line is a file header rather than deleted or added content.
+///
+/// Position, not spelling: `--- a/x.sql` and `--- an old comment` are identical in
+/// shape. Headers appear in the preamble, before the first `@@`; content only after.
+fn is_file_header(line: &str, in_hunk: bool) -> bool {
+    !in_hunk && (line.starts_with("---") || line.starts_with("+++"))
+}
+
 /// Style one line of a unified diff.
-fn style_line(line: &str, theme: &Theme) -> Line<'static> {
-    // Order matters: `+++` and `---` are file headers, not content, and must be tested
+fn style_line(line: &str, theme: &Theme, in_hunk: bool) -> Line<'static> {
+    // Order matters: a file header also starts with `-` or `+`, so it must be tested
     // before the single-character add/remove prefixes.
-    let style = if line.starts_with("+++") || line.starts_with("---") {
+    let style = if is_file_header(line, in_hunk) {
         theme.accent_style()
     } else if line.starts_with("@@") {
         theme.dim_style()
@@ -61,8 +57,13 @@ fn style_line(line: &str, theme: &Theme) -> Line<'static> {
 pub fn stats(diff: &str) -> (usize, usize) {
     let mut added = 0;
     let mut removed = 0;
+    let mut in_hunk = false;
     for line in diff.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
+        if is_file_header(line, in_hunk) {
+            continue;
+        }
+        if line.starts_with("@@") {
+            in_hunk = true;
             continue;
         }
         if line.starts_with('+') {
@@ -112,6 +113,19 @@ mod tests {
     }
 
     #[test]
+    fn content_that_merely_looks_like_a_header_is_counted() {
+        // Deleting a SQL or Lua comment produces `--- comment`; adding one in C++ can
+        // produce `+++foo`. Neither is a file header.
+        let diff = "--- a/x.sql\n+++ b/x.sql\n@@ -1 +1 @@\n--- an old comment\n+++new value\n";
+        assert_eq!(stats(diff), (1, 1));
+
+        let theme = Theme::default();
+        let lines = render_unified(diff, &theme);
+        assert_eq!(lines[3].spans[0].style.fg, Some(theme.removed), "content");
+        assert_eq!(lines[4].spans[0].style.fg, Some(theme.added), "content");
+    }
+
+    #[test]
     fn headers_are_styled_as_headers_not_as_additions() {
         let theme = Theme::default();
         let lines = render_unified(SAMPLE, &theme);
@@ -120,15 +134,6 @@ mod tests {
         assert_eq!(lines[2].spans[0].style.fg, Some(theme.dim));
         assert_eq!(lines[3].spans[0].style.fg, Some(theme.removed));
         assert_eq!(lines[4].spans[0].style.fg, Some(theme.added));
-    }
-
-    #[test]
-    fn diffing_a_pair_marks_both_sides() {
-        let theme = Theme::default();
-        let lines = render_pair("a\nb\n", "a\nc\n", &theme);
-        let colours: Vec<_> = lines.iter().map(|l| l.spans[0].style.fg).collect();
-        assert!(colours.contains(&Some(theme.removed)));
-        assert!(colours.contains(&Some(theme.added)));
     }
 
     #[test]
@@ -144,8 +149,9 @@ mod tests {
         let theme = Theme::default();
         let big: String = (0..200).map(|i| format!("+line {i}\n")).collect();
         let folded = fold(render_unified(&big, &theme), &theme);
-        assert_eq!(folded.len(), FOLD_THRESHOLD);
-        let marker = folded[FOLD_THRESHOLD / 2].spans[0].content.to_string();
+        // Literals: an assertion against the constant is satisfied by changing it.
+        assert_eq!(folded.len(), 24);
+        let marker = folded[12].spans[0].content.to_string();
         assert!(marker.contains("more lines"), "got {marker:?}");
     }
 

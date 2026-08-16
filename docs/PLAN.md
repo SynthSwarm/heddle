@@ -63,8 +63,9 @@ Building the spine surfaced two things that were cheaper to do now than to retro
   into the transport layer, so `View { room_id, thread_root }` landed in M1.
 - **The agent layer** (`heddle-agent`, `heddle-render`). The wire format, fallback
   parser, derived state machine, tool cards and diff rendering are pure functions with
-  no Matrix dependency, so they were written and tested without a homeserver. 62 of the
-  123 tests cover them.
+  no Matrix dependency, so they were written and tested without a homeserver, and they
+  hold most of the suite. (A count used to sit here. It said 123 when there were 367,
+  which is what a hardcoded number in a document does.)
 
 Also present but not yet exercised end to end: badge roll-up and keypress approvals.
 BSP tiling now carries real content in every pane rather than only the focused one.
@@ -85,7 +86,6 @@ have landed before it was possible to open a single Hermes thread.
 - [x] Thread list per room; open a thread as its own pane
 - [x] Typing notifications out — inbound already drives agent state
 - [x] Space enumeration via `m.space.child`, so workspaces stop being a single `~`
-- [ ] Fuzzy jump across workspace, room and thread — deferred to M6
 
 **Exit:** an agent thread can be found, opened, read and replied to without leaving
 heddle. Met.
@@ -127,7 +127,6 @@ stop, and smearing it across other milestones would let it be quietly skipped.
 - [x] Workspace bar with rolled-up badges; tab bar with per-room badges
 - [x] Layout persistence across restarts, per profile
 - [x] Command palette
-- [ ] Fuzzy jump across workspace / room / thread / agent — deferred to M6
 
 **Exit:** four agent threads visible at once, layout restored on relaunch.
 
@@ -137,10 +136,7 @@ nobody was looking at had no badge, so an encrypted room went unnoticed for most
 the arrangement was thrown away on every quit, which made the tiling only as useful as a
 single session; and `:` had been answering "not implemented yet" since it was bound.
 
-Fuzzy jump appeared here *and* in M2's deferred list, which cannot both be true. It
-stays in M6 with the rest of the convenience work: it earns its keep across many rooms
-in many Spaces, and until then `<prefix> w`, `<prefix> n` and the palette reach
-everything. Badge roll-up for *agent* state is built and tested but cannot be exercised
+Badge roll-up for *agent* state is built and tested but cannot be exercised
 end to end until Hermes is emitting the events in M5; only the unread half is live.
 
 ---
@@ -171,7 +167,7 @@ Work in a fork of `hermes-agent`, not the installed checkout.
 - [ ] `AgentStore`: turns, tool calls, approvals keyed by `session_id`/`turn_id`/`seq`
 - [ ] Derived agent state machine and badge roll-up
 - [ ] Tool cards: collapse/expand, status glyphs, durations
-- [ ] Diff rendering via `similar` for `mime: text/x-diff`
+- [ ] Diff rendering for `mime: text/x-diff` (unified diffs; `similar` was dropped with `render_pair`, since nothing produces a before/after pair)
 - [ ] JSON tree, folded plaintext, markdown result renderers
 - [ ] Commentary blocks, dimmed and collapsible
 - [ ] Approvals as `y`/`n` with countdown, emitting `m.reaction`
@@ -226,8 +222,8 @@ without both M5 and these, and what remains is a Matrix TUI that cannot join a r
 | Homeserver lacks MSC4186 | Fatal | Verify before UI work | ✅ retired in M0 |
 | E2EE verification UX complexity | High | Isolated as M3; `Recovery` API covers backup/reset | Open |
 | Hermes patch diverges from upstream | Medium | Minimal, additive, feature-flagged; fallback parser means heddle degrades rather than breaks | Open |
-| `ratatui-hypertile` is v0.4, single maintainer | Medium | Wrapped behind `heddle-layout` trait; fork is a one-file change. M4 leaned on it harder: layout persistence stores the crate's own `Node` tree, so a fork must keep that type or the saved layouts of every user are discarded on upgrade — which they are designed to survive, but only once | Open |
-| Terminal image protocol probing is unreliable | Low | `ratatui-image` handles detection; block fallback always available | Open |
+| `ratatui-hypertile` is v0.4, single maintainer | Medium | Funnelled through `heddle-layout`'s `Tiling`; fork is a one-file change. (This said "behind `heddle-layout` trait" and there is no trait — a mitigation nobody can find is not a mitigation.) M4 leaned on it harder: layout persistence stores the crate's own `Node` tree, so a fork must keep that type or the saved layouts of every user are discarded on upgrade — which they are designed to survive, but only once | Open |
+| Terminal image protocol probing is unreliable | Low | `ratatui-image` is the candidate and handles detection; block fallback always available. Not a dependency until it is used | Open |
 | `unicode-width` and the terminal disagree on emoji width | Medium | Emoji with East Asian Width `Neutral` (U+1F54A DOVE, U+1F441 EYE, U+1F5E1 DAGGER) measure as one cell and paint as two, so layout drifts by a column wherever one appears. A right-hand gutter keeps the overflow off the pane border and a forced repaint on focus change clears stranded cells, but text alignment is still approximate. A real fix means measuring widths ourselves and wrapping without `ratatui::Wrap` | Mitigated |
 | Render stalls during sync bursts | Medium | All SDK I/O off the render thread; `WorkerEvent` drained with a per-frame budget | Designed for |
 

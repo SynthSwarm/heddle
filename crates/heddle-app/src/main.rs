@@ -27,24 +27,21 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use futures_util::StreamExt;
-use heddle_matrix::{session, Handle};
+use heddle_matrix::{session, Dispatch, Handle};
 use std::io::stdout;
 use std::time::Duration;
 
 /// Log filter used when `HEDDLE_LOG` is unset.
 ///
-/// Names every heddle crate, not just the binary. `heddle=info` alone silences the
-/// worker, which is where anything interesting happens.
+/// Every heddle crate: `heddle=info` alone silences the worker.
 const DEFAULT_LOG: &str = "heddle=info,heddle_matrix=info,heddle_agent=info,\
                            heddle_render=info,heddle_layout=info,warn";
 
 /// How often to tick even with no input, so countdowns and spinners advance.
 const TICK: Duration = Duration::from_millis(250);
 
-/// Shortest interval between layout writes.
-///
-/// Long enough that holding a resize key does not thrash the disk, short enough that a
-/// terminal killed outright loses at most a couple of seconds of rearranging.
+/// Shortest interval between layout writes. A terminal killed outright loses at most
+/// this much rearranging.
 const LAYOUT_FLUSH: Duration = Duration::from_secs(2);
 
 #[derive(Parser)]
@@ -58,7 +55,6 @@ struct Cli {
     #[arg(long, short, global = true)]
     profile: Option<String>,
 
-    /// Verify the environment and exit.
     #[arg(long)]
     check: bool,
 
@@ -70,20 +66,16 @@ struct Cli {
 enum Cmd {
     /// Log in and save a session.
     ///
-    /// This saves the session and adds a matching `[profile.<name>]` block to
-    /// config.toml if one is not already there. The first profile added becomes the
-    /// default, so a single-account install works with a bare `heddle`.
+    /// Adds a matching `[profile.<name>]` block to config.toml if one is not there. The
+    /// first profile added becomes the default.
     Login {
-        /// Homeserver URL, e.g. https://matrix.example.org.
         #[arg(long)]
         homeserver: String,
-        /// Full Matrix user ID, e.g. @you:example.org.
         #[arg(long)]
         user: String,
         /// Environment variable holding the password.
         ///
-        /// The password is only ever read from the environment: passing it as an
-        /// argument would leak it into the shell history and the process table.
+        /// Never an argument: that leaks into shell history and the process table.
         #[arg(long, default_value = "HEDDLE_PASSWORD")]
         password_env: String,
     },
@@ -123,8 +115,8 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
                 session::login_password(&homeserver, &user, &password, "heddle", &paths).await?;
             println!("logged in as {user}; profile `{name}` saved");
 
-            // Written from the login response rather than the typed `--user`, which may
-            // be a bare localpart: the config wants the full `@user:server` form.
+            // From the login response, not the typed `--user`, which may be a bare
+            // localpart; the config wants the full `@user:server`.
             let user_id = client
                 .user_id()
                 .map_or_else(|| user.clone(), ToString::to_string);
@@ -167,8 +159,8 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
         config
             .resolve_profile(cli.profile.as_deref())
             .ok_or_else(|| match cli.profile.as_deref() {
-                // Naming the profile that was asked for matters: the old wording claimed
-                // none had been selected, when in fact one had and simply was not there.
+                // Name the profile that was asked for; "none selected" is wrong when
+                // one was and simply is not in the file.
                 Some(name) => anyhow::anyhow!(
                     "no `[profile.{name}]` in {}. Log in with `heddle --profile {name} login` \
                      to create it, or add the block by hand",
@@ -205,11 +197,8 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
     tui(app, handle, layout_path).await
 }
 
-/// Verify the environment and exit.
-///
-/// Three independent things can be wrong before the first frame, and the symptom is the
-/// same for all of them. Every section is run even when an earlier one fails, because a
-/// user with two problems should learn about both in one go.
+/// Three independent things can be wrong before the first frame with the same symptom,
+/// so every section runs even when an earlier one fails.
 async fn check(profile_name: &str, homeserver: &str, dirs: &Dirs) -> Result<()> {
     let mut fatal = false;
 
@@ -226,8 +215,8 @@ async fn check(profile_name: &str, homeserver: &str, dirs: &Dirs) -> Result<()> 
             fatal |= !caps.is_usable();
         }
         Err(e) => {
-            // Unreachable is not the same as unusable, and saying so saves someone
-            // hunting for a capability problem that is really a network one.
+            // Unreachable is not unusable; conflating them sends the user hunting for
+            // a capability problem that is really a network one.
             println!("  unreachable:             {e}");
             fatal = true;
         }
@@ -247,7 +236,6 @@ async fn check(profile_name: &str, homeserver: &str, dirs: &Dirs) -> Result<()> 
     Ok(())
 }
 
-/// Print findings, returning whether any of them was fatal.
 fn report(findings: &[doctor::Finding]) -> bool {
     let mut fatal = false;
     for finding in findings {
@@ -268,13 +256,11 @@ fn tick(ok: bool) -> &'static str {
     }
 }
 
-/// Run the terminal UI.
 async fn tui(mut app: App, mut handle: Handle, layout_path: std::path::PathBuf) -> Result<()> {
     let mouse = app.config.ui.mouse;
     let mut terminal = enter_terminal(mouse)?;
 
-    // Restore the terminal even on panic; a raw-mode terminal left behind is
-    // unusable and the user would have to blind-type `reset`.
+    // Restore on panic too: a raw-mode terminal left behind needs a blind `reset`.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = restore_terminal(mouse);
@@ -283,8 +269,7 @@ async fn tui(mut app: App, mut handle: Handle, layout_path: std::path::PathBuf) 
 
     let result = event_loop(&mut terminal, &mut app, &mut handle, &layout_path).await;
 
-    // Unconditionally, and before anything that can fail: whatever went wrong, the
-    // arrangement the user built is not the thing to punish them by losing.
+    // Before anything that can fail, whatever went wrong.
     save_layout(&app, &layout_path);
 
     restore_terminal(mouse)?;
@@ -294,8 +279,7 @@ async fn tui(mut app: App, mut handle: Handle, layout_path: std::path::PathBuf) 
 
 /// Write the layout if it has changed, clearing the dirty flag either way.
 ///
-/// A failure is logged and dropped. Nothing the user is doing depends on this file, and
-/// a full disk should not be allowed to end a conversation.
+/// Failures are logged and dropped: a full disk must not end a conversation.
 fn save_layout(app: &App, path: &std::path::Path) {
     if let Err(error) = app.layout().save(path) {
         tracing::warn!(?error, "could not save the layout");
@@ -304,24 +288,18 @@ fn save_layout(app: &App, path: &std::path::Path) {
 
 /// Blank the screen and make the next draw rewrite every cell.
 ///
-/// Needed when the screen and ratatui's model of it have diverged: a glyph that paints
-/// wider than it was measured leaves stale cells that ratatui believes are already
-/// correct. See `App::focus_moved`.
+/// For when the screen and ratatui's model of it have diverged: a glyph painting wider
+/// than it measured leaves stale cells ratatui believes are correct. See
+/// `App::focus_moved`.
 ///
-/// Both halves matter, and getting either wrong is silent.
+/// The clear is a raw escape sequence, not `Terminal::clear`, which first writes
+/// `ESC[6n` and waits on stdin for the cursor position. heddle's `EventStream` owns
+/// stdin and swallows the reply as an input event, so crossterm times out after two
+/// seconds and the error takes the client down.
 ///
-/// The clear is issued as a plain escape sequence rather than through
-/// `Terminal::clear`, which first reads the cursor position back from the terminal: it
-/// writes `ESC[6n` and waits for the reply on stdin. heddle's own `EventStream` owns
-/// stdin, so it swallows the reply as an ordinary input event, crossterm times out after
-/// two seconds, and the error takes the whole client down.
-///
-/// `swap_buffers` then resets ratatui's record of what is on screen, so the next frame
-/// is painted in full rather than diffed against a screen that has just been blanked.
-///
-/// One call, not two: `Terminal::draw` already swaps at the end of every frame, so the
-/// current buffer is empty and the previous one holds the last frame before this runs.
-/// The single swap here resets that previous buffer as well, leaving both blank.
+/// One `swap_buffers`, not two: `Terminal::draw` already swaps at the end of every
+/// frame, so the current buffer is empty and the previous holds the last frame. The
+/// single swap here clears that previous buffer too.
 fn force_full_redraw(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     crossterm::execute!(
         std::io::stdout(),
@@ -346,17 +324,6 @@ async fn event_loop(
     dispatch(app, handle);
 
     loop {
-        // A full clear discards ratatui's diff state, forcing every cell to be written
-        // again. Needed when the screen and ratatui's model of it have diverged; see
-        // App::focus_moved.
-        //
-        // Deliberately not `Terminal::clear`, which first reads the cursor position back
-        // from the terminal: it writes `ESC[6n` and waits for the reply to arrive on
-        // stdin. heddle's own `EventStream` owns stdin, so it swallows that reply as an
-        // ordinary input event, crossterm times out after two seconds and the error
-        // takes the whole app down. The round trip buys nothing here -- the next line
-        // redraws every cell and `ui::draw` places the cursor itself -- so the buffer is
-        // reset directly and the clear is issued as a plain escape sequence.
         if app.needs_redraw {
             force_full_redraw(terminal)?;
             app.needs_redraw = false;
@@ -376,8 +343,8 @@ async fn event_loop(
 
             Some(worker_event) = handle.next() => {
                 app.apply_worker_event(worker_event);
-                // Fold whatever else has already arrived, up to the budget, so a burst
-                // costs one frame rather than one frame each.
+                // Fold what else has arrived, up to the budget, so a burst costs one
+                // frame rather than one each.
                 for extra in handle.drain(EVENT_BUDGET) {
                     app.apply_worker_event(extra);
                 }
@@ -387,17 +354,15 @@ async fn event_loop(
                 let since_epoch = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default();
-                // Hermes times approvals out server-side but the resolution event can
-                // be lost; without this a pane would stay blocked for ever.
+                // Hermes times approvals out server-side, but the resolution event can
+                // be lost and the pane would stay blocked.
                 app.agents.expire_pending(since_epoch.as_secs());
-                // Typing notices are driven from here rather than from the keypress, so
-                // that holding a key is not one request per character.
+                // From the tick, not the keypress: otherwise one request per
+                // character.
                 app.tick_typing(since_epoch.as_millis() as u64);
 
-                // Layout is flushed from the tick rather than from the keypress that
-                // changed it: holding a resize key would otherwise be one write per
-                // repeat. Throttled on top of that, because the tick is four times a
-                // second and this file is worth almost nothing.
+                // From the tick, not the keypress that changed it, and throttled on
+                // top: holding a resize key would be one write per repeat.
                 if app.layout_dirty && last_layout_save.elapsed() >= LAYOUT_FLUSH {
                     save_layout(app, layout_path);
                     app.layout_dirty = false;
@@ -419,13 +384,11 @@ fn handle_input(app: &mut App, event: Event) {
         }
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // Bars first. They sit above the tiling and own their rows, so a click
-                // there must never fall through and focus a pane instead.
+                // Bars own their rows, so a click there must not fall through.
                 if app.click_bar(mouse.column, mouse.row) {
                     return;
                 }
-                // Then borders. A press on the seam between two panes is the start of a
-                // resize, not a click into whichever pane happens to own that cell.
+                // A press on the seam between panes starts a resize.
                 if app.begin_drag(mouse.column, mouse.row) {
                     return;
                 }
@@ -443,8 +406,7 @@ fn handle_input(app: &mut App, event: Event) {
             }
             MouseEventKind::Drag(MouseButton::Left) => app.drag_to(mouse.column, mouse.row),
             MouseEventKind::Up(MouseButton::Left) => app.end_drag(),
-            // Scrolling mid-drag would fight the resize, and a wheel event is not a
-            // reason to let go of the border either.
+            // Scrolling mid-drag would fight the resize.
             MouseEventKind::ScrollUp if !app.is_dragging() => {
                 app.apply_action(keymap::Action::ScrollUp(3));
             }
@@ -458,13 +420,20 @@ fn handle_input(app: &mut App, event: Event) {
     }
 }
 
-/// Forward the app's queued commands to the worker.
 fn dispatch(app: &mut App, handle: &Handle) {
     for command in app.take_commands() {
-        if !handle.send(command) {
-            app.status = Some("worker stopped".into());
-            app.should_quit = true;
-            return;
+        match handle.send(command) {
+            Dispatch::Queued => {}
+            // The worker is alive, so this is a status line rather than a shutdown --
+            // but if it was a message, the user watched it vanish.
+            Dispatch::Dropped => {
+                app.status = Some("the worker is behind; a command was dropped".into());
+            }
+            Dispatch::Stopped => {
+                app.status = Some("worker stopped".into());
+                app.should_quit = true;
+                return;
+            }
         }
     }
 }

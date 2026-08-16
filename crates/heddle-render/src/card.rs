@@ -1,8 +1,7 @@
 //! Collapsible tool cards.
 //!
-//! The single largest difference between reading an agent in Element and reading it in
-//! heddle. Element shows `🔧 edit: "src/main.rs..."`; a card shows the invocation, the
-//! result, the diff and the duration, and folds itself away once it is history.
+//! Element shows `🔧 edit: "src/main.rs..."`; a card shows the invocation, the result,
+//! the diff and the duration, and folds itself away once it is history.
 //!
 //! See `docs/SPEC.md` §5.1.
 
@@ -19,8 +18,7 @@ const PLAIN_FOLD: usize = 20;
 pub enum AutoExpand {
     /// Never expand automatically; the user drives it.
     Never,
-    /// Expand while running, collapse when finished. The default: you watch work
-    /// happen, then it gets out of the way.
+    /// Expand while running, collapse when finished. The default.
     #[default]
     Running,
     /// Always expand.
@@ -29,8 +27,7 @@ pub enum AutoExpand {
 
 /// Decide whether a card should be open.
 ///
-/// A user override always wins. Failures always expand regardless of policy, because a
-/// silently collapsed error is the worst possible outcome.
+/// A user override wins. Failures expand regardless of policy.
 pub fn is_expanded(tool: &Tool, policy: AutoExpand, user_override: Option<bool>) -> bool {
     if let Some(explicit) = user_override {
         return explicit;
@@ -45,7 +42,6 @@ pub fn is_expanded(tool: &Tool, policy: AutoExpand, user_override: Option<bool>)
     }
 }
 
-/// Render the one-line header of a card.
 pub fn header(tool: &Tool, expanded: bool, theme: &Theme) -> Line<'static> {
     let style = theme.tool(tool.status);
     let mut spans = vec![
@@ -109,7 +105,6 @@ pub fn body(tool: &Tool, theme: &Theme) -> Vec<Line<'static>> {
     lines.into_iter().map(indent).collect()
 }
 
-/// Render a whole card.
 pub fn render(tool: &Tool, expanded: bool, theme: &Theme) -> Vec<Line<'static>> {
     let mut out = vec![header(tool, expanded, theme)];
     if expanded {
@@ -137,11 +132,20 @@ fn render_plain(text: &str, theme: &Theme) -> Vec<Line<'static>> {
 }
 
 /// Pretty-print JSON, falling back to plain text when it does not parse.
+///
+/// A `Json` body arrives as whatever the agent serialised, usually one long line. Still
+/// folded by `render_plain`, so a large document does not take the pane.
 fn render_json(text: &str, theme: &Theme) -> Vec<Line<'static>> {
-    render_plain(text, theme)
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => match serde_json::to_string_pretty(&value) {
+            Ok(pretty) => render_plain(&pretty, theme),
+            Err(_) => render_plain(text, theme),
+        },
+        // The mime is a claim by the agent, not a guarantee.
+        Err(_) => render_plain(text, theme),
+    }
 }
 
-/// Indent a line so card bodies sit visually under their header.
 fn indent(line: Line<'static>) -> Line<'static> {
     let mut spans = vec![Span::raw("  │ ")];
     spans.extend(line.spans);
@@ -165,6 +169,50 @@ mod tests {
             body: Some("--- a/x\n+++ b/x\n+new\n-old".into()),
             truncated: false,
         }
+    }
+
+    #[test]
+    fn a_json_body_is_reindented() {
+        // A tool result arrives as one long line; the card is where it becomes
+        // readable.
+        let theme = Theme::default();
+        let tool = Tool {
+            name: "read".into(),
+            index: 0,
+            args: None,
+            preview: None,
+            status: ToolStatus::Ok,
+            duration_ms: None,
+            mime: Some("application/json".into()),
+            body: Some(r#"{"a":1,"b":[2,3]}"#.into()),
+            truncated: false,
+        };
+
+        let lines = body(&tool, &theme);
+        assert!(lines.len() > 1, "one line is not pretty-printed");
+    }
+
+    #[test]
+    fn a_json_body_that_is_not_json_is_still_shown() {
+        // The mime is a claim by the agent, not a guarantee.
+        let theme = Theme::default();
+        let tool = Tool {
+            name: "read".into(),
+            index: 0,
+            args: None,
+            preview: None,
+            status: ToolStatus::Ok,
+            duration_ms: None,
+            mime: Some("application/json".into()),
+            body: Some("not json at all".into()),
+            truncated: false,
+        };
+
+        let text: String = body(&tool, &theme)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("not json at all"), "{text}");
     }
 
     #[test]
@@ -257,7 +305,9 @@ mod tests {
         t.mime = Some("text/plain".into());
         t.body = Some((0..100).map(|i| format!("line {i}\n")).collect());
         let lines = body(&t, &theme);
-        assert_eq!(lines.len(), PLAIN_FOLD + 1);
+        // The literal SPEC §5.2 documents, not `PLAIN_FOLD + 1`: an assertion against
+        // the constant is satisfied by changing it.
+        assert_eq!(lines.len(), 21, "20 lines and an elision marker");
     }
 
     #[test]

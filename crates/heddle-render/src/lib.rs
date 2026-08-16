@@ -6,9 +6,11 @@
 
 pub mod card;
 pub mod diff;
+pub mod glyphs;
 pub mod theme;
 pub mod transcript;
 
 pub use card::AutoExpand;
+pub use glyphs::{Glyph, PRINTED};
 pub use theme::Theme;
 pub use transcript::{Options, Overrides};

@@ -3,7 +3,7 @@
 //! Pure layout and painting. All decisions live in [`crate::app`]; this module only
 //! turns state into cells.
 
-use crate::app::{App, Hit, Pending, RecoveryPanel};
+use crate::app::{App, Hit, Modal, Pending, RecoveryPanel};
 use crate::composer::Composer;
 use crate::keymap::{self, Mode};
 use crate::palette::keys_for;
@@ -17,7 +17,6 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-/// Composer height, including its border, when it holds a single line.
 const COMPOSER_MIN_HEIGHT: u16 = 3;
 
 /// Most lines the composer will grow to before it scrolls internally. Beyond this the
@@ -27,10 +26,8 @@ const COMPOSER_MAX_LINES: u16 = 8;
 /// Floor width for a tab label, so short room names still occupy a tab-sized slot.
 const MIN_TAB_WIDTH: usize = 10;
 
-/// Drawn between tabs and at both ends of the bar.
 const TAB_SEPARATOR: &str = "│";
 
-/// Blank columns between key hints in the status bar.
 const HINT_GAP: usize = 3;
 
 /// Columns kept clear on the right of a transcript.
@@ -57,54 +54,35 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let caret = draw_composer(frame, app, chunks[3]);
     draw_status(frame, app, chunks[4]);
 
-    // Before the modal overlays: this one belongs to the composer, and a palette or a
-    // verification opened over the top of it must cover it rather than sit under it.
+    // Before the modals: this one belongs to the composer and must sit under them.
     if app.mentions.is_some() {
         if let Some(caret) = caret {
             draw_mentions(frame, app, frame.area(), caret);
         }
     }
 
-    if app.threads.is_some() {
-        draw_threads(frame, app, frame.area());
-    }
-
-    if app.emoji.is_some() {
-        draw_emoji(frame, app, frame.area());
-    }
-
-    if app.palette.is_some() {
-        draw_palette(frame, app, frame.area());
-    }
-
-    // Last, so it sits above everything.
-    if app.help {
-        draw_help(frame, app, frame.area());
-    }
-
-    // Above even the help: a security prompt that something else can obscure is a
-    // security prompt the user can be tricked into answering blind.
-    if app.verification.is_some() {
-        draw_verification(frame, app, frame.area());
-    }
-
-    if app.recovery_prompt.is_some() {
-        draw_recovery(frame, app, frame.area());
+    // One overlay, so one call -- and so the paint order cannot disagree with the
+    // order `App::apply_action` dispatches in.
+    match &app.modal {
+        Some(Modal::Threads(_)) => draw_threads(frame, app, frame.area()),
+        Some(Modal::Emoji(_)) => draw_emoji(frame, app, frame.area()),
+        Some(Modal::Palette(_)) => draw_palette(frame, app, frame.area()),
+        Some(Modal::Help) => draw_help(frame, app, frame.area()),
+        Some(Modal::Verification(_)) => draw_verification(frame, app, frame.area()),
+        Some(Modal::Recovery(_)) => draw_recovery(frame, app, frame.area()),
+        None => {}
     }
 }
 
 /// The interactive verification panel.
 ///
-/// The emoji are drawn one per line with their names spelled out, rather than in a row.
-/// Other clients use a grid, but heddle cannot: terminals disagree with `unicode-width`
-/// about how many cells several of these glyphs occupy, and a row that wraps wrongly
-/// puts the seventh emoji under the first. Comparing a misaligned grid against a phone
-/// is exactly the moment a user gives up and presses yes. The name beside each symbol
-/// also settles any ambiguity the font introduces.
+/// One emoji per line with its name, not a grid: terminals disagree with `unicode-width`
+/// about several of these glyphs, and a row that wraps wrongly puts the seventh emoji
+/// under the first. The name also settles any ambiguity the font introduces.
 fn draw_verification(frame: &mut Frame, app: &App, area: Rect) {
     use heddle_matrix::Verification;
 
-    let Some(state) = &app.verification else {
+    let Some(state) = app.verification() else {
         return;
     };
 
@@ -145,8 +123,7 @@ fn draw_verification(frame: &mut Frame, app: &App, area: Rect) {
             ];
             for (symbol, description) in emoji {
                 lines.push(Line::from(vec![
-                    // The symbol carries the accent; the name is ordinary text beside
-                    // it, so the eye lands on the glyph being compared.
+                    // The accent goes on the symbol being compared, not its name.
                     Span::styled(format!(" {symbol} "), app.theme.accent_style()),
                     Span::styled("  ".to_owned(), Style::default()),
                     Span::styled(description.clone(), Style::default()),
@@ -208,12 +185,11 @@ fn draw_verification(frame: &mut Frame, app: &App, area: Rect) {
 
 /// The recovery panel.
 ///
-/// The key being *asked for* is masked; the key being *given out* is not. They are
-/// opposite situations: one is a secret the user already holds and is re-entering, where
-/// echoing it only helps a shoulder, and the other is a secret they have never seen and
-/// must copy down exactly, where hiding it would defeat the entire exercise.
+/// The key being *asked for* is masked; the key being *given out* is not. One is being
+/// re-entered from something the user already holds; the other must be copied down
+/// exactly and will never be shown again.
 fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(panel) = &app.recovery_prompt else {
+    let Some(panel) = app.recovery_prompt() else {
         return;
     };
 
@@ -301,8 +277,8 @@ fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default(),
                 )),
                 Line::from(""),
-                // Said plainly and in the warning colour, because the cost lands on
-                // devices that are not in front of the user to be reassured.
+                // Warning colour: the cost lands on devices that are not in front of
+                // the user.
                 Line::from(Span::styled(
                     "Replacing the key makes your current one useless. Any device \
                      holding it will need the new one."
@@ -349,7 +325,7 @@ fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let width = (width as u16).min(area.width);
-    // Wrapped, so a long sentence in a narrow terminal is not simply cut off mid-warning.
+    // Wrapped, so a narrow terminal does not cut the warning off mid-sentence.
     let paragraph = Paragraph::new(lines)
         .wrap(ratatui::widgets::Wrap { trim: true })
         .block(
@@ -376,12 +352,9 @@ fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, popup);
 }
 
-/// The `<prefix> t` thread picker.
-///
-/// For a Hermes room this is the list of agent sessions, which is why it exists before
-/// any of the other overlays.
+/// The `<prefix> t` thread picker. For a Hermes room, the list of agent sessions.
 fn draw_threads(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(picker) = &app.threads else {
+    let Some(picker) = app.threads() else {
         return;
     };
 
@@ -440,17 +413,15 @@ fn draw_threads(frame: &mut Frame, app: &App, area: Rect) {
 
 /// The emoji picker, for `<prefix> e` and `<prefix> r`.
 ///
-/// A list rather than a grid. Terminals disagree with `unicode-width` about how many
-/// cells some emoji occupy, and in a grid that error compounds across every column; one
-/// per row keeps the damage to the row that caused it. See the width note in PLAN.md.
+/// A list, not a grid: a width disagreement compounds across columns, and one emoji per
+/// row keeps the damage to the row that caused it. See the width note in PLAN.md.
 fn draw_emoji(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(picker) = &app.emoji else {
+    let Some(picker) = app.emoji() else {
         return;
     };
 
     let width = (area.width / 2).clamp(24, area.width);
     let rows = (picker.matches.len() as u16).clamp(1, 12);
-    // Query line, list, borders.
     let height = (rows + 3).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -512,18 +483,15 @@ fn draw_emoji(frame: &mut Frame, app: &App, area: Rect) {
 
 /// The command palette, for `:`.
 ///
-/// Each row carries the key that does the same thing, so that the palette is a way of
-/// learning the bindings rather than a permanent substitute for them. Keys are written
-/// with the configured prefix rather than a hardcoded `^a`, since a custom `ui.prefix`
-/// would otherwise be taught wrongly on every row.
+/// Each row carries the key that does the same thing, written with the configured
+/// prefix -- a hardcoded `^a` would teach a custom `ui.prefix` wrongly on every row.
 fn draw_palette(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(palette) = &app.palette else {
+    let Some(palette) = app.palette() else {
         return;
     };
 
     let width = (area.width * 2 / 3).clamp(30, area.width);
     let rows = palette.matches.len().clamp(1, crate::palette::MAX_ROWS);
-    // Query line, list, borders.
     let height = (rows as u16 + 3).min(area.height);
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -545,8 +513,7 @@ fn draw_palette(frame: &mut Frame, app: &App, area: Rect) {
             app.theme.dim_style(),
         )));
     } else {
-        // Widest key column, so the names line up without a fixed guess that a custom
-        // prefix would overflow.
+        // Measured, since a custom prefix would overflow a fixed guess.
         let key_width = palette
             .visible(rows)
             .map(|(command, _)| UnicodeWidthStr::width(keys_for(command, app.prefix).as_str()))
@@ -585,13 +552,9 @@ const MENTION_ROWS: usize = 8;
 
 /// Place a popup against a point rather than in the middle of the screen.
 ///
-/// The first anchored overlay in heddle: every other one is a modal dialogue, and the
-/// middle of the screen is the right place for those. A completion list is not a
-/// dialogue, it is an annotation on the word being typed, and it has to be next to it.
-///
-/// Sits above the anchor by preference, because the anchor is in the composer and the
-/// composer is at the bottom; drops below only when there is genuinely no room, and
-/// slides left rather than overflowing the right edge.
+/// Above the anchor by preference, since the anchor is in the composer at the bottom;
+/// below only when there is no room, and sliding left rather than overflowing the right
+/// edge.
 fn anchored(area: Rect, anchor: (u16, u16), width: u16, height: u16) -> Rect {
     let (ax, ay) = anchor;
     let width = width.min(area.width);
@@ -613,20 +576,18 @@ fn anchored(area: Rect, anchor: (u16, u16), width: u16, height: u16) -> Rect {
     }
 }
 
-/// The mention picker, anchored to the word being typed.
 fn draw_mentions(frame: &mut Frame, app: &App, area: Rect, caret: (u16, u16)) {
     let Some(picker) = &app.mentions else {
         return;
     };
     let matches = app.mention_matches();
-    // An armed `@` that matches nobody draws nothing at all. A box saying "no matches"
-    // under every word beginning with @ would be an overlay that punishes typing.
+    // An armed `@` matching nobody draws nothing; a "no matches" box under every word
+    // beginning with @ would punish typing.
     if matches.is_empty() {
         return;
     }
 
-    // Scrolled so the highlight stays visible once the selection walks past the rows,
-    // the same way the palette and the emoji picker do it.
+    // Scrolled so the highlight stays visible past the visible rows.
     let rows = matches.len().min(MENTION_ROWS);
     let first = picker.selected.saturating_sub(rows.saturating_sub(1));
 
@@ -645,8 +606,7 @@ fn draw_mentions(frame: &mut Frame, app: &App, area: Rect, caret: (u16, u16)) {
                 Span::styled(marker.to_owned(), app.theme.accent_style()),
                 Span::styled(member.display_name.clone(), style),
             ];
-            // The full ID only where the name alone would not say who this is. Showing
-            // it always would bury the names it is there to disambiguate.
+            // The full ID only where the name alone is ambiguous.
             if member.ambiguous {
                 spans.push(Span::styled(
                     format!("  {}", member.user_id),
@@ -670,11 +630,9 @@ fn draw_mentions(frame: &mut Frame, app: &App, area: Rect, caret: (u16, u16)) {
         .max()
         .unwrap_or(0);
 
-    // Marker, text, and the two borders.
     let width = (widest as u16).saturating_add(4).clamp(12, area.width);
     let height = (rows as u16).saturating_add(2);
-    // One column left of the caret, so the list lines up under the word rather than
-    // under the letter after it.
+    // One column left of the caret, so the list lines up under the word.
     let popup = anchored(area, (caret.0.saturating_sub(1), caret.1), width, height);
 
     let block = Block::default()
@@ -688,9 +646,7 @@ fn draw_mentions(frame: &mut Frame, app: &App, area: Rect, caret: (u16, u16)) {
 
 /// How tall the composer needs to be, borders included.
 ///
-/// Measured after wrapping, not by counting newlines: a single long paragraph occupies
-/// several rows and should be visible while it is written rather than scrolling out of
-/// a one-line slot.
+/// Measured after wrapping: a long paragraph with no newlines still occupies rows.
 fn composer_height(app: &App, total_width: u16) -> u16 {
     let width = total_width.saturating_sub(2);
     let rows = app
@@ -699,18 +655,26 @@ fn composer_height(app: &App, total_width: u16) -> u16 {
     COMPOSER_MIN_HEIGHT + rows.clamp(1, COMPOSER_MAX_LINES) - 1
 }
 
-/// The `<prefix> ?` key overlay.
+/// How a binding's keys are written in the overlay and the status bar.
+///
+/// `enter` and `up / down` each appear in both Normal and Insert with different
+/// meanings, so the mode has to be part of the label or the reader cannot tell the rows
+/// apart.
+fn key_label(binding: &keymap::Binding, prefix: &str) -> String {
+    match binding.mode {
+        keymap::Mode::Prefix => format!("{prefix} {}", binding.keys),
+        keymap::Mode::Insert => format!("i {}", binding.keys),
+        keymap::Mode::Normal => binding.keys.to_owned(),
+    }
+}
+
 fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     let prefix = app.prefix.label();
 
     let rows: Vec<(String, &str)> = keymap::BINDINGS
         .iter()
         .map(|b| {
-            let keys = if b.prefixed {
-                format!("{prefix} {}", b.keys)
-            } else {
-                b.keys.to_owned()
-            };
+            let keys = key_label(b, &prefix);
             (keys, b.action)
         })
         .collect();
@@ -800,8 +764,6 @@ fn wrapped_anchors(lines: &[Line<'static>], anchors: &[Anchor], width: u16) -> V
         .collect()
 }
 
-/// Build a strip of tab-like cells.
-///
 /// Both bars go through this so a workspace and a room are visually the same kind of
 /// thing: a separated, padded, selectable cell. Without the padding and separators a
 /// short label renders as a lone highlighted word, which reads as a heading.
@@ -855,9 +817,8 @@ fn draw_workspace_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             let state = workspace.state();
             let unread = workspace.unread();
 
-            // Agent state wins when there is one, because it is the thing this client
-            // exists to surface. Unread only has to beat "dim", so that a workspace
-            // holding traffic never looks the same as an empty one.
+            // Agent state outranks unread; unread only has to beat "dim", so a
+            // workspace holding traffic never looks like an empty one.
             let mut style = if state == AgentState::Idle && unread.any() {
                 app.theme.unread(unread.is_highlight())
             } else {
@@ -868,8 +829,7 @@ fn draw_workspace_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             let mut label = workspace.title.clone();
-            // The focused workspace's own counts are about to be read, so a badge on it
-            // is noise; every other workspace is out of sight and needs one.
+            // The focused workspace's counts are about to be read directly.
             if let Some(badge) = unread.label().filter(|_| !is_focused) {
                 label.push(' ');
                 label.push_str(&badge);
@@ -885,8 +845,7 @@ fn draw_workspace_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             app.theme.dim_style(),
         )]
     } else {
-        // No `+` here: creating a Space is out of scope (SPEC.md §7), so an affordance
-        // suggesting otherwise would be a lie.
+        // No `+`: creating a Space is out of scope, SPEC.md §7.
         let (spans, hits, _) = tab_strip(cells, app.theme.dim_style(), area.x);
         app.bars.workspaces = hits;
         spans
@@ -944,13 +903,12 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             if tab.is_encrypted {
                 label.push_str(" 🔒");
             }
-            // A padlock says "encrypted", which is not the same as "trustworthy", and
-            // a room can be both encrypted and carrying messages we cannot vouch for.
+            // Encrypted is not trustworthy: a room can be both encrypted and carrying
+            // messages we cannot vouch for.
             if app.unverified_rooms.contains(&tab.room_id) {
                 label.push_str(" ⛔");
             }
-            // Both counts, not just mentions: a busy room you have not opened is worth
-            // seeing even when nobody said your name.
+            // Both counts: a busy unopened room is worth seeing without a mention.
             if let Some(badge) = tab.unread.label().filter(|_| !is_focused) {
                 label.push(' ');
                 label.push_str(&badge);
@@ -961,7 +919,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let (mut spans, hits, x) = tab_strip(cells, app.theme.dim_style(), area.x);
 
-    // A `+` so the strip is self-describing as tabs with a "new" affordance.
+    // A `+`, so the strip reads as tabs with a "new" affordance.
     let plus = " + ";
     let plus_width = UnicodeWidthStr::width(plus) as u16;
     spans.push(Span::styled(plus, app.theme.dim_style()));
@@ -1016,8 +974,7 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let selected = app.selected_event().map(ToOwned::to_owned);
 
-    // Render every pane, not just the focused one. A pane that goes blank the moment it
-    // loses focus destroys the reason for having panes at all.
+    // Every pane, not only the focused one.
     let drawn: Vec<_> = panes
         .iter()
         .map(|(placement, header, state, view)| {
@@ -1033,8 +990,7 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
                 &app.theme,
                 &app.render_options,
                 &app.overrides,
-                // The selection belongs to the focused view; marking it in a background
-                // pane would claim a message is selected there too.
+                // The selection belongs to the focused view only.
                 if placement.is_focused {
                     selected.as_deref()
                 } else {
@@ -1069,12 +1025,10 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
             .border_style(app.theme.border_style(placement.is_focused))
             .title(Span::styled(header, app.theme.state(state)));
 
-        // Keep one column clear on the right. `unicode-width` and the terminal disagree
-        // about emoji whose East Asian Width is Neutral but which render as two cells —
-        // U+1F54A DOVE and friends. ratatui lays them out as one column, the terminal
-        // paints two, and the overflow lands on whatever is to the right. Without the
-        // gutter that is the border, which is why the edge went dashed wherever such a
-        // glyph happened to end a line.
+        // One column clear on the right. `unicode-width` and the terminal disagree
+        // about EAW=Neutral emoji that render as two cells -- U+1F54A DOVE and friends
+        // -- and the overflow lands on whatever is right of them. Without this gutter
+        // that is the border, which goes dashed wherever such a glyph ends a line.
         let text_area = Rect {
             width: inner.width.saturating_sub(TRANSCRIPT_GUTTER),
             ..inner
@@ -1083,8 +1037,7 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
         let lines = if placement.is_focused {
             rendered.lines
         } else {
-            // Dim rather than blank. The text is still context worth reading; it just is
-            // not where the keyboard is pointing.
+            // Dim, not blank: still readable context.
             dimmed(rendered.lines)
         };
 
@@ -1094,13 +1047,11 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
         let offset = max_scroll.saturating_sub(scroll.min(max_scroll));
         frame.render_widget(paragraph.scroll((offset, 0)), text_area);
 
-        // Border last, deliberately. Belt and braces alongside the gutter: whatever the
-        // transcript contains, the chrome is painted over it rather than under it.
+        // Border last, so the chrome is painted over any transcript overflow.
         frame.render_widget(block, placement.rect);
     }
 }
 
-/// The area inside a pane's border.
 fn inner_of(rect: Rect) -> Rect {
     Rect {
         x: rect.x.saturating_add(1),
@@ -1112,8 +1063,7 @@ fn inner_of(rect: Rect) -> Rect {
 
 /// Dim a rendered transcript without flattening its colours.
 ///
-/// `Modifier::DIM` is a patch, so markdown highlighting and sender colours survive; the
-/// whole pane just recedes.
+/// `Modifier::DIM` is a patch, so markdown highlighting and sender colours survive.
 fn dimmed(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     lines
         .into_iter()
@@ -1133,12 +1083,11 @@ fn dimmed(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
 
 /// Draw the composer, and report where the caret landed in absolute screen columns.
 ///
-/// The caret position is returned rather than recomputed by the caller because only the
-/// wrap knows which display row a byte offset fell on, and the mention popup has to
-/// point at the word being typed.
+/// Only the wrap knows which display row a byte offset fell on, and the mention popup
+/// has to point at the word being typed.
 fn draw_composer(frame: &mut Frame, app: &App, area: Rect) -> Option<(u16, u16)> {
-    // What the composer is about to do outranks which mode it is in: sending an edit
-    // when you meant to send a message is not recoverable.
+    // What the composer will do outranks which mode it is in: sending an edit when you
+    // meant a message is not recoverable.
     let (label, style) = match (&app.composing, app.mode) {
         (Some(Pending::Reply(_)), _) => ("reply", app.theme.accent_style()),
         (Some(Pending::Edit(_)), _) => ("edit", app.theme.state(heddle_agent::AgentState::Blocked)),
@@ -1168,9 +1117,8 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) -> Option<(u16, u16)>
         return None;
     }
 
-    // Wrap in the composer rather than leaving it to Paragraph, because the caret is a
-    // byte offset and only the wrap knows which display row it landed on. Letting the
-    // widget wrap would put the text in one place and the caret in another.
+    // Wrapped here rather than by Paragraph: the caret is a byte offset, and letting
+    // the widget wrap would put the text in one place and the caret in another.
     let wrapped = app.composer().map(|c| c.wrapped(inner.width))?;
 
     // Keep the caret in view when the message is taller than the box.
@@ -1198,14 +1146,13 @@ fn draw_composer(frame: &mut Frame, app: &App, area: Rect) -> Option<(u16, u16)>
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
-    // A glyph rather than a word: the healthy states are the common case and do not
-    // deserve a sentence. Colour carries the meaning, matching the agent badges.
+    // A glyph for the healthy states, coloured to match the agent badges.
     let (glyph, word, style) = match app.sync {
         SyncState::Running => ("●", None, Style::default().fg(app.theme.done)),
         SyncState::Initial => ("◐", None, app.theme.accent_style()),
         SyncState::Idle => ("○", None, app.theme.dim_style()),
-        // The unhealthy states keep their word: a dim circle is not enough to explain
-        // why nothing is arriving.
+        // The unhealthy states keep their word: a dim circle does not explain why
+        // nothing is arriving.
         SyncState::Offline => ("⚠", Some("offline"), Style::default().fg(app.theme.blocked)),
         SyncState::Terminated => ("✖", Some("stopped"), Style::default().fg(app.theme.error)),
     };
@@ -1216,9 +1163,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         left.push(Span::styled(word.to_owned(), style));
         left_width += UnicodeWidthStr::width(word);
     }
-    // Persistent, not a passing status: an unverified device cannot be sent keys by
-    // anyone else, so every silence it causes looks like a bug somewhere else. It stays
-    // on screen until it is no longer true.
+    // Persistent until it is no longer true: an unverified device cannot be sent keys,
+    // so every silence it causes looks like a bug elsewhere.
     if app.device_verified == Some(false) {
         const WARNING: &str = "unverified device — ^a v";
         left.push(Span::raw("  "));
@@ -1241,17 +1187,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let mut hints: Vec<(String, &str)> = keymap::HINTS
         .iter()
         .map(|b| {
-            let keys = if b.prefixed {
-                format!("{prefix} {}", b.keys)
-            } else {
-                b.keys.to_owned()
-            };
+            let keys = key_label(b, &prefix);
             (keys, b.action)
         })
         .collect();
 
-    // Shed hints from the least useful end until the row fits, rather than dropping the
-    // lot. A narrow terminal should still get `i write`.
+    // Shed hints from the least useful end, so a narrow terminal still gets `i write`.
     let (cell, total) = loop {
         if hints.is_empty() {
             return;

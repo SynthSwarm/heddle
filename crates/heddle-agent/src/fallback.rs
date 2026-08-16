@@ -28,16 +28,14 @@ use crate::protocol::{Tool, ToolStatus};
 
 /// Which shapes of tool-progress line an agent produces.
 ///
-/// Every flag costs false positives when it is wrong, and a false positive silently
-/// eats a line of the agent's reply. Enabling only what an agent actually emits is
-/// worth more than enabling everything and hoping.
+/// A flag set wrongly costs false positives, and a false positive silently eats a line
+/// of the agent's reply. Enable only what the agent emits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chrome {
     /// Require a leading emoji before the tool name.
     ///
     /// Hermes prefixes every progress line with one, and it is the only cheap signal
-    /// separating chrome from prose. Clearing this makes the parser far more eager and
-    /// should only be done for an agent whose output has some other reliable shape.
+    /// separating chrome from prose. Clearing this makes the parser much more eager.
     pub leading_emoji: bool,
     /// Recognise `name: "preview"`.
     pub preview: bool,
@@ -140,6 +138,11 @@ pub fn parse_with(body: &str, chrome: Chrome) -> Parsed {
 ///
 /// Returns `None` for ordinary prose. Deliberately conservative: a false positive
 /// silently eats a line of the agent's reply, which is worse than missing a card.
+///
+/// Each branch matches the emitter format quoted in the module header exactly. An
+/// identifier followed by a colon describes `edit: "src/main.rs"` and
+/// `Warning: disk almost full` equally well; the quoting and spacing are what separate
+/// them.
 fn parse_tool_line(line: &str, chrome: Chrome) -> Option<Tool> {
     if chrome.is_off() {
         return None;
@@ -169,23 +172,24 @@ fn parse_tool_line(line: &str, chrome: Chrome) -> Option<Tool> {
         return None;
     }
 
-    // `name: "preview"`
+    // `name: "preview"`. The quotes are required: Hermes always writes them, and
+    // without them this matches every emoji-led sentence containing a colon.
     if chrome.preview {
         if let Some((name, preview)) = rest.split_once(": ") {
-            let name = name.trim();
             if is_tool_name(name) {
-                let preview = preview.trim().trim_matches('"');
-                return Some(tool(name, Some(preview)));
+                if let Some(inner) = quoted(preview.trim()) {
+                    return Some(tool(name, Some(inner)));
+                }
             }
         }
     }
 
     // `name(arg_keys)` -- verbose mode. The args line beneath is left as prose; without
-    // the extension there is no reliable way to associate it.
+    // the extension there is no reliable way to associate it. The name is not trimmed,
+    // so "Shipped (finally)" is rejected on the space `edit(['path'])` does not have.
     if chrome.call {
-        if let Some((name, _)) = rest.split_once('(') {
-            let name = name.trim();
-            if is_tool_name(name) {
+        if let Some((name, args)) = rest.split_once('(') {
+            if is_tool_name(name) && args.ends_with(')') {
                 return Some(tool(name, None));
             }
         }
@@ -194,7 +198,6 @@ fn parse_tool_line(line: &str, chrome: Chrome) -> Option<Tool> {
     // `name...`
     if chrome.ellipsis {
         if let Some(name) = rest.strip_suffix("...") {
-            let name = name.trim();
             if is_tool_name(name) {
                 return Some(tool(name, None));
             }
@@ -204,15 +207,22 @@ fn parse_tool_line(line: &str, chrome: Chrome) -> Option<Tool> {
     None
 }
 
+/// The contents of a `"…"` pair, or `None` if the text is not so wrapped.
+///
+/// One pair only, so a preview that itself begins and ends with a quote survives.
+fn quoted(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner)
+}
+
 fn tool(name: &str, preview: Option<&str>) -> Tool {
     Tool {
         name: name.to_owned(),
         index: 0,
         args: None,
         preview: preview.filter(|p| !p.is_empty()).map(str::to_owned),
-        // The wire carries no completion signal in fallback mode. Reporting `Running`
-        // for ever would leave panes stuck in `working`, so treat recovered calls as
-        // already finished and let the UI mark the pane as degraded instead.
+        // The wire carries no completion signal here, and `Running` for ever would
+        // leave panes stuck in `working`. The `~` marker carries the uncertainty.
         status: ToolStatus::Ok,
         duration_ms: None,
         mime: None,
@@ -221,11 +231,14 @@ fn tool(name: &str, preview: Option<&str>) -> Tool {
     }
 }
 
-/// Tool names are identifiers. Requiring that shape keeps prose like
-/// "Note: this is fine" from being mistaken for a call.
+/// Whether `s` has the shape of a tool name: an identifier, and nothing else.
 ///
-/// Public so an adapter with its own line rules can reuse the same test rather than
-/// inventing a second, subtly different idea of what a tool is called.
+/// Callers must not `trim` first -- whitespace is excluded deliberately, and the space
+/// in `Shipped (finally)` is the evidence that it is prose. Necessary but nowhere near
+/// sufficient: `Note`, `Done` and `Warning` are all identifier-shaped, and what rules
+/// them out is the surrounding punctuation in [`parse_tool_line`].
+///
+/// Public so an adapter with its own line rules reuses the same test.
 pub fn is_tool_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 48
@@ -236,7 +249,8 @@ pub fn is_tool_name(s: &str) -> bool {
 /// Whether a character is plausibly a leading emoji.
 ///
 /// Covers the Miscellaneous Symbols, Dingbats, Misc Symbols & Pictographs, Transport,
-/// and Supplemental Symbols blocks, which is where `get_tool_emoji` draws from.
+/// Geometric Shapes Extended and Supplemental Symbols blocks, which is where
+/// `get_tool_emoji` draws from.
 pub fn is_emoji_like(c: char) -> bool {
     matches!(c as u32,
         0x2190..=0x21FF   // arrows
@@ -246,6 +260,7 @@ pub fn is_emoji_like(c: char) -> bool {
         | 0x1F300..=0x1F5FF
         | 0x1F600..=0x1F64F
         | 0x1F680..=0x1F6FF
+        | 0x1F7E0..=0x1F7EB // coloured circles and squares
         | 0x1F900..=0x1F9FF
         | 0x1FA00..=0x1FAFF)
 }
@@ -254,31 +269,45 @@ pub fn is_emoji_like(c: char) -> bool {
 ///
 /// Public because every adapter needs it and none of them should be re-deriving where
 /// a fence ends: chrome inside a code block is a sample, not a call.
+///
+/// Fence length is tracked, per CommonMark: a block is closed only by a run of at
+/// least as many backticks as opened it, so a shorter fence inside it is content. An
+/// agent posting a markdown sample relies on that.
 pub fn extract_code_blocks(body: &str) -> (Vec<CodeBlock>, String) {
     let mut blocks = Vec::new();
     let mut remainder = String::new();
-    let mut current: Option<(Option<String>, Vec<&str>)> = None;
+    let mut current: Option<(usize, Option<String>, Vec<&str>)> = None;
 
     for line in body.lines() {
         let fence = line.trim_start();
-        if let Some(info) = fence.strip_prefix("```") {
+        let ticks = fence.chars().take_while(|&c| c == '`').count();
+
+        if ticks >= 3 {
+            let info = fence[ticks..].trim();
             match current.take() {
-                // Closing fence.
-                Some((lang, lines)) => blocks.push(CodeBlock {
-                    lang,
-                    body: lines.join("\n"),
-                }),
-                // Opening fence.
+                // A closing fence must be at least as long as the one that opened the
+                // block, and carry no info string. Anything else is content.
+                Some((open, lang, lines)) if ticks >= open && info.is_empty() => {
+                    blocks.push(CodeBlock {
+                        lang,
+                        body: lines.join("\n"),
+                    });
+                    continue;
+                }
+                Some(open) => current = Some(open),
                 None => {
-                    let info = info.trim();
-                    current = Some(((!info.is_empty()).then(|| info.to_owned()), Vec::new()));
+                    current = Some((
+                        ticks,
+                        (!info.is_empty()).then(|| info.to_owned()),
+                        Vec::new(),
+                    ));
+                    continue;
                 }
             }
-            continue;
         }
 
         match current.as_mut() {
-            Some((_, lines)) => lines.push(line),
+            Some((_, _, lines)) => lines.push(line),
             None => {
                 remainder.push_str(line);
                 remainder.push('\n');
@@ -287,7 +316,7 @@ pub fn extract_code_blocks(body: &str) -> (Vec<CodeBlock>, String) {
     }
 
     // An unterminated fence: keep what we have rather than dropping it.
-    if let Some((lang, lines)) = current {
+    if let Some((_, lang, lines)) = current {
         blocks.push(CodeBlock {
             lang,
             body: lines.join("\n"),
@@ -331,10 +360,51 @@ mod tests {
 
     #[test]
     fn does_not_mistake_prose_for_a_tool_call() {
-        // Emoji-led prose with a colon is the obvious false-positive trap.
-        let p = parse("✅ All good: the tests pass now");
-        assert!(p.tools.is_empty(), "recovered {:?}", p.tools);
-        assert!(p.prose.contains("All good"));
+        // A recovered line is removed from `prose`, and the degraded renderer draws
+        // `prose` -- so a false positive deletes the line rather than merely
+        // mis-carding it. A table, so the next shape somebody thinks of gets added.
+        let prose = [
+            "📝 Note: this is fine",
+            "✅ Done: all tests pass",
+            "⚠️ Warning: disk almost full",
+            "→ Next: run the migration",
+            "📝 TODO: write docs",
+            "🎉 Shipped (finally)",
+            "⚙️ Summary (short)",
+            "🟢 ready: go",
+            "✅ All good: the tests pass now",
+        ];
+
+        for line in prose {
+            let p = parse(line);
+            assert!(p.tools.is_empty(), "{line:?} recovered {:?}", p.tools);
+            assert_eq!(p.prose, line, "{line:?} was eaten");
+        }
+    }
+
+    #[test]
+    fn a_preview_must_actually_be_quoted() {
+        // The quotes are what Hermes writes, and what separates a call from a
+        // sentence with a colon in it.
+        assert!(parse("🔧 edit: src/main.rs").tools.is_empty());
+        assert_eq!(parse("🔧 edit: \"src/main.rs\"").tools.len(), 1);
+    }
+
+    #[test]
+    fn a_preview_keeps_the_quotes_it_was_meant_to_have() {
+        // One pair, not every quote at both ends.
+        let p = parse("🔧 bash: \"echo \"hi\"\"");
+        assert_eq!(p.tools.len(), 1);
+        assert_eq!(p.tools[0].preview.as_deref(), Some("echo \"hi\""));
+    }
+
+    #[test]
+    fn a_call_needs_its_closing_paren_and_no_space_before_it() {
+        assert_eq!(parse("🔧 edit(['path'])").tools.len(), 1);
+        // An opening paren alone is prose with a bracket in it.
+        assert!(parse("🔧 restarting (this may take a while")
+            .tools
+            .is_empty());
     }
 
     #[test]
@@ -359,6 +429,16 @@ mod tests {
         let p = parse("```\n🔧 edit: \"nope.rs\"\n```");
         assert!(p.tools.is_empty());
         assert_eq!(p.blocks.len(), 1);
+    }
+
+    #[test]
+    fn a_longer_fence_contains_a_shorter_one() {
+        // What an agent posts when showing someone how to write a fenced block.
+        let p = parse("````markdown\n```\ninner\n```\n````");
+        assert_eq!(p.blocks.len(), 1, "got {:?}", p.blocks);
+        assert_eq!(p.blocks[0].lang.as_deref(), Some("markdown"));
+        assert_eq!(p.blocks[0].body, "```\ninner\n```");
+        assert!(p.prose.is_empty(), "leaked {:?}", p.prose);
     }
 
     #[test]

@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| **Status** | Draft 1 |
-| **Date** | 2026-08-02 |
+| **Status** | Living. Describes 0.2.0 as shipped. |
+| **Date** | 2026-08-16 |
 | **Language** | Rust (edition 2021, MSRV 1.93) |
 | **Licence** | Apache-2.0 |
 
@@ -277,8 +277,13 @@ heddle/
 └─ docs/
 ```
 
-`heddle-layout` wraps `ratatui-hypertile` behind its own trait. Hypertile is at `0.4`
-and maintained by one author; the wrapper keeps a fork or replacement to a single file.
+`heddle-layout` funnels every call into `ratatui-hypertile` through one concrete type,
+`Tiling`. Hypertile is at `0.4` and maintained by one author; the facade keeps a fork or
+replacement to a single file.
+
+This said "behind its own trait" for a while, here and twice in `PLAN.md`, including as
+the stated mitigation for a Medium risk. There is no trait, and a facade does not need
+one to do the job -- but a mitigation nobody can find is not a mitigation.
 
 ### 4.2 Dependencies
 
@@ -289,9 +294,7 @@ and maintained by one author; the wrapper keeps a fork or replacement to a singl
 | `matrix-sdk-sqlite` | state + crypto persistence |
 | `ratatui`, `crossterm` | rendering, input |
 | `ratatui-hypertile` (`serde`) | BSP tiling, and the tree layout persistence stores |
-| `ratatui-image` | sixel / kitty / iTerm2 image protocols |
 | `tui-markdown` (`highlight-code`) | markdown + syntect highlighting |
-| `similar` | diff computation for `tool.result` |
 | `tokio`, `serde`, `toml`, `tracing`, `directories` | plumbing |
 
 TLS via `rustls` — no OpenSSL dependency, keeps the binary portable.
@@ -370,14 +373,14 @@ chosen to avoid collision when nested inside a `ctrl+b` multiplexer.
 | `<prefix> w` / `<prefix> W` | next / previous workspace |
 | `<prefix> v` | verify this device against your others |
 | `<prefix> R` | unlock secret storage with your recovery key |
-| `<prefix> f` | fuzzy jump to any room, thread or agent |
+| `<prefix> f` | fuzzy jump to any room, thread or agent — **not implemented**, see PLAN M6 |
 | `k` / `j` | select older / newer message |
 | `r` / `e` / `D` | reply / edit / delete the selection |
 | `<prefix> t` | thread picker |
 | `<prefix> e` | emoji picker, inserting into the composer |
 | `<prefix> r` | emoji picker, reacting to the selected message |
 | `<prefix> ?` | key overlay |
-| `<prefix> d` | detach (leave the terminal, keep sync warm) |
+| `<prefix> d` | detach (leave the terminal, keep sync warm) — **not implemented**, and not yet bound |
 | `:` | command palette |
 | `i` / `esc` | insert / normal mode |
 | `y` / `n` | approve / deny the focused approval |
@@ -444,10 +447,10 @@ implemented; they are M6 work and the keys were removed rather than left pretend
 
 | Concern | Treatment |
 |---|---|
-| Credentials | Access token and E2EE keys in the SQLite store, `0600`, under `$XDG_DATA_HOME/heddle`. Never in the config file. Optional OS keyring via `keyring` crate. |
+| Credentials | Access token and E2EE keys in the SQLite store under `$XDG_DATA_HOME/heddle`; the directory is `0700` and the session file `0600`. Never in the config file. |
 | E2EE | Full: encrypted send/receive, interactive SAS emoji verification, cross-signing bootstrap, `Recovery` key backup. Unverified devices in a room raise a persistent shield warning in the tab. |
 | Approvals | `MATRIX_APPROVAL_REQUIRE_SENDER=true` is respected — heddle never renders an approval as actionable if the local user is not the requester. |
-| Tool args | `tool.args` may contain secrets. Redacted in the collapsed preview by a configurable pattern list; never written to the log. |
+| Tool args | `tool.args` may contain secrets, and heddle does **not** redact them — see §10.2. They are rendered as the agent sent them, and are not written to the log. |
 | Untrusted markdown | Rendered as text. No shell-escape passthrough, no OSC-8 links to non-`https` schemes, no automatic image fetch from unencrypted rooms. |
 | Logging | `tracing` to `$XDG_STATE_HOME/heddle/heddle.log`, tokens and keys filtered at the subscriber layer. |
 
@@ -535,7 +538,7 @@ The Matrix SDK ones are the expensive ones:
 | Wire key is `dev.heddle.agent.v1` | Renamed from `dev.hermes.agent.v1`, which is still read for compatibility. |
 | Secret redaction in `tool.args` is not heddle's job | The agents handle it. A client-side scrubber would be security theatre over data the agent already chose to send. |
 | No close-tab | Tabs are rooms. There is no way to open one, so closing is a trapdoor. |
-| Only EAW=Wide glyphs in the UI | Everything else mismeasures across terminals. Unread badges are ASCII `(3)` / `(@3)` for the same reason. |
+| Every glyph is measured as it is painted | The hazard is *disagreement* between `unicode-width` and the terminal, not narrowness. Wide emoji measure two and paint two; text-presentation symbols and box drawing measure one and paint one. What is banned is a codepoint terminals promote to emoji presentation — `⚠` was the `Blocked` badge until it was not. The table is `heddle_render::glyphs::PRINTED`, and the doctor probes all of it. Unread badges are ASCII `(3)` / `(@3)` for the same reason. |
 | No real homeserver in docs or tests | `example.org` throughout. |
 | Mentions ride in `m.mentions`, not in the body text | It is what the push rules read since spec v1.7, and what an agent waiting to be called actually sees. |
 | Enter takes the completion when the mention picker is open | What every client with an autocomplete does. `esc` first sends the text as written. |

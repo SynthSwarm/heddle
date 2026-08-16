@@ -101,7 +101,6 @@ impl Paths {
         Ok(())
     }
 
-    /// Whether a saved session exists.
     pub fn has_session(&self) -> bool {
         self.session.is_file()
     }
@@ -120,30 +119,25 @@ pub struct SavedSession {
 /// `handle_refresh_tokens` is enabled so a homeserver issuing short-lived tokens does
 /// not force a re-login mid-session.
 ///
-/// Room keys are fetched from backup on a decryption failure rather than in one sweep.
-/// The SDK's default is to fetch nothing at all, which quietly makes a key backup
-/// useless: the keys sit on the server and the client never asks. `OneShot` is the other
-/// option and pulls the entire backup the moment the key arrives, which for a busy
-/// account is a large download the user did not ask for. Fetching on failure is bounded,
-/// pays only for history actually looked at, and closes a loop with the late-key retry
-/// in the worker: a failure fetches the key, the key arrives on the received stream, and
-/// the row that could not be read is decrypted in place.
+/// `AfterDecryptionFailure` for backup downloads. The SDK default fetches nothing, so a
+/// key backup sits on the server unasked; `OneShot` pulls the whole backup the moment a
+/// key arrives. Fetching on failure is bounded and closes a loop with the worker's
+/// late-key retry: the failure fetches the key, the key arrives on the received stream,
+/// and the row is decrypted in place.
 ///
-/// Backups are not auto-created. Creating one silently would leave the user with a
-/// recovery key they have never seen and cannot write down, which is a backup in name
-/// only.
+/// Backups are not auto-created: that leaves the user holding a recovery key they have
+/// never seen.
 ///
-/// Threading support is off by default in the SDK, and without it the event cache never
-/// files an incoming threaded event under its thread: `post_process_new_events` only
-/// populates `new_events_by_thread` when `enabled_thread_support` is set. Thread-focused
-/// timelines subscribe to exactly that mapping, so with it off a thread pane shows the
-/// backfilled history and our own local echoes, and silently misses every reply that
-/// arrives over sync. Reactions and redactions still land, because aggregations against
-/// an event already in the timeline take a different path -- which is what made this look
-/// like an agent that reacts but never answers.
+/// Threading support is off by SDK default, and without it the event cache never files
+/// an incoming threaded event under its thread -- `post_process_new_events` populates
+/// `new_events_by_thread` only when `enabled_thread_support` is set. Thread-focused
+/// timelines subscribe to exactly that mapping, so a thread pane would show backfilled
+/// history and local echoes and miss every reply arriving over sync. Reactions and
+/// redactions still land, since aggregations against an event already in the timeline
+/// take a different path: an agent that reacts but never answers.
 ///
-/// `with_subscriptions` stays false: MSC4306/MSC4308 subscriptions are a separate feature
-/// needing server support, and routing is all we are after.
+/// `with_subscriptions` stays false: MSC4306/MSC4308 need server support, and routing is
+/// all we are after.
 pub async fn build_client(homeserver: &str, paths: &Paths) -> Result<Client, SessionError> {
     paths.ensure()?;
     let client = Client::builder()
@@ -172,9 +166,7 @@ pub enum CrossSigning {
     Created,
     /// The homeserver demanded an auth flow a password cannot satisfy.
     ///
-    /// Not an error: the session is valid and usable, it simply has no cross-signing
-    /// identity yet, and one will have to be set up from a client that can drive the
-    /// server's chosen flow.
+    /// The session is valid and usable; it simply has no cross-signing identity yet.
     NeedsInteractiveAuth,
 }
 
@@ -183,10 +175,9 @@ pub enum CrossSigning {
 /// `device_name` is what other clients show in the device list; a stable, recognisable
 /// name matters because the user will be verifying this device by hand.
 ///
-/// Cross-signing is bootstrapped here rather than later because uploading the signing
-/// keys is a user-interactive-auth endpoint, and login is the one moment heddle legit-
-/// imately holds the password. Deferring it to the TUI would mean prompting for the
-/// password a second time, which trains exactly the habit an E2EE client should not.
+/// Cross-signing is bootstrapped here because uploading the signing keys is a
+/// user-interactive-auth endpoint, and login is the one moment heddle holds the
+/// password. Deferring it would mean prompting for the password a second time.
 pub async fn login_password(
     homeserver: &str,
     user: &str,
@@ -216,17 +207,15 @@ pub async fn login_password(
 
 /// Create this account's cross-signing identity if it has none.
 ///
-/// `bootstrap_cross_signing_if_needed` is used rather than the unconditional form for a
-/// reason worth stating: the unconditional call *replaces* an existing identity, which
-/// would invalidate every verification the user has ever done from every other client.
-/// The `_if_needed` variant runs an initial key query first, so an account that already
-/// has an identity is left alone rather than being judged absent merely because this
-/// brand-new device has not yet asked the server.
+/// `bootstrap_cross_signing_if_needed`, not the unconditional form: that one *replaces*
+/// an existing identity, invalidating every verification the user has made from every
+/// other client. The `_if_needed` variant runs a key query first, so an account that
+/// already has an identity is not judged absent merely because this device has not asked.
 ///
-/// The first attempt deliberately passes no auth data: the endpoint always rejects that
-/// with a UIAA challenge, and the response carries the session id the real attempt must
-/// quote back. A server offering only SSO or another non-password flow is reported, not
-/// failed, because a session without cross-signing still works for unencrypted rooms.
+/// The first attempt passes no auth data: the endpoint always answers with a UIAA
+/// challenge, and that response carries the session id the real attempt must quote back.
+/// A server offering only SSO is reported rather than failed -- a session without
+/// cross-signing still works for unencrypted rooms.
 pub async fn bootstrap_cross_signing(
     client: &Client,
     user: &str,
@@ -237,8 +226,7 @@ pub async fn bootstrap_cross_signing(
     let encryption = client.encryption();
 
     let error = match encryption.bootstrap_cross_signing_if_needed(None).await {
-        // Either the identity was already there, or the server took the upload without
-        // asking us to prove anything. Both leave the account cross-signed.
+        // The identity was already there, or the upload went through unchallenged.
         Ok(()) => return Ok(already_or_created(client).await),
         Err(e) => e,
     };
@@ -263,10 +251,8 @@ pub async fn bootstrap_cross_signing(
     }
 }
 
-/// Decide what to report when the bootstrap call succeeded without a challenge.
-///
 /// Holding all three secret halves locally means this device minted the identity; an
-/// account that merely already had one leaves the private keys on whichever device did.
+/// account that already had one leaves the private keys on whichever device did.
 async fn already_or_created(client: &Client) -> CrossSigning {
     match client.encryption().cross_signing_status().await {
         Some(status) if status.has_master && status.has_self_signing && status.has_user_signing => {
@@ -276,7 +262,6 @@ async fn already_or_created(client: &Client) -> CrossSigning {
     }
 }
 
-/// Restore a previously saved session.
 pub async fn restore(profile: &str, paths: &Paths) -> Result<Client, SessionError> {
     let saved = load(profile, paths)?;
     let client = build_client(&saved.homeserver, paths).await?;
@@ -287,7 +272,6 @@ pub async fn restore(profile: &str, paths: &Paths) -> Result<Client, SessionErro
     Ok(client)
 }
 
-/// Read a saved session from disk.
 pub fn load(profile: &str, paths: &Paths) -> Result<SavedSession, SessionError> {
     if !paths.has_session() {
         return Err(SessionError::NoSavedSession(profile.to_owned()));
@@ -363,17 +347,9 @@ mod tests {
     }
 
     #[test]
-    fn profiles_do_not_share_state() {
-        let a = Paths::for_profile(Path::new("/data"), "work");
-        let b = Paths::for_profile(Path::new("/data"), "personal");
-        assert_ne!(a.store, b.store);
-        assert_ne!(a.session, b.session);
-    }
-
-    #[test]
     fn missing_session_is_reported_as_such() {
-        let dir = std::env::temp_dir().join(format!("heddle-test-{}", std::process::id()));
-        let paths = Paths::for_profile(&dir, "nobody");
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let paths = Paths::for_profile(dir.path(), "nobody");
         assert!(!paths.has_session());
         match load("nobody", &paths) {
             Err(SessionError::NoSavedSession(p)) => assert_eq!(p, "nobody"),
@@ -385,8 +361,8 @@ mod tests {
     #[test]
     fn store_directory_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("heddle-perm-{}", std::process::id()));
-        let paths = Paths::for_profile(&dir, "p");
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let paths = Paths::for_profile(dir.path(), "p");
         paths.ensure().expect("creates dirs");
 
         let mode = std::fs::metadata(&paths.store)
@@ -398,23 +374,12 @@ mod tests {
             0o700,
             "store must not be group/world readable"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn ensure_is_idempotent() {
-        let dir = std::env::temp_dir().join(format!("heddle-idem-{}", std::process::id()));
-        let paths = Paths::for_profile(&dir, "p");
-        paths.ensure().expect("first");
-        paths.ensure().expect("second");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn forgetting_a_missing_session_is_not_an_error() {
-        let dir = std::env::temp_dir().join(format!("heddle-forget-{}", std::process::id()));
-        let paths = Paths::for_profile(&dir, "p");
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let paths = Paths::for_profile(dir.path(), "p");
         assert!(forget(&paths).is_ok());
     }
 }

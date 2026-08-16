@@ -432,16 +432,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bstr"
-version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f7dc094d718f2e1c1559ad110e27eeaae14a5465d3d56dd6dbd793079fbd530"
-dependencies = [
- "memchr",
- "serde_core",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1638,6 +1628,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
@@ -1656,6 +1647,7 @@ dependencies = [
  "ratatui-hypertile",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tracing",
 ]
@@ -1671,6 +1663,7 @@ dependencies = [
  "matrix-sdk-ui",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -1683,7 +1676,7 @@ dependencies = [
  "heddle-agent",
  "heddle-matrix",
  "ratatui",
- "similar",
+ "serde_json",
  "tracing",
  "tui-markdown",
  "unicode-width",
@@ -4358,15 +4351,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "similar"
-version = "3.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6505efef05804732ed8a3f2d4f279429eb485bd69d5b0cc6b19cc02005cda16"
-dependencies = [
- "bstr",
-]
-
-[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4563,6 +4547,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

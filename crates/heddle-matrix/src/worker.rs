@@ -38,7 +38,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// How many events to request per pagination step.
 const PAGINATE_BATCH: u16 = 40;
 
 /// How many times to ask for a page before giving a pane up as empty.
@@ -58,6 +57,27 @@ const EVENT_BUFFER: usize = 512;
 /// How many rooms the sliding sync list holds.
 const ROOM_LIST_PAGE: usize = 500;
 
+/// How long [`Handle::shutdown`] waits for the worker before abandoning it.
+///
+/// Long enough for an in-flight request to finish, short enough that a wedged worker
+/// does not hold the terminal after the user has asked to quit.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What became of a command handed to [`Handle::send`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Dispatch {
+    Queued,
+    /// The worker is alive but its queue was full, so the command was discarded.
+    ///
+    /// Distinct from [`Dispatch::Stopped`], which is fatal: this one is worth a status
+    /// line, not a shutdown. Reported rather than swallowed because a discarded
+    /// `SendMessage` is a message the user typed and watched disappear.
+    Dropped,
+    /// The worker has stopped. Nothing further will be delivered.
+    Stopped,
+}
+
 /// The app-side handle to the worker.
 pub struct Handle {
     commands: mpsc::Sender<Command>,
@@ -66,15 +86,21 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Queue a command. Returns `false` once the worker has stopped.
-    pub fn send(&self, command: Command) -> bool {
+    /// Queue a command.
+    ///
+    /// Never blocks: this is called from the render loop, where awaiting the worker
+    /// would be a frame spent not drawing.
+    pub fn send(&self, command: Command) -> Dispatch {
+        // Named, never logged whole: `Command`'s `Debug` carries message bodies, and
+        // writing decrypted content to a log is what `capture` is gated to avoid.
+        let kind = command.kind();
         match self.commands.try_send(command) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(c)) => {
-                tracing::warn!(?c, "worker command buffer full; dropping");
-                true
+            Ok(()) => Dispatch::Queued,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(kind, "worker command buffer full; dropping");
+                Dispatch::Dropped
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Err(mpsc::error::TrySendError::Closed(_)) => Dispatch::Stopped,
         }
     }
 
@@ -98,11 +124,27 @@ impl Handle {
         self.events.recv().await
     }
 
-    /// Ask the worker to stop, and wait for it.
-    pub async fn shutdown(self) {
+    pub async fn shutdown(mut self) {
         let _ = self.commands.send(Command::Shutdown).await;
         drop(self.commands);
-        let _ = self.task.await;
+
+        // Close the event channel before joining. Nothing drains it past this point --
+        // the event loop has returned -- and the worker sends into it with `.await` in
+        // about twenty-five places, so a full buffer would park the worker in `send`
+        // and the join below would wait for a task waiting on us. `close` wakes those
+        // senders with an error, so the worker unwinds through its normal paths rather
+        // than being cut off mid-command.
+        self.events.close();
+
+        // Bounded even so: `Shutdown` involves the network, and a homeserver that has
+        // stopped answering must not become a client that will not exit.
+        if tokio::time::timeout(SHUTDOWN_GRACE, &mut self.task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("matrix worker did not stop within the grace period; abandoning it");
+            self.task.abort();
+        }
     }
 }
 
@@ -185,11 +227,9 @@ impl Drop for DriverTask {
 
 impl Worker {
     async fn run(&mut self, mut commands: mpsc::Receiver<Command>) -> anyhow::Result<()> {
-        // Subscribe *before* starting. `SyncService::state()` hands out an eyeball
-        // subscription that only yields transitions happening after it is created, so
-        // starting first races the Idle -> Running edge. Losing that edge leaves the
-        // status line stuck on "syncing…" for the whole session even though sync is
-        // healthy and rooms are arriving.
+        // Subscribe *before* starting: `SyncService::state()` yields only transitions
+        // after the subscription is created, so starting first races the
+        // Idle -> Running edge and leaves the status line stuck on "syncing…".
         let mut sync_state = self.sync_service.state();
 
         self.sync_service.start().await;
@@ -208,9 +248,9 @@ impl Worker {
         controller.set_filter(Box::new(|_| true));
         pin_mut!(room_stream);
 
-        // Verification requests arrive as to-device events, which the timeline never
-        // sees, so they need their own listener. The handler cannot touch the worker --
-        // it runs on the sync task -- so it hands the request over a channel instead.
+        // Verification requests are to-device events, which no timeline sees. The
+        // handler runs on the sync task and cannot touch the worker, so it hands the
+        // request over a channel.
         let (verify_tx, mut verify_rx) = mpsc::channel::<VerificationRequest>(4);
         let handler = self.client.add_event_handler({
             let tx = verify_tx.clone();
@@ -232,10 +272,8 @@ impl Worker {
         self.watch_recovery_state();
 
         // Late-arriving room keys. Without this the "unable to decrypt" placeholder is
-        // terminal: the key turns up, the store accepts it, and the row keeps saying it
-        // cannot be read until heddle is restarted. That is the failure that makes
-        // verification and key backup look broken when they are working -- the fix
-        // arrives and the screen goes on lying about it.
+        // terminal: the key arrives, the store accepts it, and the row goes on saying
+        // it cannot be read until heddle restarts.
         let mut room_keys = match self.client.encryption().room_keys_received_stream().await {
             Some(stream) => Box::pin(stream),
             None => {
@@ -278,9 +316,8 @@ impl Worker {
                                 .collect();
                             self.retry_decryption(pairs).await;
                         }
-                        // Lagging only means we missed which keys arrived, not that they
-                        // did not. There is no public way to ask for a blanket retry, so
-                        // say so rather than silently doing nothing.
+                        // Lagging means we missed *which* keys arrived. There is no
+                        // public blanket retry, so report the gap.
                         Err(skipped) => {
                             tracing::warn!(?skipped, "lagged behind room key updates");
                             self.report_lost_key_updates().await;
@@ -320,16 +357,12 @@ impl Worker {
 
     /// Tell the app whether this device is verified, and keep telling it.
     ///
-    /// `Device::is_verified` is the wrong question to ask about our own device: it is
+    /// `Device::is_verified` is the wrong question for our own device: it is
     /// `is_locally_trusted() || is_cross_signing_trusted()`, and a device always trusts
-    /// itself locally, so it answers `true` for this device no matter what. Asking it
-    /// produced a heddle that announced "already verified" while the server held no
-    /// signature for the device at all, and refused to start the very flow that would
-    /// have fixed that.
-    ///
-    /// `verification_state()` asks the question that matters -- has our own user identity
-    /// signed this device -- and is a stream, so the answer stays current when a
-    /// verification completes elsewhere.
+    /// itself locally, so it answers `true` regardless of what the server holds.
+    /// `verification_state()` asks whether our own user identity has signed this device,
+    /// and is a stream, so the answer stays current when a verification completes
+    /// elsewhere.
     fn watch_verification_state(&mut self) {
         use matrix_sdk::encryption::VerificationState;
 
@@ -389,11 +422,9 @@ impl Worker {
                 }
                 // A pagination that adds nothing produces no diff, so the subscriber
                 // stays silent -- and the app clears its in-flight flag on snapshots.
-                // Left to that alone the flag leaks, and because the flag is what
-                // suppresses duplicate requests, every later pagination for the view is
-                // silently dropped: scrolling up stops loading history until some
-                // unrelated event happens to produce a snapshot. Emit one ourselves,
-                // including on failure, so the flag always clears.
+                // Without one the flag leaks, and it is what suppresses duplicate
+                // requests, so every later pagination for the view is dropped. Emitted
+                // here on failure too.
                 let entries = convert(timeline.items().await.iter(), &self.agents);
                 let _ = self
                     .events
@@ -484,8 +515,7 @@ impl Worker {
                 event_id,
                 key,
             } => {
-                // Approvals and the model picker both ride on reactions, so this is a
-                // hot path, not a nicety.
+                // Approvals and the model picker both ride on reactions.
                 let timeline = self.timeline(&view)?;
                 let event_id = EventId::parse(event_id.as_str())?;
                 let item = timeline
@@ -506,15 +536,11 @@ impl Worker {
                 // see `receipt_target` for what that got wrong.
                 let items = timeline.items().await;
                 if let Some(event_id) = receipt_target(items.iter(), &view) {
-                    // Still the SDK's `send_single_receipt`, because the two things it
-                    // does get right are worth keeping: it infers the receipt's thread
-                    // from the timeline's focus, and it drops the request entirely when
-                    // an existing receipt already covers the event.
-                    //
-                    // A receipt is a courtesy to other people in the room. If the server
-                    // refuses it there is nothing the user can do and nothing they need
-                    // to know, so it does not travel back as a command failure -- which
-                    // is how a raw Synapse 400 ended up in the status line.
+                    // `send_single_receipt` infers the receipt's thread from the
+                    // timeline's focus and drops the request when an existing receipt
+                    // already covers the event. A refusal is not reported: the user can
+                    // do nothing about it, and a raw Synapse 400 in the status line is
+                    // worse than silence.
                     if let Err(e) = timeline
                         .send_single_receipt(ReceiptType::Read, event_id)
                         .await
@@ -539,32 +565,24 @@ impl Worker {
             }
 
             Command::MismatchVerification => {
-                // Reported as a mismatch rather than a cancel. The distinction is the
-                // whole point of the flow: a cancel means someone changed their mind, a
-                // mismatch means the keys did not agree and the other side should be
-                // told loudly.
+                // A mismatch, not a cancel: the other side needs to know the keys
+                // disagreed rather than that someone changed their mind.
                 self.sas().await?.mismatch().await?;
             }
 
             Command::RecoverWithKey(key) => {
-                // Trimmed because a recovery key is something the user copies out of a
-                // password manager or types from paper, and a trailing space or newline
-                // is not a wrong key -- refusing it as one would send them hunting for a
-                // mistake they did not make.
+                // Recovery keys are pasted from password managers or typed from
+                // paper; trailing whitespace is not a wrong key.
                 let key = key.trim();
                 if key.is_empty() {
                     anyhow::bail!("no recovery key given");
                 }
-                // Not `?`: a wrong key is an ordinary answer to a question we asked,
-                // not a command that failed, and the prompt needs to hear about it
-                // specifically so it can ask again.
+                // Not `?`: the prompt needs this specifically so it can ask again.
                 let recovery = self.client.encryption().recovery();
                 match recovery.recover(key).await {
                     Ok(()) => {
-                        // Reported explicitly rather than left to the state stream. If
-                        // the state was already what it ends up as, the stream has no
-                        // change to publish, and the prompt would wait for an event that
-                        // is never coming.
+                        // The state stream publishes changes only, so a state that was
+                        // already correct would leave the prompt waiting for ever.
                         let _ = self
                             .events
                             .send(WorkerEvent::Recovery(map_recovery(recovery.state())))
@@ -634,10 +652,8 @@ impl Worker {
 
     /// Ask this account's other devices to verify this one.
     ///
-    /// The request goes to the user identity rather than to one named device, so every
-    /// other device the user owns can answer it. Sending to a single device would mean
-    /// picking one on the user's behalf, and the phone in their pocket is a better
-    /// choice than any heuristic we could write.
+    /// Sent to the user identity rather than one named device, so any device the user
+    /// owns can answer.
     async fn start_verification(&mut self) -> anyhow::Result<()> {
         let user_id = self
             .client
@@ -661,12 +677,10 @@ impl Worker {
 
     /// Watch a verification request through to its end, reporting each step.
     ///
-    /// Driven on its own task because the flow is a conversation with a human at the far
-    /// end: it can sit at any step for minutes, and the worker loop must stay responsive
-    /// to everything else while it does.
+    /// Its own task: there is a human at the far end, so any step can take minutes.
     fn drive_verification(&mut self, request: VerificationRequest) {
-        // Only one at a time. A second flow would put two sets of emoji on screen, and a
-        // user who confirms the wrong one has verified an attacker.
+        // One at a time: two sets of emoji on screen means a user can confirm the
+        // wrong one and verify an attacker.
         self.verification_driver.take();
 
         self.verification = Some(request.clone());
@@ -684,8 +698,8 @@ impl Worker {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no verification in progress"))?;
 
-        // Looked up rather than held: the SAS is created inside the flow, on the driver
-        // task, and the store is the one place both sides can agree on what it is.
+        // The SAS is created on the driver task, so the store is the only place both
+        // sides can agree on what it is.
         match self
             .client
             .encryption()
@@ -722,13 +736,11 @@ impl Worker {
         }
     }
 
-    /// Retry every open timeline, for when we no longer know which keys arrived.
+    /// Report that keys arrived which we can no longer identify.
     ///
-    /// There is no public "retry everything": `retry_decryption` takes session ids, and
-    /// an empty list retries nothing at all. So this reports the gap rather than
-    /// pretending to close it. Lagging means the broadcast buffer overflowed, which
-    /// takes a flood of keys, and saying so plainly is better than a silent no-op that
-    /// leaves the user wondering why a message never came back.
+    /// There is no public "retry everything": `retry_decryption` takes session ids and
+    /// an empty list retries nothing. Lagging means the broadcast buffer overflowed,
+    /// which takes a flood of keys.
     async fn report_lost_key_updates(&self) {
         let _ = self
             .events
@@ -811,28 +823,22 @@ impl Worker {
             emit(initial).await;
 
             while stream.next().await.is_some() {
-                // A snapshot rather than an incremental patch. The SDK has already done
-                // the hard part -- resolving the edit chain and reaction aggregation
-                // into stable item identities -- so rebuilding the view is cheap
-                // relative to reimplementing VectorDiff application, and cannot drift.
+                // A whole snapshot: the SDK has already resolved edit chains and
+                // reaction aggregation into stable item identities, so rebuilding is
+                // cheap next to applying VectorDiffs, and cannot drift.
                 let items = forward_timeline.items().await;
                 let entries = convert(items.iter(), &agents);
-                // `messages` rather than a second count of the same thing. `convert` is
-                // one entry per item, so `items` and `entries` were always equal and the
-                // pair could not distinguish anything, whatever the old comment claimed.
-                // What a reader of this log actually wants to know is whether the pane
-                // has anything to read, which dividers, markers and notices do not
-                // answer. A pane of thirty items and no messages is the shape of a room
-                // whose recent history is all threaded, and that took a second bug to
-                // notice for want of this number.
+                // `messages`, not a second count of the items: they are equal by
+                // construction. A pane of thirty items and no messages is the shape of a
+                // room whose recent history is all threaded, and that took a second bug
+                // to notice for want of this number.
                 tracing::debug!(
                     view = ?forward_view,
                     items = items.len(),
                     messages = messages(&entries),
                     "timeline snapshot"
                 );
-                // At trace level, say what is actually in the snapshot. Counts alone
-                // cannot distinguish "the event never arrived" from "it arrived as
+                // Counts alone cannot distinguish "never arrived" from "arrived as
                 // something unexpected".
                 if tracing::enabled!(tracing::Level::TRACE) {
                     for (i, entry) in entries.iter().enumerate() {
@@ -858,8 +864,8 @@ impl Worker {
                         // thread as much as for a room. Its diffs wake this same loop,
                         // and the snapshot that follows is the one the app gets.
                         if let Err(e) = forward_timeline.paginate_backwards(PAGINATE_BATCH).await {
-                            // Not fatal, and not worth a status line: the pane keeps
-                            // what it had, and the next live event refills it anyway.
+                            // The pane keeps what it had, and the next live event
+                            // refills it.
                             tracing::warn!(
                                 view = ?forward_view,
                                 error = %e,
@@ -901,12 +907,8 @@ fn messages(entries: &[Entry]) -> usize {
 /// - A room pane hides threaded events, so a page that is entirely thread replies adds
 ///   nothing it can draw. In an agent room that is the normal shape of recent history.
 ///
-/// This is why the Commons pane came up blank at startup while its two thread panes
-/// filled at once: the saved layout puts the room pane first, so its pagination ran
-/// first, returned in under 300 ms, and brought back nothing the pane could show. Thread
-/// panes go straight to `/relations` and have neither behaviour.
-///
-/// A pane that already has content asks once, exactly as before.
+/// Thread panes go straight to `/relations` and have neither behaviour. A pane that
+/// already has content asks once.
 fn keep_paginating(attempt: u8, shown: usize, reached_start: bool) -> bool {
     shown == 0 && !reached_start && attempt < PAGINATE_ATTEMPTS
 }
@@ -932,15 +934,11 @@ enum Snapshot {
 /// publishes a snapshot of nothing, within milliseconds of each other, and nothing
 /// refills them until something asks for a page.
 ///
-/// Forwarded verbatim, that empties every pane at once -- which is bug 2.1, and why it
-/// looked like reacting caused it: the react merely happened to be what the user was
-/// doing when a gappy sync landed.
-///
-/// So an empty snapshot for a view that was showing something is treated as the
-/// invalidation it is, and answered with a back-pagination rather than passed on. The
-/// cost of being wrong is a pane that keeps its transcript after a room genuinely
-/// emptied; that needs the room to be left, since redaction leaves entries behind, and
-/// a pane of a room you have left is not worth blanking a working client for.
+/// Forwarded verbatim, that empties every pane at once. So an empty snapshot for a view
+/// that was showing something is treated as the invalidation it is and answered with a
+/// back-pagination. The cost of being wrong is a pane that keeps its transcript after a
+/// room genuinely emptied, which needs the room to be left -- redaction leaves entries
+/// behind.
 fn classify(snapshot: usize, showing: usize, refilling: bool) -> Snapshot {
     if snapshot > 0 || showing == 0 {
         Snapshot::Show
@@ -957,19 +955,17 @@ fn classify(snapshot: usize, showing: usize, refilling: bool) -> Snapshot {
 /// `[400 / M_INVALID_PARAM] event_id $… is not related to thread main`, and heddle
 /// reported it as a command failure, so a raw Synapse error landed in the status line.
 ///
-/// The SDK does try. For a live timeline built with `hide_threaded_events`, it sends the
-/// receipt against `main` and skips events it knows are in a thread. But it also has to
-/// skip *aggregations of* in-thread events -- a reaction carries no thread relation of
-/// its own, so it looks unthreaded until you resolve its target -- and that resolution
-/// needs the target still present in the timeline's remote events. After a gappy sync
-/// unloads the room's chunk (§2.1) it is not, the reaction is taken for a main-timeline
-/// event, and the server disagrees.
+/// For a live timeline with `hide_threaded_events` the SDK sends the receipt against
+/// `main` and skips events it knows are threaded -- but it must also skip *aggregations
+/// of* threaded events, and a reaction carries no thread relation of its own, so it
+/// looks unthreaded until its target is resolved. That resolution needs the target still
+/// in the timeline's remote events, and after a gappy sync unloads the room's chunk
+/// (§2.1) it is not.
 ///
-/// heddle does not need to reconstruct any of that, because a view already answers the
-/// question. Its entries are the events it displays: the room pane hides threaded events,
-/// and a thread pane shows one thread. Picking from what was drawn makes the receipt
-/// consistent with the pane by construction, and reactions never appear here at all --
-/// they are folded into the message they annotate.
+/// A view already answers the question: its entries are the events it displays, the room
+/// pane hides threaded events, and a thread pane shows one thread. Picking from what was
+/// drawn makes the receipt consistent with the pane by construction, and reactions never
+/// appear here -- they are folded into the message they annotate.
 fn receipt_target<'a>(
     items: impl DoubleEndedIterator<Item = &'a Arc<matrix_sdk_ui::timeline::TimelineItem>>,
     view: &View,
@@ -1047,10 +1043,8 @@ async fn collect_threads(room: &Room) -> anyhow::Result<Vec<ThreadSummary>> {
 
 /// Fetch the room's joined members for the mention picker.
 ///
-/// Joined only: mentioning someone who has left notifies nobody, so offering them would
-/// be offering a dead end. `members` rather than `members_no_sync` because a room whose
-/// member list was lazily loaded has nothing in the store yet, and a picker that is
-/// empty until some unrelated event fills it is worse than one that takes a moment.
+/// Joined only: mentioning someone who has left notifies nobody. `members` rather than
+/// `members_no_sync`, because a lazily loaded member list has nothing in the store yet.
 async fn collect_members(room: &Room) -> anyhow::Result<Vec<MemberSummary>> {
     use matrix_sdk::RoomMemberships;
 
@@ -1061,8 +1055,7 @@ async fn collect_members(room: &Room) -> anyhow::Result<Vec<MemberSummary>> {
         .map(|member| MemberSummary {
             user_id: member.user_id().to_string(),
             display_name: member.name().to_owned(),
-            // The SDK has already worked out who collides with whom across the whole
-            // room, which is not a judgement worth re-deriving from a partial list.
+            // The SDK computes ambiguity across the whole room; a partial list cannot.
             ambiguous: member.name_ambiguous(),
         })
         .collect();
@@ -1080,14 +1073,11 @@ async fn collect_members(room: &Room) -> anyhow::Result<Vec<MemberSummary>> {
 
 /// Build message content that mentions `mentions`.
 ///
-/// The user IDs travel in `m.mentions`, not in the text. Since spec v1.7 that field is
-/// what the push rules read, so a body containing `@someone` and nothing else notifies
-/// nobody -- and an agent waiting to be called never hears. heddle writes both: the name
-/// in the body because a transcript should read like one, and the ID in `m.mentions`
-/// because that is the part that means anything.
+/// Since spec v1.7 the push rules read `m.mentions`, so a body containing `@someone` and
+/// nothing else notifies nobody and an agent waiting to be called never hears. Both are
+/// written: the name in the body for readability, the ID in `m.mentions` for delivery.
 ///
-/// An unparseable user ID fails the send rather than being dropped. Silently sending a
-/// message whose mention does not work is the failure mode this function exists to stop.
+/// An unparseable user ID fails the send rather than being dropped.
 fn mention(body: &str, mentions: &[String]) -> anyhow::Result<RoomMessageEventContent> {
     use matrix_sdk::ruma::{events::Mentions, UserId};
 
@@ -1149,8 +1139,7 @@ async fn space_parents(client: &Client) -> HashMap<String, Vec<String>> {
 
 /// Build the room list the app renders.
 async fn collect_rooms(client: &Client) -> Vec<RoomSummary> {
-    // Gathered once for the whole list: every room needs to know its Spaces, and asking
-    // per room would re-read the same Space state once per member.
+    // Once for the whole list: per room would re-read the same Space state per member.
     let parents = space_parents(client).await;
 
     let mut out = Vec::new();
@@ -1225,8 +1214,8 @@ fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem, agents: &Adapters)
                     is_own: event.is_own(),
                     is_edited: message.is_edited(),
                     thread_root: msg_like.thread_root.as_ref().map(ToString::to_string),
-                    // The room timeline hides threaded events, so this summary is the
-                    // only sign from inside the room that a thread exists at all.
+                    // The room timeline hides threaded events, so this is the only
+                    // sign from inside the room that a thread exists.
                     thread_replies: msg_like.thread_summary.as_ref().map(|t| t.num_replies),
                     reactions: msg_like
                         .reactions
@@ -1247,20 +1236,17 @@ fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem, agents: &Adapters)
     Entry { id, event_id, kind }
 }
 
-/// One-line description of an entry, for trace logging.
 /// Follow one verification request from start to finish, reporting each step.
 ///
-/// Two things happen here that the user never sees and must not have to think about.
+/// Two protocol steps happen here without asking the user.
 ///
-/// When the request becomes ready, someone has to actually start the SAS flow. Both
-/// sides are allowed to, and the spec resolves the tie, so heddle starts it rather than
-/// waiting: a client that waits politely for the other side to move is a client that
-/// hangs when the other side is doing the same.
+/// Once the request is ready someone must start the SAS flow. Both sides may, and the
+/// spec resolves the tie, so heddle starts rather than waits -- two waiting clients
+/// hang.
 ///
-/// When the flow arrives having been started by the other device, it needs accepting
-/// before any keys are exchanged. That accept is a protocol step, not a decision the
-/// user is making -- the decision comes later, when they compare the emoji -- so asking
-/// them here would be asking them to approve something they have not been shown yet.
+/// A flow started by the other device needs accepting before keys are exchanged. That
+/// accept is a protocol step; the user's decision comes later, when they compare the
+/// emoji.
 async fn drive(request: VerificationRequest, events: mpsc::Sender<WorkerEvent>) {
     use matrix_sdk::encryption::verification::VerificationRequestState;
 
@@ -1280,7 +1266,7 @@ async fn drive(request: VerificationRequest, events: mpsc::Sender<WorkerEvent>) 
     let mut state = Some(request.state());
 
     loop {
-        let Some(current) = state.take().or(None) else {
+        let Some(current) = state.take() else {
             break;
         };
 
@@ -1381,9 +1367,8 @@ async fn drive_sas(
                 .await;
             }
             SasState::KeysExchanged { emojis, .. } => {
-                // Emoji, not decimals. Both are offered by the protocol, but comparing
-                // seven pictures across a room is something people do reliably and
-                // comparing three five-digit numbers is not.
+                // The protocol offers decimals too; seven pictures are compared across
+                // a room more reliably than three five-digit numbers.
                 let Some(short) = emojis else {
                     let _ = sas.cancel().await;
                     emit(Verification::Cancelled {
@@ -1428,11 +1413,10 @@ async fn drive_sas(
 
 /// What the SDK makes of this event's authenticity.
 ///
-/// `strict` is false, which is the setting Element and the SDK's own callers use: the
-/// strict variant also shields messages from devices that are merely unsigned by a
-/// sender whose identity we have never verified, which in practice is most senders in
-/// most rooms. A shield on every message is a shield on none -- the user stops reading
-/// them, and the one that matters goes unnoticed.
+/// `strict` is false, as in Element and the SDK's own callers. The strict variant also
+/// shields messages from devices merely unsigned by a sender whose identity we have
+/// never verified, which is most senders in most rooms -- a shield on every message is
+/// read as a shield on none.
 fn shield_of(event: &matrix_sdk_ui::timeline::EventTimelineItem) -> Shield {
     use matrix_sdk_ui::timeline::{
         TimelineEventShieldState as State, TimelineEventShieldStateCode as Code,
@@ -1468,8 +1452,8 @@ fn map_recovery(state: matrix_sdk::encryption::recovery::RecoveryState) -> Recov
 
 /// How to name the device at the other end.
 ///
-/// Its display name if it has one, since that is what the user set and will recognise;
-/// the device ID otherwise, which is at least checkable against the other screen.
+/// Display name if it has one, device ID otherwise -- both are checkable against the
+/// other screen.
 fn device_label(request: &VerificationRequest) -> String {
     match request.state() {
         matrix_sdk::encryption::verification::VerificationRequestState::Requested {
@@ -1513,9 +1497,8 @@ fn describe(entry: &Entry) -> String {
 
 /// Placeholder for a timeline item heddle does not know how to draw.
 ///
-/// Silently rendering nothing is the worst option: the event is on the wire, the user
-/// can see the room has moved on, and heddle shows a gap. A dim line naming the type
-/// makes an unsupported event diagnosable instead of invisible.
+/// The event is on the wire and the user can see the room has moved on, so a gap would
+/// read as a bug. A dim line naming the type is diagnosable.
 fn unrendered(event: &matrix_sdk_ui::timeline::EventTimelineItem, what: &str) -> EntryKind {
     let kind = event_type(event);
     tracing::debug!(event_type = %kind, sender = %event.sender(), "unrendered {what}");
@@ -1599,6 +1582,114 @@ fn decode_agent(
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
+
+    /// The channel halves a `Handle` is built from, without a homeserver behind them.
+    ///
+    /// The worker needs an authenticated `Client`; the parts of `Handle` worth testing
+    /// -- a full queue, and shutdown -- need only the channels.
+    struct Rig {
+        commands: mpsc::Receiver<Command>,
+        events: mpsc::Sender<WorkerEvent>,
+        command_tx: mpsc::Sender<Command>,
+        event_rx: mpsc::Receiver<WorkerEvent>,
+    }
+
+    fn rig(command_buffer: usize, event_buffer: usize) -> Rig {
+        let (command_tx, commands) = mpsc::channel(command_buffer);
+        let (events, event_rx) = mpsc::channel(event_buffer);
+        Rig {
+            commands,
+            events,
+            command_tx,
+            event_rx,
+        }
+    }
+
+    impl Rig {
+        fn handle(self, task: JoinHandle<()>) -> (Handle, mpsc::Receiver<Command>) {
+            (
+                Handle {
+                    commands: self.command_tx,
+                    events: self.event_rx,
+                    task,
+                },
+                self.commands,
+            )
+        }
+    }
+
+    fn idle() -> JoinHandle<()> {
+        tokio::spawn(async {})
+    }
+
+    #[tokio::test]
+    async fn a_dropped_command_is_not_reported_as_sent() {
+        // A discarded `SendMessage` is a message the user typed; the caller has to be
+        // able to tell it from a delivered one.
+        let (handle, _commands) = rig(1, 8).handle(idle());
+
+        assert_eq!(handle.send(Command::Shutdown), Dispatch::Queued);
+        assert_eq!(handle.send(Command::Shutdown), Dispatch::Dropped);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_worker_is_distinguished_from_a_busy_one() {
+        // The caller quits on one and carries on with the other.
+        let (handle, commands) = rig(1, 8).handle(idle());
+        drop(commands);
+
+        assert_eq!(handle.send(Command::Shutdown), Dispatch::Stopped);
+    }
+
+    #[tokio::test]
+    async fn shutdown_returns_even_though_nothing_is_draining_events() {
+        // One slot, and nothing drains it: the state the real channel reaches during
+        // a sync burst, which is when people quit.
+        let rig = rig(4, 1);
+        let events = rig.events.clone();
+
+        let worker = tokio::spawn(async move {
+            // What the real worker does in about twenty-five places: push events and
+            // ignore the result, noticing shutdown only when the send fails.
+            while events
+                .send(WorkerEvent::SyncState(SyncState::Running))
+                .await
+                .is_ok()
+            {}
+        });
+
+        let (handle, _commands) = rig.handle(worker);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown must not wait on a worker that is waiting on it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_gives_up_on_a_worker_that_will_not_stop() {
+        // A homeserver that has stopped answering must not become a client that will
+        // not exit. The clock is paused, so the bound costs no real time.
+        let wedged = tokio::spawn(std::future::pending::<()>());
+        let (handle, _commands) = rig(4, 8).handle(wedged);
+
+        tokio::time::timeout(SHUTDOWN_GRACE * 4, handle.shutdown())
+            .await
+            .expect("shutdown must abandon a worker that will not stop");
+    }
+
+    #[test]
+    fn every_command_can_name_itself_without_quoting_its_payload() {
+        // The log says what was dropped without writing the body to disk.
+        let body = "the plaintext nobody should find in a log file";
+        let command = Command::SendMessage {
+            view: View::room("!r:x"),
+            body: body.into(),
+            mentions: vec![],
+        };
+
+        assert_eq!(command.kind(), "SendMessage");
+        assert!(!command.kind().contains(body));
+    }
 
     #[test]
     fn a_pane_with_something_to_show_asks_for_one_page() {

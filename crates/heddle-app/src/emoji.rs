@@ -12,9 +12,8 @@ pub const MAX_MATCHES: usize = 60;
 
 /// The starting set, before anything is typed.
 ///
-/// A curated shortlist rather than the first sixty of the full table, which is smileys in
-/// codepoint order and no use to anyone. These are what a chat about work actually uses;
-/// searching reaches the rest.
+/// Curated: the first sixty of the full table are smileys in codepoint order. Searching
+/// reaches the rest.
 const COMMON: &[&str] = &[
     "👍", "👎", "✅", "❌", "🎉", "🚀", "🔥", "👀", "🤔", "🙏", "💯", "😄", "😂", "😅", "🙌", "👏",
     "💡", "🐛", "✨", "📌", "⏳", "🧵", "🔧", "📝",
@@ -51,9 +50,9 @@ impl Picker {
 
     /// Recompute the matches for the current query.
     ///
-    /// Matching is a case-insensitive substring of the name or any shortcode, which is
-    /// what makes both "thumb" and "+1" find 👍. Shortcode matches sort first: typing an
-    /// exact shortcode should not be beaten by some longer name that merely contains it.
+    /// Case-insensitive substring of the name or any shortcode, so both "thumb" and
+    /// "+1" find 👍. Shortcode matches sort first, so an exact shortcode is not beaten
+    /// by a longer name containing it.
     pub fn refilter(&mut self) {
         self.selected = 0;
 

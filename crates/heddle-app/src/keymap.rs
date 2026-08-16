@@ -56,11 +56,8 @@ pub enum Action {
     EditMessage,
     RedactMessage,
     OpenThreads,
-    /// Open the emoji picker to react to the selected message.
     ReactToSelected,
-    /// Open the emoji picker to put an emoji in the composer.
     EmojiIntoComposer,
-    /// Ask this account's other devices to verify this one.
     StartVerification,
     /// Unlock secret storage with a recovery key.
     OpenRecovery,
@@ -76,8 +73,7 @@ pub enum Action {
     // Overlays
     ToggleHelp,
 
-    /// Force a full repaint. The conventional terminal escape hatch for a screen that
-    /// has been corrupted by something outside the application's control.
+    /// Force a full repaint, for a screen corrupted from outside the application.
     Redraw,
 
     // Composer
@@ -212,71 +208,67 @@ pub struct Binding {
     /// Keys, without the prefix.
     pub keys: &'static str,
     pub action: &'static str,
-    /// Whether the prefix must be pressed first.
-    pub prefixed: bool,
+    /// The mode the binding is live in.
+    ///
+    /// Not a `prefixed: bool`: `enter` appears in this table twice, meaning "send" in
+    /// Insert and "open the selected message's thread" in Normal, and so does
+    /// `up / down`. Without the mode the overlay cannot say which row is which, and the
+    /// drift test cannot look either up.
+    pub mode: Mode,
 }
 
-/// Shorthand for a table entry.
-const fn b(keys: &'static str, action: &'static str, prefixed: bool) -> Binding {
-    Binding {
-        keys,
-        action,
-        prefixed,
-    }
+const fn b(keys: &'static str, action: &'static str, mode: Mode) -> Binding {
+    Binding { keys, action, mode }
 }
 
 /// Every binding worth documenting, in the order the overlay lists them.
 pub const BINDINGS: &[Binding] = &[
-    b("i", "write a message", false),
-    b("enter", "send", false),
-    b("shift+enter", "newline", false),
-    b("esc", "normal mode", false),
-    b("k / j", "select older / newer message", false),
-    b("r", "reply to the selection", false),
-    b("e", "edit the selection", false),
-    b("D", "delete the selection (twice)", false),
-    b("enter", "open the selected message's thread", false),
-    b("y / n", "approve / deny", false),
-    b("tab", "toggle tool card", false),
-    b("up / down", "scroll a line", false),
-    b("^u / ^d", "half-page scroll", false),
-    b("g / G", "top / bottom", false),
-    b(":", "command palette", false),
-    b("^l", "redraw the screen", false),
-    b("left / right", "move the caret", false),
-    b("^left / ^right", "move a word", false),
-    b("up / down", "line, then history", false),
-    b("^w / ^u", "delete word / to line start", false),
-    b("@", "mention someone, tab or enter to pick", false),
-    b("n / p", "next / prev tab", true),
-    b("| / -", "split right / down", true),
-    b("h j k l", "focus pane", true),
-    b("H J K L", "resize pane", true),
-    b("z", "zoom pane", true),
-    b("x", "close pane (not the last)", true),
-    b("c", "new thread", true),
-    b("t", "thread picker", true),
-    b("e", "emoji into composer", true),
-    b("r", "react to selected", true),
-    b("w / W", "next / prev workspace", true),
-    b("f", "fuzzy jump", true),
-    b("?", "this help", true),
-    b("q", "quit", true),
+    b("i", "write a message", Mode::Normal),
+    b("enter", "send", Mode::Insert),
+    b("shift+enter", "newline", Mode::Insert),
+    b("esc", "normal mode", Mode::Insert),
+    b("k / j", "select older / newer message", Mode::Normal),
+    b("r", "reply to the selection", Mode::Normal),
+    b("e", "edit the selection", Mode::Normal),
+    b("D", "delete the selection (twice)", Mode::Normal),
+    b("enter", "open the selected message's thread", Mode::Normal),
+    b("y / n", "approve / deny", Mode::Normal),
+    b("tab", "toggle tool card", Mode::Normal),
+    b("up / down", "scroll a line", Mode::Normal),
+    b("^u / ^d", "half-page scroll", Mode::Normal),
+    b("g / G", "top / bottom", Mode::Normal),
+    b(":", "command palette", Mode::Normal),
+    b("^l", "redraw the screen", Mode::Normal),
+    b("left / right", "move the caret", Mode::Insert),
+    b("^left / ^right", "move a word", Mode::Insert),
+    b("up / down", "line, then history", Mode::Insert),
+    b("^w / ^u", "delete word / to line start", Mode::Insert),
+    b("@", "mention someone, tab or enter to pick", Mode::Insert),
+    b("n / p", "next / prev tab", Mode::Prefix),
+    b("| / -", "split right / down", Mode::Prefix),
+    b("h j k l", "focus pane", Mode::Prefix),
+    b("H J K L", "resize pane", Mode::Prefix),
+    b("z", "zoom pane", Mode::Prefix),
+    b("x", "close pane (not the last)", Mode::Prefix),
+    b("c", "new thread", Mode::Prefix),
+    b("t", "thread picker", Mode::Prefix),
+    b("e", "emoji into composer", Mode::Prefix),
+    b("r", "react to selected", Mode::Prefix),
+    b("w / W", "next / prev workspace", Mode::Prefix),
+    b("?", "this help", Mode::Prefix),
+    b("q", "quit", Mode::Prefix),
 ];
 
-/// The handful of bindings terse enough for the status bar, most useful first.
+/// The handful of bindings terse enough for the status bar.
 ///
-/// Separate from [`BINDINGS`] because a status bar and a reference table want different
-/// prose: `next / prev tab` reads correctly in the overlay and is far too wide for one
-/// line beside four others. The overlay documents everything; this is the teaser.
-///
-/// Ordered by usefulness, because a narrow terminal drops them from the end.
+/// Separate from [`BINDINGS`], which carries reference prose too wide for one line
+/// beside four others. Ordered by usefulness: a narrow terminal drops them from the end.
 pub const HINTS: &[Binding] = &[
-    b("i", "write", false),
-    b("k / j", "pick", false),
-    b("n", "tab", true),
-    b("?", "help", true),
-    b("|", "split", true),
+    b("i", "write", Mode::Normal),
+    b("k / j", "pick", Mode::Normal),
+    b("n", "tab", Mode::Prefix),
+    b("?", "help", Mode::Prefix),
+    b("|", "split", Mode::Prefix),
 ];
 
 /// Translate a key press into an [`Action`], given the current mode.
@@ -355,8 +347,7 @@ fn map_normal(key: KeyEvent) -> (Action, Mode) {
         KeyCode::Char('l') if ctrl => (Action::Redraw, Mode::Normal),
         KeyCode::Char('u') if ctrl => (Action::ScrollUp(10), Mode::Normal),
         KeyCode::Char('d') if ctrl => (Action::ScrollDown(10), Mode::Normal),
-        // Arrows scroll by line, so reading a long message does not have to move the
-        // selection. j/k are the message-wise pair.
+        // Arrows scroll by line, j/k by message.
         KeyCode::Up => (Action::ScrollUp(1), Mode::Normal),
         KeyCode::Down => (Action::ScrollDown(1), Mode::Normal),
         KeyCode::PageUp => (Action::ScrollUp(20), Mode::Normal),
@@ -392,13 +383,12 @@ fn map_insert(key: KeyEvent) -> (Action, Mode) {
         KeyCode::Home => Action::CaretHome,
         KeyCode::End => Action::CaretEnd,
 
-        // Shift+Enter inserts a newline; plain Enter sends. Matches every chat client
-        // and every coding agent REPL.
+        // Shift+Enter inserts a newline; plain Enter sends.
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => Action::Newline,
         KeyCode::Enter => Action::Submit,
 
-        // Only ever reaches an open completion popup; there is nothing else in the
-        // composer for a tab to do, and inserting one would be a tab in a chat message.
+        // Only reaches an open completion popup; a literal tab in a chat message is
+        // never what was meant.
         KeyCode::Tab => Action::Complete,
 
         KeyCode::Char(c) if !ctrl => Action::Insert(c),
@@ -590,20 +580,57 @@ mod tests {
     fn every_documented_binding_is_actually_bound() {
         // The overlay and the status hints read these tables. A row that no key
         // produces would be a lie told in the UI.
+        //
+        // Pairs are split, and each row is looked up in the mode the table claims for
+        // it, so the exemption list is the named chords rather than most of the table.
         let p = Prefix::default();
+
         for binding in BINDINGS.iter().chain(HINTS) {
-            // Only single-key prefixed rows are mechanically checkable; the rest
-            // document chords and ranges.
-            if !binding.prefixed || binding.keys.chars().count() != 1 {
-                continue;
+            // `k / j` and `h j k l` both list several keys in one row.
+            for token in binding.keys.split(['/', ' ']).filter(|t| !t.is_empty()) {
+                let mode = binding.mode;
+
+                // `^x` and `shift+enter` name modified keys, so they carry their
+                // modifier into the event rather than being skipped.
+                let event = if let Some(rest) = token.strip_prefix('^') {
+                    let code = code_of(rest).unwrap_or_else(|| panic!("`{token}` unmapped"));
+                    KeyEvent::new(code, KeyModifiers::CONTROL)
+                } else if let Some(rest) = token.strip_prefix("shift+") {
+                    let code = code_of(rest).unwrap_or_else(|| panic!("`{token}` unmapped"));
+                    KeyEvent::new(code, KeyModifiers::SHIFT)
+                } else {
+                    let code = code_of(token).unwrap_or_else(|| panic!("`{token}` unmapped"));
+                    KeyEvent::from(code)
+                };
+
+                assert_ne!(
+                    map(event, mode, p).0,
+                    Action::None,
+                    "a table documents `{token}` but {mode:?} mode ignores it"
+                );
             }
-            let c = binding.keys.chars().next().expect("one char");
-            assert_ne!(
-                map(key(c), Mode::Prefix, p).0,
-                Action::None,
-                "a table documents `{c}` but map_prefix ignores it"
-            );
         }
+    }
+
+    /// The `KeyCode` a documented token names, where there is one.
+    fn code_of(token: &str) -> Option<KeyCode> {
+        Some(match token {
+            "enter" => KeyCode::Enter,
+            "esc" => KeyCode::Esc,
+            "tab" => KeyCode::Tab,
+            "up" => KeyCode::Up,
+            "down" => KeyCode::Down,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            _ => {
+                let mut chars = token.chars();
+                let c = chars.next()?;
+                if chars.next().is_some() {
+                    return None;
+                }
+                KeyCode::Char(c)
+            }
+        })
     }
 
     #[test]

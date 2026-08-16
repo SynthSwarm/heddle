@@ -23,7 +23,7 @@ pub use model::{
     Shield, ShieldReason, SyncState, ThreadSummary, Verification, View, WorkerEvent,
 };
 pub use session::{CrossSigning, Paths, SavedSession, SessionError};
-pub use worker::{spawn, Handle};
+pub use worker::{spawn, Dispatch, Handle};
 
 /// Check that a homeserver advertises everything heddle needs.
 ///

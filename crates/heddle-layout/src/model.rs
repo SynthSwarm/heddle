@@ -51,11 +51,9 @@ impl PaneKind {
 
 /// Unread counts, as the homeserver reports them.
 ///
-/// Two axes rather than one: `highlights` are messages that named you, `notifications`
-/// is everything the push rules think is worth a badge. They are rolled up separately
-/// because "someone is talking" and "someone is talking to you" deserve different
-/// amounts of the user's attention, and collapsing them loses the only distinction
-/// that justifies interrupting a focused pane.
+/// `highlights` are messages that named you; `notifications` is everything the push
+/// rules think is worth a badge. Rolled up separately: only the first justifies
+/// interrupting a focused pane.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unread {
     pub notifications: u64,
@@ -70,21 +68,18 @@ impl Unread {
         }
     }
 
-    /// Whether there is anything at all to report.
     pub const fn any(self) -> bool {
         self.notifications > 0 || self.highlights > 0
     }
 
-    /// Whether any of it names you.
     pub const fn is_highlight(self) -> bool {
         self.highlights > 0
     }
 
     /// The number worth showing.
     ///
-    /// Takes whichever counter is larger rather than trusting `notifications` to be the
-    /// superset it usually is: a push rule can raise a highlight without also counting
-    /// a notification, and a badge that reads `(@0)` would be worse than useless.
+    /// The larger counter: `notifications` is usually the superset, but a push rule can
+    /// raise a highlight without counting a notification, giving `(@0)`.
     pub const fn count(self) -> u64 {
         if self.highlights > self.notifications {
             self.highlights
@@ -95,10 +90,9 @@ impl Unread {
 
     /// Badge text, or `None` when there is nothing unread.
     ///
-    /// `(3)` is three unread. `(@3)` is three unread, at least one of which names you.
-    /// Deliberately ASCII: this sits inside a tab cell whose width is measured with
-    /// `unicode-width`, and emoji that measure narrow but paint wide drift the whole
-    /// strip out of alignment.
+    /// `(3)` is three unread; `(@3)` is three of which at least one names you. ASCII:
+    /// this sits in a tab cell measured with `unicode-width`, and an emoji that measures
+    /// narrow but paints wide drifts the whole strip.
     pub fn label(self) -> Option<String> {
         if !self.any() {
             return None;
@@ -208,17 +202,21 @@ impl Tab {
         self.focused = self.panes.len() - 1;
     }
 
-    /// Remove a pane, keeping focus on a sensible neighbour.
+    /// Remove a pane, keeping focus on the pane the user was actually looking at.
     pub fn remove_pane(&mut self, id: PaneId) -> Option<Pane> {
         let i = self.panes.iter().position(|p| p.id == id)?;
         let pane = self.panes.remove(i);
-        // Focus the previous pane rather than snapping to zero: closing the pane you
-        // just finished with should leave you next to where you were.
+
+        // `focused` indexes a vector that just got shorter, so removing anything below
+        // it shifts the pane it names. Clamping alone does not catch that: the index
+        // stays in range the whole way through.
+        if i < self.focused {
+            self.focused -= 1;
+        }
         self.focused = self.focused.min(self.panes.len().saturating_sub(1));
         Some(pane)
     }
 
-    /// Find the pane showing a given thread.
     pub fn pane_for_thread(&self, root: &str) -> Option<&Pane> {
         self.panes
             .iter()
@@ -273,14 +271,12 @@ impl Workspace {
         }
     }
 
-    /// Cycle to the next tab, wrapping.
     pub fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.focused = (self.focused + 1) % self.tabs.len();
         }
     }
 
-    /// Cycle to the previous tab, wrapping.
     pub fn prev_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.focused = (self.focused + self.tabs.len() - 1) % self.tabs.len();
@@ -304,10 +300,8 @@ impl Workspace {
         self.tabs.iter().map(|t| t.count_in(state)).sum()
     }
 
-    /// Unread rolled up from every tab.
-    ///
-    /// Without this a workspace you are not looking at is indistinguishable from an
-    /// empty one, which is how a room can go unnoticed for a day.
+    /// Unread rolled up from every tab, so an unwatched workspace is distinguishable
+    /// from an empty one.
     pub fn unread(&self) -> Unread {
         self.tabs.iter().map(|t| t.unread).sum()
     }
@@ -349,14 +343,12 @@ impl Workspaces {
         }
     }
 
-    /// Cycle to the previous workspace, wrapping.
     pub fn prev(&mut self) {
         if !self.items.is_empty() {
             self.focused = (self.focused + self.items.len() - 1) % self.items.len();
         }
     }
 
-    /// Get or create a workspace by Space ID.
     pub fn entry(&mut self, id: &str, title: &str) -> &mut Workspace {
         if let Some(i) = self.items.iter().position(|w| w.id == id) {
             return &mut self.items[i];
@@ -366,7 +358,6 @@ impl Workspaces {
         &mut self.items[last]
     }
 
-    /// Find the workspace and tab showing a room.
     pub fn locate_room(&self, room_id: &str) -> Option<(usize, usize)> {
         self.items.iter().enumerate().find_map(|(wi, w)| {
             w.tabs
@@ -397,8 +388,8 @@ impl Workspaces {
 
     /// Order workspaces so the ones needing attention come first, then alphabetically.
     ///
-    /// Stable within a priority band, so the bar does not shuffle under the cursor
-    /// while an agent is working.
+    /// The alphabetical tiebreak is what makes this deterministic, not `sort_by` being
+    /// stable: the comparator is a total order, so insertion order never survives it.
     pub fn sort_by_urgency(&mut self) {
         let focused_id = self.focused().map(|w| w.id.clone());
         self.items.sort_by(|a, b| {
@@ -534,6 +525,39 @@ mod tests {
         tab.remove_pane(PaneId::new(1));
         tab.remove_pane(PaneId::new(2));
         assert!(tab.focused_pane().is_none());
+    }
+
+    #[test]
+    fn closing_a_pane_below_the_focused_one_does_not_move_the_focus() {
+        // Otherwise the user carries on typing into a different conversation, with
+        // nothing on screen to say it changed.
+        let mut tab = Tab::new("!r:x", "#backend");
+        for id in 1..=4 {
+            tab.push_pane(pane(id, AgentState::Idle));
+        }
+        tab.focused = 1;
+        assert_eq!(tab.focused_pane().expect("focused").id, PaneId::new(2));
+
+        tab.remove_pane(PaneId::new(1));
+
+        assert_eq!(
+            tab.focused_pane().expect("focused").id,
+            PaneId::new(2),
+            "closing another pane must not change which pane you are looking at"
+        );
+    }
+
+    #[test]
+    fn closing_a_pane_above_the_focused_one_leaves_it_alone_too() {
+        let mut tab = Tab::new("!r:x", "#backend");
+        for id in 1..=4 {
+            tab.push_pane(pane(id, AgentState::Idle));
+        }
+        tab.focused = 1;
+
+        tab.remove_pane(PaneId::new(4));
+
+        assert_eq!(tab.focused_pane().expect("focused").id, PaneId::new(2));
     }
 
     #[test]
