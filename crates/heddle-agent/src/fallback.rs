@@ -140,6 +140,12 @@ pub fn parse_with(body: &str, chrome: Chrome) -> Parsed {
 ///
 /// Returns `None` for ordinary prose. Deliberately conservative: a false positive
 /// silently eats a line of the agent's reply, which is worse than missing a card.
+///
+/// Each branch matches the emitter format quoted in the module header rather than a
+/// loosened version of it. That distinction is the whole defence -- an identifier
+/// followed by a colon describes `edit: "src/main.rs"` and `Warning: disk almost full`
+/// equally well, and only one of them is a tool call. The quotes and the absence of a
+/// space are not incidental punctuation; they are what makes the line machine-written.
 fn parse_tool_line(line: &str, chrome: Chrome) -> Option<Tool> {
     if chrome.is_off() {
         return None;
@@ -169,23 +175,30 @@ fn parse_tool_line(line: &str, chrome: Chrome) -> Option<Tool> {
         return None;
     }
 
-    // `name: "preview"`
+    // `name: "preview"`. The quotes are required. Hermes always writes them -- the
+    // format string is `f'{emoji} {tool}: "{preview}"' -- and without them this branch
+    // matched every emoji-led sentence containing a colon: "⚠️ Warning: disk almost
+    // full" became a phantom `Warning` card and the sentence was deleted from the
+    // transcript, because the degraded renderer draws `prose` and this had consumed it.
     if chrome.preview {
         if let Some((name, preview)) = rest.split_once(": ") {
-            let name = name.trim();
             if is_tool_name(name) {
-                let preview = preview.trim().trim_matches('"');
-                return Some(tool(name, Some(preview)));
+                if let Some(inner) = quoted(preview.trim()) {
+                    return Some(tool(name, Some(inner)));
+                }
             }
         }
     }
 
     // `name(arg_keys)` -- verbose mode. The args line beneath is left as prose; without
     // the extension there is no reliable way to associate it.
+    //
+    // The name is not trimmed, so "Shipped (finally)" is rejected on the space that
+    // "edit(['path'])" does not have. Trimming it first was how prose with a
+    // parenthetical got read as a call.
     if chrome.call {
-        if let Some((name, _)) = rest.split_once('(') {
-            let name = name.trim();
-            if is_tool_name(name) {
+        if let Some((name, args)) = rest.split_once('(') {
+            if is_tool_name(name) && args.ends_with(')') {
                 return Some(tool(name, None));
             }
         }
@@ -194,7 +207,6 @@ fn parse_tool_line(line: &str, chrome: Chrome) -> Option<Tool> {
     // `name...`
     if chrome.ellipsis {
         if let Some(name) = rest.strip_suffix("...") {
-            let name = name.trim();
             if is_tool_name(name) {
                 return Some(tool(name, None));
             }
@@ -202,6 +214,15 @@ fn parse_tool_line(line: &str, chrome: Chrome) -> Option<Tool> {
     }
 
     None
+}
+
+/// The contents of a `"…"` pair, or `None` if the text is not so wrapped.
+///
+/// One pair, not all of them: `trim_matches('"')` turned `"""quoted"""` into `quoted`
+/// and would have swallowed a preview that legitimately began and ended with a quote.
+fn quoted(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner)
 }
 
 fn tool(name: &str, preview: Option<&str>) -> Tool {
@@ -221,8 +242,13 @@ fn tool(name: &str, preview: Option<&str>) -> Tool {
     }
 }
 
-/// Tool names are identifiers. Requiring that shape keeps prose like
-/// "Note: this is fine" from being mistaken for a call.
+/// Whether `s` has the shape of a tool name: an identifier, and nothing else.
+///
+/// Whitespace is not in the set, which is load-bearing rather than incidental --
+/// callers must not `trim` before asking, because the space in `Shipped (finally)` is
+/// the evidence that it is prose. This is a necessary condition and nowhere near a
+/// sufficient one: `Note`, `Done` and `Warning` are all identifier-shaped. What rules
+/// those out is the surrounding punctuation, in [`parse_tool_line`].
 ///
 /// Public so an adapter with its own line rules can reuse the same test rather than
 /// inventing a second, subtly different idea of what a tool is called.
@@ -236,7 +262,8 @@ pub fn is_tool_name(s: &str) -> bool {
 /// Whether a character is plausibly a leading emoji.
 ///
 /// Covers the Miscellaneous Symbols, Dingbats, Misc Symbols & Pictographs, Transport,
-/// and Supplemental Symbols blocks, which is where `get_tool_emoji` draws from.
+/// Geometric Shapes Extended and Supplemental Symbols blocks, which is where
+/// `get_tool_emoji` draws from.
 pub fn is_emoji_like(c: char) -> bool {
     matches!(c as u32,
         0x2190..=0x21FF   // arrows
@@ -246,6 +273,7 @@ pub fn is_emoji_like(c: char) -> bool {
         | 0x1F300..=0x1F5FF
         | 0x1F600..=0x1F64F
         | 0x1F680..=0x1F6FF
+        | 0x1F7E0..=0x1F7EB // coloured circles and squares
         | 0x1F900..=0x1F9FF
         | 0x1FA00..=0x1FAFF)
 }
@@ -254,31 +282,47 @@ pub fn is_emoji_like(c: char) -> bool {
 ///
 /// Public because every adapter needs it and none of them should be re-deriving where
 /// a fence ends: chrome inside a code block is a sample, not a call.
+///
+/// Fence length is tracked, per CommonMark: a block opened with ```` ```` ```` is closed
+/// only by a run of at least that many backticks, so a nested ``` ``` ``` inside it is
+/// content. Treating every backtick run as a toggle turned one such block into two
+/// empty ones with the body leaked into prose -- and a diff or a markdown sample is
+/// exactly the kind of thing an agent posts inside a longer fence.
 pub fn extract_code_blocks(body: &str) -> (Vec<CodeBlock>, String) {
     let mut blocks = Vec::new();
     let mut remainder = String::new();
-    let mut current: Option<(Option<String>, Vec<&str>)> = None;
+    let mut current: Option<(usize, Option<String>, Vec<&str>)> = None;
 
     for line in body.lines() {
         let fence = line.trim_start();
-        if let Some(info) = fence.strip_prefix("```") {
+        let ticks = fence.chars().take_while(|&c| c == '`').count();
+
+        if ticks >= 3 {
+            let info = fence[ticks..].trim();
             match current.take() {
-                // Closing fence.
-                Some((lang, lines)) => blocks.push(CodeBlock {
-                    lang,
-                    body: lines.join("\n"),
-                }),
-                // Opening fence.
+                // A closing fence must be at least as long as the one that opened the
+                // block, and carry no info string. Anything else is content.
+                Some((open, lang, lines)) if ticks >= open && info.is_empty() => {
+                    blocks.push(CodeBlock {
+                        lang,
+                        body: lines.join("\n"),
+                    });
+                    continue;
+                }
+                Some(open) => current = Some(open),
                 None => {
-                    let info = info.trim();
-                    current = Some(((!info.is_empty()).then(|| info.to_owned()), Vec::new()));
+                    current = Some((
+                        ticks,
+                        (!info.is_empty()).then(|| info.to_owned()),
+                        Vec::new(),
+                    ));
+                    continue;
                 }
             }
-            continue;
         }
 
         match current.as_mut() {
-            Some((_, lines)) => lines.push(line),
+            Some((_, _, lines)) => lines.push(line),
             None => {
                 remainder.push_str(line);
                 remainder.push('\n');
@@ -287,7 +331,7 @@ pub fn extract_code_blocks(body: &str) -> (Vec<CodeBlock>, String) {
     }
 
     // An unterminated fence: keep what we have rather than dropping it.
-    if let Some((lang, lines)) = current {
+    if let Some((_, lang, lines)) = current {
         blocks.push(CodeBlock {
             lang,
             body: lines.join("\n"),
@@ -331,10 +375,55 @@ mod tests {
 
     #[test]
     fn does_not_mistake_prose_for_a_tool_call() {
-        // Emoji-led prose with a colon is the obvious false-positive trap.
-        let p = parse("✅ All good: the tests pass now");
-        assert!(p.tools.is_empty(), "recovered {:?}", p.tools);
-        assert!(p.prose.contains("All good"));
+        // The previous version of this test used "✅ All good: the tests pass now" and
+        // passed only because "All good" contains a space. Every line below was
+        // recovered as a phantom tool, and because the degraded renderer draws
+        // `parsed.prose`, each one was *deleted from the transcript* rather than merely
+        // mis-cardded. A table, so the next shape somebody thinks of gets added here.
+        let prose = [
+            "📝 Note: this is fine",
+            "✅ Done: all tests pass",
+            "⚠️ Warning: disk almost full",
+            "→ Next: run the migration",
+            "📝 TODO: write docs",
+            "🎉 Shipped (finally)",
+            "⚙️ Summary (short)",
+            "🟢 ready: go",
+            "✅ All good: the tests pass now",
+        ];
+
+        for line in prose {
+            let p = parse(line);
+            assert!(p.tools.is_empty(), "{line:?} recovered {:?}", p.tools);
+            assert_eq!(p.prose, line, "{line:?} was eaten");
+        }
+    }
+
+    #[test]
+    fn a_preview_must_actually_be_quoted() {
+        // The quotes are what Hermes writes and what separates a call from a sentence
+        // with a colon in it. Dropping the requirement is what let the table above
+        // through.
+        assert!(parse("🔧 edit: src/main.rs").tools.is_empty());
+        assert_eq!(parse("🔧 edit: \"src/main.rs\"").tools.len(), 1);
+    }
+
+    #[test]
+    fn a_preview_keeps_the_quotes_it_was_meant_to_have() {
+        // `trim_matches('"')` stripped every quote at both ends, so a preview that was
+        // itself quoted came back mangled.
+        let p = parse("🔧 bash: \"echo \"hi\"\"");
+        assert_eq!(p.tools.len(), 1);
+        assert_eq!(p.tools[0].preview.as_deref(), Some("echo \"hi\""));
+    }
+
+    #[test]
+    fn a_call_needs_its_closing_paren_and_no_space_before_it() {
+        assert_eq!(parse("🔧 edit(['path'])").tools.len(), 1);
+        // An opening paren alone is prose with a bracket in it.
+        assert!(parse("🔧 restarting (this may take a while")
+            .tools
+            .is_empty());
     }
 
     #[test]
@@ -359,6 +448,18 @@ mod tests {
         let p = parse("```\n🔧 edit: \"nope.rs\"\n```");
         assert!(p.tools.is_empty());
         assert_eq!(p.blocks.len(), 1);
+    }
+
+    #[test]
+    fn a_longer_fence_contains_a_shorter_one() {
+        // Toggling on every backtick run split this into two empty blocks with a bogus
+        // "`" info string and leaked the body into prose. An agent showing someone how
+        // to write a fenced block posts exactly this.
+        let p = parse("````markdown\n```\ninner\n```\n````");
+        assert_eq!(p.blocks.len(), 1, "got {:?}", p.blocks);
+        assert_eq!(p.blocks[0].lang.as_deref(), Some("markdown"));
+        assert_eq!(p.blocks[0].body, "```\ninner\n```");
+        assert!(p.prose.is_empty(), "leaked {:?}", p.prose);
     }
 
     #[test]
