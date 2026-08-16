@@ -869,14 +869,10 @@ impl Worker {
                 // relative to reimplementing VectorDiff application, and cannot drift.
                 let items = forward_timeline.items().await;
                 let entries = convert(items.iter(), &agents);
-                // `messages` rather than a second count of the same thing. `convert` is
-                // one entry per item, so `items` and `entries` were always equal and the
-                // pair could not distinguish anything, whatever the old comment claimed.
-                // What a reader of this log actually wants to know is whether the pane
-                // has anything to read, which dividers, markers and notices do not
-                // answer. A pane of thirty items and no messages is the shape of a room
-                // whose recent history is all threaded, and that took a second bug to
-                // notice for want of this number.
+                // `messages`, not a second count of the items: they are equal by
+                // construction. A pane of thirty items and no messages is the shape of a
+                // room whose recent history is all threaded, and that took a second bug
+                // to notice for want of this number.
                 tracing::debug!(
                     view = ?forward_view,
                     items = items.len(),
@@ -1299,7 +1295,6 @@ fn convert_item(item: &matrix_sdk_ui::timeline::TimelineItem, agents: &Adapters)
     Entry { id, event_id, kind }
 }
 
-/// One-line description of an entry, for trace logging.
 /// Follow one verification request from start to finish, reporting each step.
 ///
 /// Two things happen here that the user never sees and must not have to think about.
@@ -1332,7 +1327,7 @@ async fn drive(request: VerificationRequest, events: mpsc::Sender<WorkerEvent>) 
     let mut state = Some(request.state());
 
     loop {
-        let Some(current) = state.take().or(None) else {
+        let Some(current) = state.take() else {
             break;
         };
 

@@ -109,7 +109,6 @@ pub fn body(tool: &Tool, theme: &Theme) -> Vec<Line<'static>> {
     lines.into_iter().map(indent).collect()
 }
 
-/// Render a whole card.
 pub fn render(tool: &Tool, expanded: bool, theme: &Theme) -> Vec<Line<'static>> {
     let mut out = vec![header(tool, expanded, theme)];
     if expanded {

@@ -364,7 +364,7 @@ fn reaction_line(message: &Message, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Render a recovered code block, re-fenced so it is highlighted like any other.
+/// Re-fenced, so a block the fallback parser lifted out is highlighted like any other.
 fn code_block(block: &heddle_agent::fallback::CodeBlock) -> Vec<Line<'static>> {
     let lang = block.lang.clone().unwrap_or_default();
     markdown(&format!("```{lang}\n{}\n```", block.body))

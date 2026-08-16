@@ -280,7 +280,6 @@ impl Workspace {
         }
     }
 
-    /// Cycle to the next tab, wrapping.
     pub fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.focused = (self.focused + 1) % self.tabs.len();
@@ -404,8 +403,11 @@ impl Workspaces {
 
     /// Order workspaces so the ones needing attention come first, then alphabetically.
     ///
-    /// Stable within a priority band, so the bar does not shuffle under the cursor
-    /// while an agent is working.
+    /// Deterministic, so the bar does not shuffle under the cursor while an agent is
+    /// working -- but that comes from the alphabetical tiebreak, not from `sort_by`
+    /// being stable. The comparator is a total order, so insertion order never survives
+    /// it. Worth distinguishing: only one of the two is doing the work, and a later
+    /// edit that drops the tiebreak would still look correct.
     pub fn sort_by_urgency(&mut self) {
         let focused_id = self.focused().map(|w| w.id.clone());
         self.items.sort_by(|a, b| {

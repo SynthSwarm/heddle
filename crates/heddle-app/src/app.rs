@@ -160,7 +160,6 @@ pub enum Modal {
     Help,
 }
 
-/// Everything the UI draws from.
 /// The recovery panel.
 ///
 /// A state machine rather than one struct with optional fields, because the four things
@@ -192,6 +191,17 @@ pub enum RecoveryPanel {
     ShowKey { key: String },
 }
 
+/// Everything the UI draws from, and everything the keymap acts on.
+///
+/// Deliberately holds no terminal and no `Client`: actions produce [`Command`]s into
+/// `pending` for the worker to run, and `take_commands` drains them. That is what makes
+/// the whole update path testable without a homeserver or a tty, and it is why the test
+/// module below is larger than this one.
+///
+/// The exception is the handful of fields the renderer writes back -- `rendered_lines`,
+/// `viewport_height`, `bars`, `anchors`. Only the renderer knows them, and everything
+/// that reads them is therefore one frame behind. Noted here because it is not obvious
+/// from any single call site.
 pub struct App {
     pub config: Config,
     pub theme: Theme,
@@ -797,8 +807,6 @@ impl App {
             .find(|p| p.kind.thread_root().is_some())
             .map(|p| p.id)
     }
-
-    // ------------------------------------------------------------------- threads
 
     // ---------------------------------------------------------------- typing notices
 

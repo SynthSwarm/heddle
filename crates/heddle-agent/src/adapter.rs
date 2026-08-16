@@ -11,10 +11,13 @@
 //! An [`Adapter`] is one agent's answer to those two questions. [`Adapters`] holds an
 //! ordered set of them and asks each in turn.
 //!
-//! Adding an agent is a table and a name, not a parser: see [`crate::fallback::Chrome`].
-//! The reason for the indirection is that heddle expects to meet agents it cannot
-//! change — an unpatched Hermes today, OpenCode or OpenClaw tomorrow — and the only
-//! thing those have in common is that they print *something* a human was meant to read.
+//! Adding an agent is a [`crate::fallback::Chrome`] table and a name, not a parser --
+//! plus, today, an arm in [`Adapters::by_id`], which is how the config names one. That
+//! last part is not extensibility and should not be described as it; a caller outside
+//! this crate has [`Adapters::with`], but nothing in heddle uses it. The reason for the
+//! indirection is that heddle expects to meet agents it cannot change — an unpatched
+//! Hermes today, OpenCode or OpenClaw tomorrow — and the only thing those have in
+//! common is that they print *something* a human was meant to read.
 //!
 //! See `docs/SPEC.md` §3.
 

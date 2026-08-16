@@ -75,9 +75,6 @@ pub fn enabled() -> bool {
 /// same message at different lengths. Fixtures built from that are mostly duplicates of
 /// each other, and the file is large enough to discourage reading.
 ///
-/// An event still in local echo has no id yet and is always recorded; it acquires one a
-/// moment later and the remote echo is what gets deduplicated.
-///
 /// Failures are logged and dropped. A diagnostic that could interrupt a conversation
 /// would be worse than the missing diagnostic.
 pub fn record(record: &Record<'_>) {

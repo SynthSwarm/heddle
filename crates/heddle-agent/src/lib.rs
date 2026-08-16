@@ -15,7 +15,8 @@
 //! [`adapter`] binds the two together: an [`adapter::Adapter`] is one agent's answer to
 //! both questions, and [`adapter::Adapters`] is the ordered set heddle consults. Hermes
 //! is the first integration; adding a second is a chrome table and a name rather than
-//! another parser.
+//! another parser, though registering it by name still means editing
+//! [`adapter::Adapters::by_id`].
 //!
 //! [`store`] then folds whatever came out into turns and the derived
 //! [`store::AgentState`] that drives pane, tab and workspace badges — and it neither
