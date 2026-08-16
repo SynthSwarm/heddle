@@ -3,7 +3,7 @@
 //! Pure layout and painting. All decisions live in [`crate::app`]; this module only
 //! turns state into cells.
 
-use crate::app::{App, Hit, Pending, RecoveryPanel};
+use crate::app::{App, Hit, Modal, Pending, RecoveryPanel};
 use crate::composer::Composer;
 use crate::keymap::{self, Mode};
 use crate::palette::keys_for;
@@ -65,31 +65,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
 
-    if app.threads.is_some() {
-        draw_threads(frame, app, frame.area());
-    }
-
-    if app.emoji.is_some() {
-        draw_emoji(frame, app, frame.area());
-    }
-
-    if app.palette.is_some() {
-        draw_palette(frame, app, frame.area());
-    }
-
-    // Last, so it sits above everything.
-    if app.help {
-        draw_help(frame, app, frame.area());
-    }
-
-    // Above even the help: a security prompt that something else can obscure is a
-    // security prompt the user can be tricked into answering blind.
-    if app.verification.is_some() {
-        draw_verification(frame, app, frame.area());
-    }
-
-    if app.recovery_prompt.is_some() {
-        draw_recovery(frame, app, frame.area());
+    // One overlay, so one call. This used to be six independent `if`s whose order
+    // disagreed with the order `App::apply_action` dispatched in: recovery was painted
+    // last, i.e. on top, while verification was checked first and consumed the keys --
+    // so the user could be reading one panel and typing into another.
+    match &app.modal {
+        Some(Modal::Threads(_)) => draw_threads(frame, app, frame.area()),
+        Some(Modal::Emoji(_)) => draw_emoji(frame, app, frame.area()),
+        Some(Modal::Palette(_)) => draw_palette(frame, app, frame.area()),
+        Some(Modal::Help) => draw_help(frame, app, frame.area()),
+        Some(Modal::Verification(_)) => draw_verification(frame, app, frame.area()),
+        Some(Modal::Recovery(_)) => draw_recovery(frame, app, frame.area()),
+        None => {}
     }
 }
 
@@ -104,7 +91,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn draw_verification(frame: &mut Frame, app: &App, area: Rect) {
     use heddle_matrix::Verification;
 
-    let Some(state) = &app.verification else {
+    let Some(state) = app.verification() else {
         return;
     };
 
@@ -213,7 +200,7 @@ fn draw_verification(frame: &mut Frame, app: &App, area: Rect) {
 /// echoing it only helps a shoulder, and the other is a secret they have never seen and
 /// must copy down exactly, where hiding it would defeat the entire exercise.
 fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(panel) = &app.recovery_prompt else {
+    let Some(panel) = app.recovery_prompt() else {
         return;
     };
 
@@ -381,7 +368,7 @@ fn draw_recovery(frame: &mut Frame, app: &App, area: Rect) {
 /// For a Hermes room this is the list of agent sessions, which is why it exists before
 /// any of the other overlays.
 fn draw_threads(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(picker) = &app.threads else {
+    let Some(picker) = app.threads() else {
         return;
     };
 
@@ -444,7 +431,7 @@ fn draw_threads(frame: &mut Frame, app: &App, area: Rect) {
 /// cells some emoji occupy, and in a grid that error compounds across every column; one
 /// per row keeps the damage to the row that caused it. See the width note in PLAN.md.
 fn draw_emoji(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(picker) = &app.emoji else {
+    let Some(picker) = app.emoji() else {
         return;
     };
 
@@ -517,7 +504,7 @@ fn draw_emoji(frame: &mut Frame, app: &App, area: Rect) {
 /// with the configured prefix rather than a hardcoded `^a`, since a custom `ui.prefix`
 /// would otherwise be taught wrongly on every row.
 fn draw_palette(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(palette) = &app.palette else {
+    let Some(palette) = app.palette() else {
         return;
     };
 

@@ -123,6 +123,43 @@ pub struct BarHits {
     pub new_tab: Option<(u16, u16)>,
 }
 
+/// The overlay that is open, if any.
+///
+/// One field rather than six, because only one can be open and saying so in prose did
+/// not work. The comment on the old dispatch chain read "it is checked before the
+/// thread picker only because the two can never be open at once" -- and they could:
+/// the thread picker's match had a `_ => {}` arm, so `:` fell through it into the main
+/// keymap, opened the palette, and left two overlays on screen at once. The palette was
+/// checked first, so the picker underneath became unreachable and its own `Esc` was
+/// eaten. The key overlay was worse: it was drawn but appeared in no chain at all, so
+/// `D` still armed a redaction behind it.
+///
+/// With one field there is no ordering to get wrong and nothing to fall through. Note
+/// [`MentionPicker`] is deliberately *not* here: it is a filter on the composer rather
+/// than a modal, and the composer keeps taking keys underneath it.
+#[derive(Debug, Clone)]
+pub enum Modal {
+    /// Interactive device verification.
+    ///
+    /// The emoji on screen are a security decision with a human at the other end, so
+    /// nothing may act underneath it -- splitting a pane or sending a message while the
+    /// user believes they are answering a yes/no question. Being a variant rather than
+    /// a field is what guarantees that now; it used to be first in a hand-ordered chain
+    /// whose draw order in `ui::draw` disagreed with it, so the recovery panel painted
+    /// on top of the verification prompt while verification consumed the keys.
+    Verification(Verification),
+    /// The recovery panel. Holds a secret mid-typing.
+    Recovery(RecoveryPanel),
+    /// The emoji picker. A search box, so it owns every key.
+    Emoji(crate::emoji::Picker),
+    /// The command palette. A search box too.
+    Palette(Palette),
+    /// The thread picker.
+    Threads(ThreadPicker),
+    /// The `<prefix> ?` key overlay.
+    Help,
+}
+
 /// Everything the UI draws from.
 /// The recovery panel.
 ///
@@ -188,14 +225,12 @@ pub struct App {
     pub viewport_height: u16,
     /// Clickable regions of the workspace and tab bars, recorded by the renderer.
     pub bars: BarHits,
-    /// Whether the `<prefix> ?` key overlay is showing.
-    pub help: bool,
+    /// The overlay that is open, if any. See [`Modal`].
+    pub modal: Option<Modal>,
     /// Selected message per view, by event id. Reply, edit and redact all act on it.
     pub selected: HashMap<View, String>,
     /// What the composer will do on submit, when it is not simply sending.
     pub composing: Option<Pending>,
-    /// The room whose thread picker is open, if any.
-    pub threads: Option<ThreadPicker>,
     /// Joined members per room, for the mention picker.
     ///
     /// Asked for once per room, when it is first focused, so that typing `@` shows a
@@ -205,21 +240,13 @@ pub struct App {
     members_asked: HashSet<String>,
     /// The open mention picker, if any.
     pub mentions: Option<MentionPicker>,
-    /// The open emoji picker, if any.
-    pub emoji: Option<crate::emoji::Picker>,
-    /// The open command palette, if any.
-    pub palette: Option<Palette>,
     /// The split border the mouse currently has hold of, and the room it belongs to.
     ///
     /// The room is part of it because a drag is only meaningful in the tab it started
     /// in, and a tab can be switched from under it by an arriving keypress.
     dragging: Option<(String, SplitHandle)>,
-    /// The interactive verification in progress, if any.
-    pub verification: Option<Verification>,
     /// Whether this account's secrets are recoverable on a new device.
     pub recovery: RecoveryState,
-    /// The open recovery panel, if any.
-    pub recovery_prompt: Option<RecoveryPanel>,
     /// Rooms whose loaded history contains a message heddle cannot vouch for.
     pub unverified_rooms: HashSet<String>,
     /// Whether this device has been verified by the account's cross-signing identity.
@@ -297,24 +324,19 @@ impl App {
             rendered_lines: 0,
             viewport_height: 0,
             bars: BarHits::default(),
+            modal: None,
             selected: HashMap::new(),
             composing: None,
-            threads: None,
             members: HashMap::new(),
             members_asked: HashSet::new(),
             mentions: None,
-            emoji: None,
-            palette: None,
             dragging: None,
-            verification: None,
             device_verified: None,
             recovery: RecoveryState::Unknown,
-            recovery_prompt: None,
             unverified_rooms: HashSet::new(),
             typing: None,
             confirm_redact: None,
             anchors: Vec::new(),
-            help: false,
             needs_redraw: false,
             should_quit: false,
             restoring_focus: saved_layout.workspace.is_some() || !saved_layout.tabs.is_empty(),
@@ -332,6 +354,63 @@ impl App {
     /// Record that the arrangement has changed and should be saved.
     fn touch_layout(&mut self) {
         self.layout_dirty = true;
+    }
+
+    /// Open an overlay, replacing whatever was open.
+    ///
+    /// A keypress cannot reach this while something is already open -- the overlay
+    /// swallows it -- so in practice the replacement path is the worker's: a
+    /// verification request arriving from another device takes over whatever was on
+    /// screen, which is what it should do.
+    pub fn open_modal(&mut self, modal: Modal) {
+        self.modal = Some(modal);
+    }
+
+    /// Close whatever overlay is open.
+    pub fn close_modal(&mut self) {
+        self.modal = None;
+    }
+
+    pub fn verification(&self) -> Option<&Verification> {
+        match &self.modal {
+            Some(Modal::Verification(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn recovery_prompt(&self) -> Option<&RecoveryPanel> {
+        match &self.modal {
+            Some(Modal::Recovery(r)) => Some(r),
+            _ => None,
+        }
+    }
+
+    pub fn emoji(&self) -> Option<&crate::emoji::Picker> {
+        match &self.modal {
+            Some(Modal::Emoji(e)) => Some(e),
+            _ => None,
+        }
+    }
+
+    pub fn palette(&self) -> Option<&Palette> {
+        match &self.modal {
+            Some(Modal::Palette(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn threads(&self) -> Option<&ThreadPicker> {
+        match &self.modal {
+            Some(Modal::Threads(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn threads_mut(&mut self) -> Option<&mut ThreadPicker> {
+        match &mut self.modal {
+            Some(Modal::Threads(t)) => Some(t),
+            _ => None,
+        }
     }
 
     /// Take the commands produced since the last call.
@@ -799,7 +878,9 @@ impl App {
 
     /// Open the emoji picker to put an emoji in the composer.
     fn open_emoji_for_composer(&mut self) {
-        self.emoji = Some(crate::emoji::Picker::new(crate::emoji::Target::Composer));
+        self.open_modal(Modal::Emoji(crate::emoji::Picker::new(
+            crate::emoji::Target::Composer,
+        )));
         // The picker is a search box, so typing has to reach it. Insert mode is what
         // turns a keypress into `Insert(c)` rather than a normal-mode command.
         self.mode = Mode::Insert;
@@ -811,15 +892,15 @@ impl App {
             self.status = Some("select a message to react to".into());
             return;
         };
-        self.emoji = Some(crate::emoji::Picker::new(crate::emoji::Target::Reaction {
-            event_id,
-        }));
+        self.open_modal(Modal::Emoji(crate::emoji::Picker::new(
+            crate::emoji::Target::Reaction { event_id },
+        )));
         self.mode = Mode::Insert;
     }
 
     /// Route a key to the open emoji picker.
     fn emoji_action(&mut self, action: Action) {
-        let Some(picker) = &mut self.emoji else {
+        let Some(Modal::Emoji(picker)) = &mut self.modal else {
             return;
         };
 
@@ -840,7 +921,7 @@ impl App {
 
     /// Apply the highlighted emoji and close the picker.
     fn accept_emoji(&mut self) {
-        let Some(picker) = &self.emoji else {
+        let Some(Modal::Emoji(picker)) = &self.modal else {
             return;
         };
         let Some(chosen) = picker.chosen() else {
@@ -856,7 +937,7 @@ impl App {
                         composer.insert(c);
                     }
                 }
-                self.emoji = None;
+                self.close_modal();
                 // Straight back to typing: choosing an emoji is part of writing the
                 // message, not a detour out of it.
                 self.mode = Mode::Insert;
@@ -876,7 +957,7 @@ impl App {
     }
 
     fn close_emoji(&mut self) {
-        self.emoji = None;
+        self.close_modal();
         self.mode = Mode::Normal;
     }
 
@@ -890,18 +971,18 @@ impl App {
         else {
             return;
         };
-        self.threads = Some(ThreadPicker {
+        self.open_modal(Modal::Threads(ThreadPicker {
             room_id: room_id.clone(),
             threads: Vec::new(),
             selected: 0,
             loading: true,
-        });
+        }));
         self.queue(Command::ListThreads { room_id });
     }
 
     /// Open the highlighted thread as a pane beside the current one.
     fn open_selected_thread(&mut self) {
-        let Some(picker) = &self.threads else {
+        let Some(picker) = self.threads() else {
             return;
         };
         let Some(thread) = picker.selected() else {
@@ -914,7 +995,7 @@ impl App {
         } else {
             thread.preview.clone()
         };
-        self.threads = None;
+        self.close_modal();
         self.open_thread_pane(root, title);
     }
 
@@ -968,7 +1049,7 @@ impl App {
             WorkerEvent::Threads { room_id, threads } => {
                 // Ignore a late answer for a picker the user has already closed or
                 // reopened elsewhere.
-                if let Some(picker) = &mut self.threads {
+                if let Some(picker) = self.threads_mut() {
                     if picker.room_id == room_id {
                         picker.threads = threads;
                         picker.selected = 0;
@@ -995,15 +1076,15 @@ impl App {
                     Verification::Done => {
                         self.status = Some("device verified".into());
                         self.device_verified = Some(true);
-                        self.verification = None;
+                        self.close_modal();
                         self.needs_redraw = true;
                     }
                     Verification::Cancelled { reason } => {
                         self.status = Some(format!("verification cancelled: {reason}"));
-                        self.verification = None;
+                        self.close_modal();
                         self.needs_redraw = true;
                     }
-                    _ => self.verification = Some(state),
+                    _ => self.open_modal(Modal::Verification(state)),
                 }
             }
 
@@ -1014,11 +1095,11 @@ impl App {
                 // plainly did decrypt -- which tells the user the client has hung at the
                 // exact moment it actually worked.
                 let waiting = matches!(
-                    self.recovery_prompt,
-                    Some(RecoveryPanel::AskKey {
+                    self.modal,
+                    Some(Modal::Recovery(RecoveryPanel::AskKey {
                         submitted: true,
                         ..
-                    })
+                    }))
                 );
                 if state == RecoveryState::Enabled && waiting {
                     self.close_recovery();
@@ -1031,11 +1112,11 @@ impl App {
                 // Kept open, emptied, and told why: a mistyped recovery key is worth a
                 // second attempt, and closing the prompt would make the user find the
                 // key again from the start.
-                self.recovery_prompt = Some(RecoveryPanel::AskKey {
+                self.open_modal(Modal::Recovery(RecoveryPanel::AskKey {
                     key: String::new(),
                     submitted: false,
                     error: Some(reason.clone()),
-                });
+                }));
                 self.status = Some(format!("recovery failed: {reason}"));
             }
 
@@ -1044,7 +1125,7 @@ impl App {
                 // put in the status line: the server keeps no copy, so this is the only
                 // time it can be read, and it must not end up somewhere it outlives the
                 // moment.
-                self.recovery_prompt = Some(RecoveryPanel::ShowKey { key });
+                self.open_modal(Modal::Recovery(RecoveryPanel::ShowKey { key }));
                 self.needs_redraw = true;
             }
 
@@ -1244,7 +1325,7 @@ impl App {
     /// any other key through would be a client where a mistyped `j` dismissed a security
     /// prompt.
     fn verification_action(&mut self, action: Action) {
-        let Some(state) = &self.verification else {
+        let Some(Modal::Verification(state)) = &self.modal else {
             return;
         };
 
@@ -1285,7 +1366,7 @@ impl App {
     /// key, or be showing the only copy of a new one, and none of those are places for a
     /// stray binding to reach past.
     fn recovery_action(&mut self, action: Action) {
-        let Some(panel) = &mut self.recovery_prompt else {
+        let Some(Modal::Recovery(panel)) = &mut self.modal else {
             return;
         };
 
@@ -1348,13 +1429,13 @@ impl App {
 
     /// Close the recovery panel and give the keyboard back to the transcript.
     fn close_recovery(&mut self) {
-        self.recovery_prompt = None;
+        self.close_modal();
         self.mode = Mode::Normal;
     }
 
     /// Route a key to the command palette.
     fn palette_action(&mut self, action: Action) {
-        let Some(palette) = &mut self.palette else {
+        let Some(Modal::Palette(palette)) = &mut self.modal else {
             return;
         };
 
@@ -1375,12 +1456,11 @@ impl App {
     /// Run the highlighted command, having first closed the palette.
     ///
     /// Closing first is not tidiness: the command is dispatched back through
-    /// `apply_action`, which checks for an open palette before anything else, so leaving
-    /// it open would feed the command straight back into the palette and do nothing.
+    /// `apply_action`, which hands every key to the open overlay, so leaving the palette
+    /// open would feed the command straight back into it and do nothing.
     fn run_chosen_command(&mut self) {
         let Some(action) = self
-            .palette
-            .as_ref()
+            .palette()
             .and_then(|p| p.chosen())
             .map(|c| c.action.clone())
         else {
@@ -1393,69 +1473,54 @@ impl App {
     }
 
     fn close_palette(&mut self) {
-        self.palette = None;
+        self.close_modal();
         self.mode = Mode::Normal;
     }
 
-    pub fn apply_action(&mut self, action: Action) {
-        // Verification is checked before every other overlay. The emoji on screen are a
-        // security decision with a human at the other end, and any binding that fired
-        // underneath it -- splitting a pane, sending a message -- would be acted on
-        // while the user believes they are answering a yes/no question.
-        if self.verification.is_some() {
-            self.verification_action(action);
-            return;
-        }
-
-        // The recovery prompt holds a secret mid-typing, so it swallows everything for
-        // the same reason.
-        if self.recovery_prompt.is_some() {
-            self.recovery_action(action);
-            return;
-        }
-
-        // The emoji picker is checked first and swallows everything: it is a search box,
-        // so the keys that would otherwise scroll, select or type into the composer all
-        // belong to it while it is open.
-        if self.emoji.is_some() {
-            self.emoji_action(action);
-            return;
-        }
-
-        // The palette is a search box too, and for the same reason owns every key while
-        // it is open. It is checked before the thread picker only because the two can
-        // never be open at once.
-        if self.palette.is_some() {
-            self.palette_action(action);
-            return;
-        }
-
-        // The thread picker owns navigation while it is open, so the same j/k that
-        // scroll a transcript walk the list instead of doing both at once.
-        if self.threads.is_some() {
-            match action {
+    /// Route a key to whichever overlay is open.
+    ///
+    /// Every arm consumes the key. An overlay that let one through is how a picker ends
+    /// up splitting a pane behind itself, and the thread picker's `_ => {}` did exactly
+    /// that: `:` fell past it into the main keymap and opened the palette on top.
+    fn modal_action(&mut self, action: Action) {
+        match &mut self.modal {
+            Some(Modal::Verification(_)) => self.verification_action(action),
+            Some(Modal::Recovery(_)) => self.recovery_action(action),
+            Some(Modal::Emoji(_)) => self.emoji_action(action),
+            Some(Modal::Palette(_)) => self.palette_action(action),
+            Some(Modal::Threads(picker)) => match action {
                 Action::ScrollUp(_) | Action::SelectOlder => {
-                    if let Some(p) = &mut self.threads {
-                        p.selected = p.selected.saturating_sub(1);
-                    }
-                    return;
+                    picker.selected = picker.selected.saturating_sub(1);
                 }
                 Action::ScrollDown(_) | Action::SelectNewer => {
-                    if let Some(p) = &mut self.threads {
-                        p.selected = (p.selected + 1).min(p.threads.len().saturating_sub(1));
-                    }
-                    return;
+                    picker.selected =
+                        (picker.selected + 1).min(picker.threads.len().saturating_sub(1));
                 }
-                Action::Accept => {
-                    self.open_selected_thread();
-                    return;
-                }
-                Action::Cancel | Action::OpenThreads => {
-                    self.threads = None;
-                    return;
-                }
+                Action::Accept => self.open_selected_thread(),
+                Action::Cancel | Action::OpenThreads => self.close_modal(),
+                // Everything else is swallowed. The picker owns navigation while it is
+                // open, so the j/k that scroll a transcript walk the list instead of
+                // doing both at once -- and nothing else acts underneath it.
                 _ => {}
-            }
+            },
+            // The key overlay used to be drawn without appearing in any dispatch chain
+            // at all, so `D` still armed a redaction and `Enter` still sent, behind a
+            // panel covering the transcript they were acting on.
+            Some(Modal::Help) => match action {
+                Action::Cancel | Action::ToggleHelp => self.close_modal(),
+                _ => {}
+            },
+            None => {}
+        }
+    }
+
+    pub fn apply_action(&mut self, action: Action) {
+        // An open overlay owns every key. There is one of them by construction, so this
+        // is a single check rather than a chain of five whose order had to be reasoned
+        // about -- and, in two cases, was reasoned about wrongly. See [`Modal`].
+        if self.modal.is_some() {
+            self.modal_action(action);
+            return;
         }
 
         // The mention picker is a filter on the composer, not a replacement for it, so
@@ -1528,7 +1593,7 @@ impl App {
             Action::ReactToSelected => self.open_emoji_for_reaction(),
             Action::Accept => self.accept_selection(),
             Action::Cancel => {
-                self.help = false;
+                self.close_modal();
                 self.cancel_pending();
                 self.stop_typing();
                 self.mode = Mode::Normal;
@@ -1623,7 +1688,7 @@ impl App {
                 // What the key opens depends entirely on where the account stands, and
                 // offering the wrong one is worse than offering nothing: asking for a
                 // key that was never created, or quietly replacing one that works.
-                self.recovery_prompt = Some(match self.recovery {
+                self.open_modal(Modal::Recovery(match self.recovery {
                     RecoveryState::Disabled => RecoveryPanel::OfferEnable,
                     RecoveryState::Enabled => RecoveryPanel::ConfirmReset,
                     RecoveryState::Incomplete | RecoveryState::Unknown => RecoveryPanel::AskKey {
@@ -1631,7 +1696,7 @@ impl App {
                         submitted: false,
                         error: None,
                     },
-                });
+                }));
                 self.mode = Mode::Insert;
             }
 
@@ -1667,7 +1732,7 @@ impl App {
             Action::Approve => self.resolve_prompt(true),
             Action::Deny => self.resolve_prompt(false),
 
-            Action::ToggleHelp => self.help = !self.help,
+            Action::ToggleHelp => self.open_modal(Modal::Help),
             Action::Redraw => self.needs_redraw = true,
 
             Action::NextWorkspace => {
@@ -1686,7 +1751,7 @@ impl App {
                 self.status = Some("fuzzy jump is not implemented yet".into());
             }
             Action::CommandPalette => {
-                self.palette = Some(Palette::new());
+                self.open_modal(Modal::Palette(Palette::new()));
                 // The palette is a search box, so keys have to arrive as characters
                 // rather than as the commands they mean in normal mode.
                 self.mode = Mode::Insert;
@@ -3369,12 +3434,13 @@ mod tests {
         );
 
         app.apply_action(Action::CommandPalette);
-        assert!(app.palette.is_some());
+        assert!(app.palette().is_some());
         assert_eq!(app.mode, Mode::Insert, "the palette is typed into");
 
         type_query(&mut app, "split r");
         assert_eq!(
-            app.palette
+            app.palette()
+                .cloned()
                 .as_ref()
                 .and_then(|p| p.chosen())
                 .expect("match")
@@ -3384,7 +3450,7 @@ mod tests {
 
         app.apply_action(Action::Submit);
         assert!(
-            app.palette.is_none(),
+            app.palette().is_none(),
             "running a command closes the palette"
         );
         assert_eq!(app.mode, Mode::Normal);
@@ -3410,7 +3476,7 @@ mod tests {
         type_query(&mut app, "qj");
 
         assert!(!app.should_quit);
-        assert_eq!(app.palette.as_ref().expect("open").query, "qj");
+        assert_eq!(app.palette().expect("open").query, "qj");
     }
 
     #[test]
@@ -3420,7 +3486,7 @@ mod tests {
         type_query(&mut app, "quit");
         app.apply_action(Action::Cancel);
 
-        assert!(app.palette.is_none());
+        assert!(app.palette().is_none());
         assert_eq!(app.mode, Mode::Normal);
         assert!(
             !app.should_quit,
@@ -3435,7 +3501,7 @@ mod tests {
         type_query(&mut app, "xyzzy");
         app.apply_action(Action::Submit);
 
-        assert!(app.palette.is_none());
+        assert!(app.palette().is_none());
         assert!(!app.should_quit);
         assert_eq!(app.status.as_deref(), Some("no command selected"));
     }
@@ -3445,11 +3511,11 @@ mod tests {
         let mut app = app();
         app.apply_action(Action::CommandPalette);
         app.apply_action(Action::CaretDown);
-        assert_eq!(app.palette.as_ref().expect("open").selected, 1);
-        assert!(app.palette.as_ref().expect("open").query.is_empty());
+        assert_eq!(app.palette().expect("open").selected, 1);
+        assert!(app.palette().expect("open").query.is_empty());
 
         app.apply_action(Action::CaretUp);
-        assert_eq!(app.palette.as_ref().expect("open").selected, 0);
+        assert_eq!(app.palette().expect("open").selected, 0);
     }
 
     #[test]
@@ -3458,7 +3524,7 @@ mod tests {
         app.apply_action(Action::CommandPalette);
         type_query(&mut app, "zoom");
         app.apply_action(Action::Backspace);
-        assert_eq!(app.palette.as_ref().expect("open").query, "zoo");
+        assert_eq!(app.palette().expect("open").query, "zoo");
         assert!(app.composer().is_none_or(|c| c.text().is_empty()));
     }
 
@@ -3471,9 +3537,9 @@ mod tests {
         type_query(&mut app, "thread picker");
         app.apply_action(Action::Submit);
 
-        assert!(app.palette.is_none());
+        assert!(app.palette().is_none());
         assert!(
-            app.threads.is_some(),
+            app.threads().is_some(),
             "the thread picker should have opened"
         );
     }
@@ -3663,6 +3729,14 @@ mod tests {
     }
 
     /// Two rooms, so there is a tab to switch *to*.
+    /// Panes in the focused tab.
+    fn pane_count(app: &App) -> usize {
+        app.workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map_or(0, |t| t.panes.len())
+    }
+
     fn app_with_two_rooms() -> App {
         let mut app = App::new(Config::default(), Layout::default());
         app.apply_worker_event(WorkerEvent::Rooms(vec![
@@ -4025,14 +4099,14 @@ mod tests {
         let _ = app.take_commands();
 
         app.apply_action(Action::ReactToSelected);
-        assert!(app.emoji.is_some(), "the picker must open");
+        assert!(app.emoji().is_some(), "the picker must open");
 
         for c in "rocket".chars() {
             app.apply_action(Action::Insert(c));
         }
         app.apply_action(Action::Accept);
 
-        assert!(app.emoji.is_none(), "accepting closes the picker");
+        assert!(app.emoji().is_none(), "accepting closes the picker");
         match app.take_commands().as_slice() {
             [Command::ToggleReaction {
                 view: v,
@@ -4052,7 +4126,7 @@ mod tests {
         let mut app = app_with_messages();
         app.apply_action(Action::ReactToSelected);
 
-        assert!(app.emoji.is_none());
+        assert!(app.emoji().is_none());
         assert!(app.take_commands().is_empty());
         assert!(app.status.is_some(), "and says why");
     }
@@ -4071,7 +4145,7 @@ mod tests {
         }
         app.apply_action(Action::Submit);
 
-        assert!(app.emoji.is_none());
+        assert!(app.emoji().is_none());
         assert_eq!(app.composer().expect("composer").text(), "ship it 🚀");
         assert_eq!(
             app.mode,
@@ -4097,7 +4171,7 @@ mod tests {
         app.apply_action(Action::NextWorkspace);
         app.apply_action(Action::RedactMessage);
 
-        assert!(app.emoji.is_some(), "the picker stays open");
+        assert!(app.emoji().is_some(), "the picker stays open");
         assert_eq!(app.workspaces.focused().map(|w| w.id.clone()), before);
         assert!(app.take_commands().is_empty());
     }
@@ -4111,7 +4185,7 @@ mod tests {
         app.apply_action(Action::ReactToSelected);
         app.apply_action(Action::Cancel);
 
-        assert!(app.emoji.is_none());
+        assert!(app.emoji().is_none());
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.take_commands().is_empty());
     }
@@ -4329,7 +4403,7 @@ mod tests {
         }));
 
         assert!(matches!(
-            app.verification,
+            app.verification().cloned(),
             Some(Verification::Requested { .. })
         ));
     }
@@ -4398,7 +4472,7 @@ mod tests {
             "the layout must be untouched"
         );
         assert!(matches!(
-            app.verification,
+            app.verification().cloned(),
             Some(Verification::Compare { .. })
         ));
     }
@@ -4409,7 +4483,7 @@ mod tests {
         app.apply_worker_event(WorkerEvent::Verification(comparing()));
         app.apply_worker_event(WorkerEvent::Verification(Verification::Done));
 
-        assert!(app.verification.is_none(), "good news needs no dialog");
+        assert!(app.verification().is_none(), "good news needs no dialog");
         assert_eq!(app.device_verified, Some(true));
         assert!(app.status.is_some());
     }
@@ -4422,7 +4496,7 @@ mod tests {
             reason: "m.mismatched_sas".into(),
         }));
 
-        assert!(app.verification.is_none());
+        assert!(app.verification().is_none());
         assert!(
             app.status
                 .as_deref()
@@ -4486,7 +4560,7 @@ mod tests {
         let mut app = app();
         app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Incomplete));
         app.apply_action(Action::OpenRecovery);
-        assert!(app.recovery_prompt.is_some());
+        assert!(app.recovery_prompt().is_some());
 
         for c in "EsTc 1234".chars() {
             app.apply_action(Action::Insert(c));
@@ -4502,7 +4576,7 @@ mod tests {
             "nothing may escape the prompt before the key is submitted"
         );
         assert!(matches!(
-            &app.recovery_prompt,
+            app.recovery_prompt(),
             Some(RecoveryPanel::AskKey { key, .. }) if key == "EsTc 1234"
         ));
     }
@@ -4523,7 +4597,7 @@ mod tests {
         }
         assert!(
             matches!(
-                &app.recovery_prompt,
+                app.recovery_prompt(),
                 Some(RecoveryPanel::AskKey { key, submitted: true, .. }) if key.is_empty()
             ),
             "the key must not be left sitting in the prompt after being sent"
@@ -4540,7 +4614,7 @@ mod tests {
         }
         app.apply_action(Action::Cancel);
 
-        assert!(app.recovery_prompt.is_none());
+        assert!(app.recovery_prompt().is_none());
         assert!(app.take_commands().is_empty());
     }
 
@@ -4551,7 +4625,7 @@ mod tests {
         app.apply_action(Action::OpenRecovery);
 
         assert_eq!(
-            app.recovery_prompt,
+            app.recovery_prompt().cloned(),
             Some(RecoveryPanel::OfferEnable),
             "asking for a key that was never created sends the user hunting for nothing"
         );
@@ -4572,13 +4646,19 @@ mod tests {
         let mut app = app();
         app.apply_worker_event(WorkerEvent::Recovery(RecoveryState::Enabled));
         app.apply_action(Action::OpenRecovery);
-        assert_eq!(app.recovery_prompt, Some(RecoveryPanel::ConfirmReset));
+        assert_eq!(
+            app.recovery_prompt().cloned(),
+            Some(RecoveryPanel::ConfirmReset)
+        );
 
         // Enter is what a user presses to dismiss a dialog they have not read. It must
         // not be what destroys the key every other device is holding.
         app.apply_action(Action::Submit);
         assert!(app.take_commands().is_empty());
-        assert_eq!(app.recovery_prompt, Some(RecoveryPanel::ConfirmReset));
+        assert_eq!(
+            app.recovery_prompt().cloned(),
+            Some(RecoveryPanel::ConfirmReset)
+        );
 
         app.apply_action(Action::Approve);
         assert!(matches!(
@@ -4594,7 +4674,7 @@ mod tests {
         app.apply_action(Action::OpenRecovery);
         app.apply_action(Action::Deny);
 
-        assert!(app.recovery_prompt.is_none());
+        assert!(app.recovery_prompt().is_none());
         assert!(app.take_commands().is_empty());
     }
 
@@ -4609,7 +4689,7 @@ mod tests {
         app.apply_worker_event(WorkerEvent::RecoveryKeyCreated("EsTc AAAA BBBB".into()));
 
         assert_eq!(
-            app.recovery_prompt,
+            app.recovery_prompt().cloned(),
             Some(RecoveryPanel::ShowKey {
                 key: "EsTc AAAA BBBB".into()
             })
@@ -4620,7 +4700,7 @@ mod tests {
         );
 
         app.apply_action(Action::Accept);
-        assert!(app.recovery_prompt.is_none());
+        assert!(app.recovery_prompt().is_none());
     }
 
     /// A plain message from someone else.
@@ -4818,7 +4898,7 @@ mod tests {
             [Command::ListThreads { room_id }] => assert_eq!(room_id, "!r:x"),
             other => panic!("expected ListThreads, got {other:?}"),
         }
-        assert!(app.threads.as_ref().expect("picker").loading);
+        assert!(app.threads().expect("picker").loading);
 
         app.apply_worker_event(WorkerEvent::Threads {
             room_id: "!r:x".into(),
@@ -4829,7 +4909,7 @@ mod tests {
                 timestamp: 0,
             }],
         });
-        assert!(!app.threads.as_ref().expect("picker").loading);
+        assert!(!app.threads().expect("picker").loading);
 
         let panes_before = app
             .workspaces
@@ -4838,7 +4918,7 @@ mod tests {
             .map_or(0, |t| t.panes.len());
 
         app.apply_action(Action::Accept);
-        assert!(app.threads.is_none(), "opening must close the picker");
+        assert!(app.threads().is_none(), "opening must close the picker");
 
         let tab = app
             .workspaces
@@ -4869,7 +4949,7 @@ mod tests {
                 timestamp: 0,
             }],
         });
-        let picker = app.threads.as_ref().expect("picker");
+        let picker = app.threads().expect("picker");
         assert!(picker.threads.is_empty());
         assert!(
             picker.loading,
@@ -5152,15 +5232,66 @@ mod tests {
     #[test]
     fn the_help_overlay_toggles_and_escape_closes_it() {
         let mut app = app();
-        assert!(!app.help);
+        assert!(!matches!(app.modal, Some(Modal::Help)));
         app.apply_action(Action::ToggleHelp);
-        assert!(app.help);
+        assert!(matches!(app.modal, Some(Modal::Help)));
         app.apply_action(Action::ToggleHelp);
-        assert!(!app.help);
+        assert!(!matches!(app.modal, Some(Modal::Help)));
 
         app.apply_action(Action::ToggleHelp);
         app.apply_action(Action::Cancel);
-        assert!(!app.help, "escape must close the overlay");
+        assert!(
+            !matches!(app.modal, Some(Modal::Help)),
+            "escape must close the overlay"
+        );
+    }
+
+    #[test]
+    fn a_second_overlay_cannot_open_over_the_first() {
+        // The bug this makes impossible. The thread picker's match had a `_ => {}` arm,
+        // so `:` fell through it into the main keymap and opened the palette -- leaving
+        // both on screen, both drawn, with the palette checked first so the picker
+        // underneath was unreachable and even its own escape was eaten.
+        //
+        // Now the picker owns the key and nothing happens, which is also the better
+        // answer: the user gets the overlay they already asked for.
+        let mut app = app_with_two_rooms();
+        app.apply_action(Action::OpenThreads);
+        assert!(app.threads().is_some());
+
+        app.apply_action(Action::CommandPalette);
+
+        assert!(app.palette().is_none(), "no palette opened over the picker");
+        assert!(app.threads().is_some(), "and the picker is still reachable");
+    }
+
+    #[test]
+    fn the_thread_picker_swallows_keys_that_would_act_behind_it() {
+        // `_ => {}` used to let everything it did not recognise fall through to the
+        // main keymap, so a picker could split the pane it was covering.
+        let mut app = app_with_two_rooms();
+        app.apply_action(Action::OpenThreads);
+        let before = pane_count(&app);
+
+        app.apply_action(Action::Split(heddle_layout::Dir::Right));
+
+        assert_eq!(pane_count(&app), before, "the split must not have happened");
+        assert!(app.threads().is_some(), "and the picker is still up");
+    }
+
+    #[test]
+    fn the_key_overlay_swallows_keys_that_would_act_behind_it() {
+        // The help overlay was drawn but appeared in no dispatch chain at all, so `D`
+        // still armed a redaction and a split still split, behind a panel covering the
+        // transcript they were acting on.
+        let mut app = app_with_two_rooms();
+        app.apply_action(Action::ToggleHelp);
+        let before = pane_count(&app);
+
+        app.apply_action(Action::Split(heddle_layout::Dir::Right));
+
+        assert_eq!(pane_count(&app), before);
+        assert!(matches!(app.modal, Some(Modal::Help)));
     }
 
     #[test]
