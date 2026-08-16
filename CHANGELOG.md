@@ -17,6 +17,11 @@ format are possible in any 0.x release, and will be listed here.
   to twenty seconds later. The state machine and the badge already handled this; nothing
   had ever produced the event.
 
+- A `!` marker in the pane header when the transcript is missing events. Gap detection
+  on the agent event `seq` already worked and healed itself when a late event arrived;
+  it just had no way of telling anyone. Markers stack worst-first: `!~` is a pane that
+  is both missing events and reading them out of printed chrome.
+
 ### Fixed
 
 - Quitting could hang for ever. `Handle::shutdown` held the event receiver across the

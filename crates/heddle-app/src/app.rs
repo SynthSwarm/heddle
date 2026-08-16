@@ -1243,6 +1243,7 @@ impl App {
                     if let Some(session) = self.agents.get(root) {
                         pane.state = session.state();
                         pane.degraded = session.degraded;
+                        pane.gaps = session.has_gaps();
                     }
                 }
             }
@@ -2993,6 +2994,67 @@ mod tests {
             .focused_tab()
             .expect("tab");
         assert_eq!(tab.state(), AgentState::Idle);
+    }
+
+    #[test]
+    fn a_missing_event_is_marked_in_the_pane_header() {
+        let mut app = app();
+        app.open_thread_pane("$root".into(), "a thread".into());
+
+        // seq 2 never arrives, so the store records a gap. heddle knowing the
+        // transcript is partial and not saying so is the bug this guards.
+        let mut first = event(Kind::Commentary);
+        first.seq = 1;
+        let mut third = event(Kind::Commentary);
+        third.seq = 3;
+
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::thread("!r:x", "$root"),
+            entries: vec![agent_entry("$e1", first), agent_entry("$e3", third)],
+        });
+
+        let pane = app
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab")
+            .focused_pane()
+            .expect("pane");
+        assert!(pane.gaps);
+        assert!(pane.header().contains('!'));
+    }
+
+    #[test]
+    fn a_late_event_clears_the_gap_marker() {
+        let mut app = app();
+        app.open_thread_pane("$root".into(), "a thread".into());
+
+        let mut first = event(Kind::Commentary);
+        first.seq = 1;
+        let mut third = event(Kind::Commentary);
+        third.seq = 3;
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::thread("!r:x", "$root"),
+            entries: vec![agent_entry("$e1", first), agent_entry("$e3", third)],
+        });
+
+        let mut second = event(Kind::Commentary);
+        second.seq = 2;
+        app.apply_worker_event(WorkerEvent::Timeline {
+            view: View::thread("!r:x", "$root"),
+            entries: vec![agent_entry("$e2", second)],
+        });
+
+        let pane = app
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .focused_tab()
+            .expect("tab")
+            .focused_pane()
+            .expect("pane");
+        assert!(!pane.gaps, "a healed gap is no longer a gap");
     }
 
     #[test]
