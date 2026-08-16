@@ -20,18 +20,28 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  checks: write
 
 jobs:
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # `issues: write` and `checks: write` are scoped to the job rather than the
+    # workflow, and only for the triggers that can use them. On a fork's pull request
+    # the token is read-only regardless, so the action can only ever report through the
+    # step's own exit status there.
+    permissions:
+      contents: read
+      issues: write
+      checks: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # This client holds an access token and every Megolm key the device has seen. A
       # vulnerable dependency is not an abstract problem here, and the whole tree is
       # third-party crypto and networking.
-      - uses: rustsec/audit-check@v2
+      #
+      # `@v2` here was a *branch*, not a tag -- upstream never published a v2 tag -- so
+      # every run executed whatever its head pointed at. Pinned; see the note in ci.yml.
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2 branch
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only. Nothing in this workflow writes to the repository, and the default
+# permission set is whatever the org happens to hand out -- which on many is
+# read/write. Declaring it here means a compromised build script in the ~700-crate
+# dependency tree cannot push.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -15,17 +22,27 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Actions are pinned to commit SHAs rather than tags. `@v4` is a tag the upstream owner
+# can move, and `dtolnay/rust-toolchain@stable` was not even a tag -- it is a branch, so
+# a force-push to it executed in every job here. Pinning to a SHA is the only form of
+# `uses:` that says what it will run. The trailing comment is the human-readable version
+# and is what dependabot rewrites when it bumps the pin.
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # `toolchain` is explicit because the SHA pin loses the branch name that used to
+      # select it: on `master` the input is `required: true`.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -44,18 +61,48 @@ jobs:
   # wall-clock nothing.
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Build release
         run: cargo build --release --locked
 
+  # The musl target ships in every release but was previously only ever built at tag
+  # time, which is the worst moment to discover that the cross-compile broke. `check`
+  # rather than `build`: this exists to catch a `bundled-sqlite` or cc-rs failure, and
+  # linking the binary again buys nothing the release job does not already do.
+  musl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+      - name: Check musl
+        run: cargo check --workspace --locked --target x86_64-unknown-linux-musl
+
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.93.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.93.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # `--all-targets`, so the floor covers test and bench code too. Checking only the
+      # library let a test module use a newer API and still pass.
       - name: Check MSRV
-        run: cargo check --workspace --locked
+        run: cargo check --workspace --all-targets --locked

@@ -18,16 +18,90 @@ on:
         required: true
         type: string
 
+# Read by default. Only `publish` gets `contents: write`, and only after the tests have
+# run. Previously this was workflow-level, which handed write access to the build matrix
+# -- the jobs that compile build scripts from the whole dependency tree.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
+# Actions are pinned to commit SHAs; see the note in ci.yml.
+
 jobs:
+  # The push trigger constrains the tag by glob, but `workflow_dispatch` takes free text
+  # that was previously interpolated straight into a `run:` block -- GitHub substitutes
+  # `${{ }}` before bash sees the script, so a tag containing shell metacharacters ran as
+  # code in a job that could write to the repository. Everything downstream uses this
+  # job's output, which has been matched against the same shape the push trigger accepts.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - id: resolve
+        shell: bash
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RAW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "refusing to build '$RAW_TAG': expected vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          version="${RAW_TAG#v}"
+          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A 0.x release is a prerelease, which is what README.md and CHANGELOG.md
+          # already say in prose. Marking it means the badge agrees with the text.
+          if [[ "$version" == 0.* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # A dispatched release previously ran no tests at all. Publishing a binary nobody has
+  # tested is the one thing a release workflow must not make easy.
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # The tag is the only statement of the version anyone sees; `Cargo.toml` is the one
+      # the binary reports. A tag that disagrees ships a build that lies about itself.
+      - name: Check the tag matches Cargo.toml
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          declared=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "heddle-app") | .version')
+          if [ "$declared" != "$VERSION" ]; then
+            echo "tag says $VERSION, Cargo.toml says $declared" >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --workspace --locked
+
   build:
+    needs: [prepare, verify]
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       # One target failing must not withhold the others from the release. A missing
       # musl build is a nuisance; a missing release is a broken announcement.
@@ -44,15 +118,16 @@ jobs:
             os: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -71,19 +146,25 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      # Every interpolated value reaches bash through `env:` rather than through `${{ }}`
+      # inside the script. `matrix.target` is workflow-controlled and `VERSION` has been
+      # validated, but doing it uniformly means the next value added here is safe by
+      # default rather than by review.
       - name: Package
         shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || github.ref_name }}"
-          name="heddle-${tag#v}-${{ matrix.target }}"
+          name="heddle-${VERSION}-${TARGET}"
           mkdir -p "dist/${name}"
-          cp "target/${{ matrix.target }}/release/heddle" "dist/${name}/"
+          cp "target/${TARGET}/release/heddle" "dist/${name}/"
           cp README.md LICENSE NOTICE CHANGELOG.md "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.target }}
           path: dist/*.tar.gz*
@@ -92,17 +173,32 @@ jobs:
   # Separate from the build matrix so that several jobs do not race to create the same
   # release. They collect here, and one job publishes.
   publish:
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
+
+      # The checksums were written next to the tarballs by the job that built them and
+      # have been through an upload and a download since. Verifying costs a second and is
+      # the only thing that makes publishing them more than decoration.
+      - name: Verify checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          for sum in *.sha256; do
+            sha256sum --check "$sum"
+          done
 
       # Just this version's section. Passing the whole changelog would make every
       # release note grow by the length of the project's history.
@@ -111,25 +207,26 @@ jobs:
       # match for 1.0.1 also finds 1.0.10 and would publish the wrong notes.
       - name: Extract release notes
         shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || github.ref_name }}"
-          version="${tag#v}"
-          awk -v v="$version" '
+          awk -v v="$VERSION" '
             $1 == "##" && $2 == v { found = 1; print; next }
             found && $1 == "##" { exit }
             found { print }
           ' CHANGELOG.md > notes.md
           # An empty file would silently publish a release with no description.
           if [ ! -s notes.md ]; then
-            echo "no CHANGELOG.md section found for ${version}" >&2
+            echo "no CHANGELOG.md section found for ${VERSION}" >&2
             exit 1
           fi
           cat notes.md
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
           body_path: notes.md
           files: |
             dist/*.tar.gz
