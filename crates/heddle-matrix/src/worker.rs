@@ -17,6 +17,7 @@ use futures_util::{pin_mut, StreamExt};
 use heddle_agent::{Adapters, Ingest};
 use matrix_sdk::{
     encryption::verification::VerificationRequest,
+    event_handler::EventHandlerDropGuard,
     ruma::{
         events::{
             key::verification::request::ToDeviceKeyVerificationRequestEvent,
@@ -35,6 +36,7 @@ use matrix_sdk_ui::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -166,6 +168,7 @@ pub async fn spawn(
             client,
             sync_service,
             views: HashMap::new(),
+            typing: HashMap::new(),
             events: event_tx,
             agents: Arc::new(agents),
             verification: None,
@@ -198,10 +201,29 @@ impl Drop for OpenView {
     }
 }
 
+/// A room's typing subscription plus the task forwarding it.
+///
+/// One per room, not per view: `m.typing` is room-scoped, so N thread panes on one room
+/// still get one subscription and one event.
+struct TypingWatch {
+    /// Removes the room event handler when dropped. Never read; held for its `Drop`.
+    _guard: EventHandlerDropGuard,
+    forward: JoinHandle<()>,
+}
+
+impl Drop for TypingWatch {
+    fn drop(&mut self) {
+        self.forward.abort();
+    }
+}
+
 struct Worker {
     client: Client,
     sync_service: SyncService,
     views: HashMap<View, OpenView>,
+    /// Typing subscriptions, keyed by room ID. Kept alive for as long as some view on
+    /// that room is open; see `prune_typing`.
+    typing: HashMap<String, TypingWatch>,
     events: mpsc::Sender<WorkerEvent>,
     /// The agent integrations consulted for every message. Shared with the per-view
     /// forwarding tasks, which decode on their own.
@@ -350,6 +372,7 @@ impl Worker {
         }
 
         self.views.clear();
+        self.typing.clear();
         self.client.remove_event_handler(handler);
         self.sync_service.stop().await;
         Ok(())
@@ -389,6 +412,7 @@ impl Worker {
 
             Command::CloseView(view) => {
                 self.views.remove(&view);
+                self.prune_typing();
             }
 
             Command::Paginate { view, count } => {
@@ -878,7 +902,62 @@ impl Worker {
         });
 
         self.views.insert(view, OpenView { timeline, forward });
+        self.watch_typing(&room);
         Ok(())
+    }
+
+    /// Forward this room's typing notifications, once per room.
+    ///
+    /// An agent typing is what makes a pane look busy during model latency -- the gap
+    /// between the prompt and the first token, which for a coding agent is seconds.
+    fn watch_typing(&mut self, room: &Room) {
+        let room_id = room.room_id().to_string();
+        if self.typing.contains_key(&room_id) {
+            return;
+        }
+
+        // The guard must outlive the receiver: dropping it removes the handler, after
+        // which the channel closes and the task below ends.
+        let (guard, mut receiver) = room.subscribe_to_typing_notifications();
+        let events = self.events.clone();
+        let id = room_id.clone();
+
+        let forward = tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(users) => {
+                        // The SDK has already filtered out our own user.
+                        let users = users.iter().map(ToString::to_string).collect::<Vec<_>>();
+                        tracing::trace!(room_id = %id, ?users, "typing");
+                        let _ = events
+                            .send(WorkerEvent::Typing {
+                                room_id: id.clone(),
+                                users,
+                            })
+                            .await;
+                    }
+                    // Only the latest list matters, so a missed one is not worth
+                    // reporting: the next event supersedes it either way.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        self.typing.insert(
+            room_id,
+            TypingWatch {
+                _guard: guard,
+                forward,
+            },
+        );
+    }
+
+    /// Drop typing subscriptions for rooms with no open view left.
+    fn prune_typing(&mut self) {
+        let views = &self.views;
+        self.typing
+            .retain(|room_id, _| views.keys().any(|v| &v.room_id == room_id));
     }
 }
 

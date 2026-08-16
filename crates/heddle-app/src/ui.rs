@@ -1,13 +1,14 @@
 //! Terminal drawing.
 //!
 //! Pure layout and painting. All decisions live in [`crate::app`]; this module only
-//! turns state into cells.
+//! turns state into cells, and hands back the [`Geometry`] it measured while doing so.
 
-use crate::app::{App, Hit, Modal, Pending, RecoveryPanel};
+use crate::app::{App, BarHits, Geometry, Hit, Modal, Pending, RecoveryPanel};
 use crate::composer::Composer;
 use crate::keymap::{self, Mode};
 use crate::palette::keys_for;
 use heddle_agent::AgentState;
+use heddle_layout::Placement;
 use heddle_matrix::{MemberSummary, SyncState, View};
 use heddle_render::transcript::Anchor;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -36,21 +37,42 @@ const HINT_GAP: usize = 3;
 /// the spill lands on a blank cell instead of the pane border.
 const TRANSCRIPT_GUTTER: u16 = 1;
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
-    let chunks = Layout::default()
+/// The five horizontal bands of a frame, top to bottom: workspace bar, tab bar, panes,
+/// composer, status.
+///
+/// The only place the split is decided, so the rectangle the tiling engine is told about
+/// and the one the panes are painted into cannot drift apart.
+fn bands(app: &App, area: Rect) -> [Rect; 5] {
+    Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // workspace bar
             Constraint::Length(1), // tab bar
             Constraint::Min(3),    // panes
-            Constraint::Length(composer_height(app, frame.area().width)),
+            Constraint::Length(composer_height(app, area.width)),
             Constraint::Length(1), // status
         ])
-        .split(frame.area());
+        .areas(area)
+}
 
-    draw_workspace_bar(frame, app, chunks[0]);
-    draw_tab_bar(frame, app, chunks[1]);
-    draw_panes(frame, app, chunks[2]);
+/// The band the panes are tiled into. The event loop lays the tiling out against it
+/// before drawing; see [`App::lay_out_panes`].
+pub fn pane_band(app: &App, area: Rect) -> Rect {
+    bands(app, area)[2]
+}
+
+/// Paint a frame and hand back what painting it measured.
+///
+/// `panes` is the tiling's answer for [`pane_band`], computed by the caller: laying out
+/// the BSP tree mutates it (it caches the area, which is what resolves later clicks),
+/// and that is a decision, not a measurement.
+pub fn draw(frame: &mut Frame, app: &App, panes: &[Placement]) -> Geometry {
+    let chunks = bands(app, frame.area());
+
+    let mut bars = BarHits::default();
+    draw_workspace_bar(frame, app, chunks[0], &mut bars);
+    draw_tab_bar(frame, app, chunks[1], &mut bars);
+    let transcript = draw_panes(frame, app, chunks[2], panes);
     let caret = draw_composer(frame, app, chunks[3]);
     draw_status(frame, app, chunks[4]);
 
@@ -72,6 +94,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Some(Modal::Recovery(_)) => draw_recovery(frame, app, frame.area()),
         None => {}
     }
+
+    Geometry {
+        rendered_lines: transcript.rendered_lines,
+        viewport_height: transcript.viewport_height,
+        anchors: transcript.anchors,
+        bars,
+    }
+}
+
+/// What drawing the focused transcript measured.
+#[derive(Debug, Default)]
+struct Measured {
+    rendered_lines: u16,
+    viewport_height: u16,
+    anchors: Vec<Anchor>,
 }
 
 /// The interactive verification panel.
@@ -805,7 +842,7 @@ fn tab_strip(
     (spans, hits, x)
 }
 
-fn draw_workspace_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_workspace_bar(frame: &mut Frame, app: &App, area: Rect, bars: &mut BarHits) {
     let focused_id = app.workspaces.focused().map(|w| w.id.clone());
 
     let cells: Vec<(String, Style)> = app
@@ -839,7 +876,7 @@ fn draw_workspace_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let spans = if cells.is_empty() {
-        app.bars.workspaces = Vec::new();
+        bars.workspaces = Vec::new();
         vec![Span::styled(
             " connecting… ".to_owned(),
             app.theme.dim_style(),
@@ -847,10 +884,10 @@ fn draw_workspace_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         // No `+`: creating a Space is out of scope, SPEC.md §7.
         let (spans, hits, _) = tab_strip(cells, app.theme.dim_style(), area.x);
-        app.bars.workspaces = hits;
+        bars.workspaces = hits;
         spans
     };
-    app.bars.workspace_row = area.y;
+    bars.workspace_row = area.y;
 
     let (state, count) = app.badge();
     let badge = if count > 0 && state.is_notable() {
@@ -876,10 +913,10 @@ fn draw_workspace_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect, bars: &mut BarHits) {
     let Some(workspace) = app.workspaces.focused() else {
-        app.bars.tabs = Vec::new();
-        app.bars.new_tab = None;
+        bars.tabs = Vec::new();
+        bars.new_tab = None;
         return;
     };
     let focused_room = workspace.focused_tab().map(|t| t.room_id.clone());
@@ -924,20 +961,15 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     let plus_width = UnicodeWidthStr::width(plus) as u16;
     spans.push(Span::styled(plus, app.theme.dim_style()));
 
-    app.bars.tab_row = area.y;
-    app.bars.tabs = hits;
-    app.bars.new_tab = Some((x, x + plus_width));
+    bars.tab_row = area.y;
+    bars.tabs = hits;
+    bars.new_tab = Some((x, x + plus_width));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
-    let Some(room_id) = app
-        .workspaces
-        .focused()
-        .and_then(|w| w.focused_tab())
-        .map(|t| t.room_id.clone())
-    else {
+fn draw_panes(frame: &mut Frame, app: &App, area: Rect, placements: &[Placement]) -> Measured {
+    if placements.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "no rooms yet".to_owned(),
@@ -945,10 +977,8 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
             )),
             area,
         );
-        return;
-    };
-
-    let placements = app.tilings.entry(room_id).or_default().layout(area);
+        return Measured::default();
+    }
 
     // Everything each pane needs, gathered before the frame is borrowed mutably.
     let panes: Vec<_> = placements
@@ -1009,15 +1039,19 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Hand back the focused pane's geometry: scroll clamping, pagination and
     // scroll-to-selection all measure against it.
-    if let Some((_, _, _, inner, rendered, _)) =
-        drawn.iter().find(|(placement, ..)| placement.is_focused)
-    {
-        let width = inner.width.saturating_sub(TRANSCRIPT_GUTTER);
-        let paragraph = Paragraph::new(rendered.lines.clone()).wrap(Wrap { trim: false });
-        app.rendered_lines = paragraph.line_count(width) as u16;
-        app.viewport_height = inner.height;
-        app.anchors = wrapped_anchors(&rendered.lines, &rendered.anchors, width);
-    }
+    let measured = drawn
+        .iter()
+        .find(|(placement, ..)| placement.is_focused)
+        .map(|(_, _, _, inner, rendered, _)| {
+            let width = inner.width.saturating_sub(TRANSCRIPT_GUTTER);
+            let paragraph = Paragraph::new(rendered.lines.clone()).wrap(Wrap { trim: false });
+            Measured {
+                rendered_lines: paragraph.line_count(width) as u16,
+                viewport_height: inner.height,
+                anchors: wrapped_anchors(&rendered.lines, &rendered.anchors, width),
+            }
+        })
+        .unwrap_or_default();
 
     for (placement, header, state, inner, rendered, scroll) in drawn {
         let block = Block::default()
@@ -1050,6 +1084,8 @@ fn draw_panes(frame: &mut Frame, app: &mut App, area: Rect) {
         // Border last, so the chrome is painted over any transcript overflow.
         frame.render_widget(block, placement.rect);
     }
+
+    measured
 }
 
 fn inner_of(rect: Rect) -> Rect {
@@ -1273,5 +1309,154 @@ mod tests {
         let anchors = vec![anchor("$a", 7)];
 
         assert_eq!(wrapped_anchors(&lines, &anchors, 0), anchors);
+    }
+
+    // ------------------------------------------------------------------ the click seam
+
+    const AREA: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 24,
+    };
+
+    fn room(room_id: &str, display_name: &str) -> heddle_matrix::RoomSummary {
+        heddle_matrix::RoomSummary {
+            room_id: room_id.into(),
+            display_name: display_name.into(),
+            is_space: false,
+            parents: Vec::new(),
+            is_direct: false,
+            is_encrypted: false,
+            notification_count: 0,
+            highlight_count: 0,
+        }
+    }
+
+    /// Draw one real frame; hand back the geometry it measured and the cells it painted.
+    fn painted(app: &mut App) -> (Geometry, ratatui::buffer::Buffer) {
+        let backend = ratatui::backend::TestBackend::new(AREA.width, AREA.height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        let placements = app.lay_out_panes(pane_band(app, AREA));
+        let mut geometry = Geometry::default();
+        terminal
+            .draw(|frame| geometry = draw(frame, app, &placements))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (geometry, buffer)
+    }
+
+    /// The text painted between two columns of a row.
+    fn cells(buffer: &ratatui::buffer::Buffer, row: u16, x0: u16, x1: u16) -> String {
+        (x0..x1).map(|x| buffer[(x, row)].symbol()).collect()
+    }
+
+    #[test]
+    fn a_recorded_hit_covers_the_cells_its_tab_was_painted_into() {
+        // `tab_strip` decides both where a cell is painted and which columns are
+        // recorded as its hit. Nothing but a real frame can check the two agree, and
+        // until `draw` handed its measurements back there was no way to get one.
+        let mut app = App::new(
+            crate::config::Config::default(),
+            heddle_layout::Layout::default(),
+        );
+        app.apply_worker_event(heddle_matrix::WorkerEvent::Rooms(vec![
+            room("!a:x", "alpha"),
+            room("!b:x", "bravo"),
+            room("!c:x", "charlie"),
+        ]));
+        let _ = app.take_commands();
+
+        let (geometry, buffer) = painted(&mut app);
+        let bars = &geometry.bars;
+        assert_eq!(bars.tabs.len(), 3, "one hit per tab");
+
+        for (index, title) in ["alpha", "bravo", "charlie"].iter().enumerate() {
+            let hit = bars.tabs[index];
+            let painted = cells(&buffer, bars.tab_row, hit.x0, hit.x1);
+            assert_eq!(
+                painted.trim(),
+                *title,
+                "hit {index} spans columns {}..{} which hold {painted:?}",
+                hit.x0,
+                hit.x1
+            );
+            assert!(
+                !painted.contains(TAB_SEPARATOR),
+                "a hit must not reach into a separator, got {painted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_tab_focuses_the_tab_that_was_drawn_there() {
+        let mut app = App::new(
+            crate::config::Config::default(),
+            heddle_layout::Layout::default(),
+        );
+        app.apply_worker_event(heddle_matrix::WorkerEvent::Rooms(vec![
+            room("!a:x", "alpha"),
+            room("!b:x", "bravo"),
+            room("!c:x", "charlie"),
+        ]));
+        let _ = app.take_commands();
+
+        app.geometry = painted(&mut app).0;
+        let bars = app.geometry.bars.clone();
+
+        for (index, title) in ["alpha", "bravo", "charlie"].iter().enumerate() {
+            let hit = bars.tabs[index];
+            // The middle of the cell, so this is not really a test about boundaries.
+            let column = hit.x0 + (hit.x1 - hit.x0) / 2;
+            assert!(
+                app.click_bar(column, bars.tab_row),
+                "column {column} is on the tab bar"
+            );
+            let focused = app
+                .workspaces
+                .focused()
+                .and_then(|w| w.focused_tab())
+                .map(|t| t.title.clone());
+            assert_eq!(focused.as_deref(), Some(*title), "clicking cell {index}");
+        }
+    }
+
+    #[test]
+    fn a_click_past_the_last_tab_hits_the_new_thread_affordance() {
+        let mut app = App::new(
+            crate::config::Config::default(),
+            heddle_layout::Layout::default(),
+        );
+        app.apply_worker_event(heddle_matrix::WorkerEvent::Rooms(vec![room(
+            "!a:x", "alpha",
+        )]));
+        let _ = app.take_commands();
+
+        let (geometry, buffer) = painted(&mut app);
+        let (x0, x1) = geometry.bars.new_tab.expect("a `+` was drawn");
+
+        assert_eq!(
+            cells(&buffer, geometry.bars.tab_row, x0, x1).trim(),
+            "+",
+            "the recorded span must be the one the `+` was painted into"
+        );
+    }
+
+    #[test]
+    fn the_measured_viewport_is_the_pane_the_frame_actually_drew() {
+        let mut app = App::new(
+            crate::config::Config::default(),
+            heddle_layout::Layout::default(),
+        );
+        app.apply_worker_event(heddle_matrix::WorkerEvent::Rooms(vec![room(
+            "!a:x", "alpha",
+        )]));
+        let _ = app.take_commands();
+
+        let (geometry, _) = painted(&mut app);
+
+        // One pane filling the band, less its two border rows.
+        let expected = pane_band(&app, AREA).height - 2;
+        assert_eq!(geometry.viewport_height, expected);
     }
 }

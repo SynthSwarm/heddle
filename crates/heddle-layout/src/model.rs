@@ -134,6 +134,11 @@ pub struct Pane {
     pub state: AgentState,
     /// Set when this pane's agent events came from the fallback parser.
     pub degraded: bool,
+    /// Set when this pane's session is missing events outright.
+    ///
+    /// Distinct from `degraded`, and worse: degraded means the structure was recovered
+    /// lossily from what did arrive, a gap means something never arrived at all.
+    pub gaps: bool,
 }
 
 impl Pane {
@@ -144,13 +149,18 @@ impl Pane {
             title: title.into(),
             state: AgentState::Idle,
             degraded: false,
+            gaps: false,
         }
     }
 
-    /// Header text including the badge and the degraded marker.
+    /// Header text including the badge and any lossiness markers.
+    ///
+    /// Markers run worst-first, so the more serious one is the one nearest the badge and
+    /// a pane that is both does not read as either alone.
     pub fn header(&self) -> String {
-        let marker = if self.degraded { "~" } else { "" };
-        format!("{} {}{}", self.state.glyph(), marker, self.title)
+        let gaps = if self.gaps { "!" } else { "" };
+        let degraded = if self.degraded { "~" } else { "" };
+        format!("{} {}{}{}", self.state.glyph(), gaps, degraded, self.title)
     }
 }
 
@@ -624,10 +634,14 @@ mod tests {
     }
 
     #[test]
-    fn pane_header_shows_badge_and_degraded_marker() {
+    fn pane_header_shows_badge_and_lossiness_markers() {
         let mut p = pane(1, AgentState::Working);
         assert_eq!(p.header(), "● thread 1");
         p.degraded = true;
         assert_eq!(p.header(), "● ~thread 1");
+        p.gaps = true;
+        assert_eq!(p.header(), "● !~thread 1");
+        p.degraded = false;
+        assert_eq!(p.header(), "● !thread 1");
     }
 }

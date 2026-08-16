@@ -16,7 +16,7 @@ mod palette;
 mod ui;
 
 use anyhow::{Context, Result};
-use app::{App, EVENT_BUDGET};
+use app::{App, Geometry, EVENT_BUDGET};
 use clap::{Parser, Subcommand};
 use config::{Config, Dirs};
 use crossterm::event::{
@@ -328,7 +328,18 @@ async fn event_loop(
             force_full_redraw(terminal)?;
             app.needs_redraw = false;
         }
-        terminal.draw(|frame| ui::draw(frame, app))?;
+
+        // Before the frame, not during it: the tiling has to be told which rectangle it
+        // is laying out into, and that is a decision. `autoresize` first so the area
+        // asked about is the one the frame will actually get.
+        terminal.autoresize()?;
+        let area = terminal.get_frame().area();
+        let placements = app.lay_out_panes(ui::pane_band(app, area));
+
+        let mut geometry = Geometry::default();
+        terminal.draw(|frame| geometry = ui::draw(frame, app, &placements))?;
+        app.geometry = geometry;
+
         if app.should_quit {
             return Ok(());
         }

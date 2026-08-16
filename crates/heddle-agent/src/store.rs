@@ -374,6 +374,26 @@ impl AgentStore {
             .degraded = true;
     }
 
+    /// Record whether the agent for a session is typing.
+    ///
+    /// Creates the session when setting the flag, because the whole point is the window
+    /// before the first event arrives: on a fresh thread there is nothing to look up
+    /// yet, and a lookup that returns `None` would silence exactly the case this
+    /// exists for. Clearing an unknown session is a no-op -- there is nothing to clear.
+    pub fn set_typing(&mut self, session_id: &str, typing: bool) {
+        if typing {
+            self.sessions
+                .entry(session_id.to_owned())
+                .or_insert_with(|| Session {
+                    session_id: session_id.to_owned(),
+                    ..Default::default()
+                })
+                .set_typing(true);
+        } else if let Some(session) = self.sessions.get_mut(session_id) {
+            session.set_typing(false);
+        }
+    }
+
     /// Expire prompts whose deadline has passed.
     ///
     /// Hermes times approvals out server-side (`MATRIX_APPROVAL_TIMEOUT_SECONDS`,
@@ -643,7 +663,26 @@ mod tests {
     fn typing_reads_as_working_before_the_first_token() {
         let mut store = AgentStore::new();
         store.apply(&ev(1, Kind::Commentary));
-        store.get_mut("s1").expect("s").set_typing(true);
+        store.set_typing("s1", true);
         assert_eq!(store.get("s1").expect("s").state(), AgentState::Working);
+    }
+
+    #[test]
+    fn typing_creates_the_session_it_is_about() {
+        // The window this exists for is the one before any event has arrived, so a
+        // lookup that requires an existing session would miss every first turn.
+        let mut store = AgentStore::new();
+        store.set_typing("s1", true);
+        assert_eq!(store.get("s1").expect("s").state(), AgentState::Working);
+
+        store.set_typing("s1", false);
+        assert_eq!(store.get("s1").expect("s").state(), AgentState::Idle);
+    }
+
+    #[test]
+    fn clearing_typing_does_not_conjure_a_session() {
+        let mut store = AgentStore::new();
+        store.set_typing("s1", false);
+        assert!(store.get("s1").is_none());
     }
 }

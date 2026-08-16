@@ -3,7 +3,7 @@
 Companion to [`SPEC.md`](./SPEC.md). Milestones are sequenced so that each one ends at a
 state that is independently useful, and so that the riskiest unknowns are retired first.
 
-**0.2.0 released on 2026-08-10.** M0–M4 and M6's release work are done; M5 was
+**0.3.0 released on 2026-08-16.** M0–M4 and M6's release work are done; M5 was
 deliberately skipped, for the reason recorded in SPEC §10.2. What remains below is the
 convenience work, and [`CHANGELOG.md`](../CHANGELOG.md) is the record of what actually
 went out.
@@ -84,7 +84,7 @@ have landed before it was possible to open a single Hermes thread.
 - [x] Composer: multi-line, cursor movement, per-room drafts, sent-message history
 - [x] Edit (`m.replace`), redact, reply
 - [x] Thread list per room; open a thread as its own pane
-- [x] Typing notifications out — inbound already drives agent state
+- [x] Typing notifications, both directions — inbound drives agent state
 - [x] Space enumeration via `m.space.child`, so workspaces stop being a single `~`
 
 **Exit:** an agent thread can be found, opened, read and replied to without leaving

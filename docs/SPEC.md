@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Status** | Living. Describes 0.2.0 as shipped. |
+| **Status** | Living. Describes 0.3.0 as shipped. |
 | **Date** | 2026-08-16 |
 | **Language** | Rust (edition 2021, MSRV 1.93) |
 | **Licence** | Apache-2.0 |
@@ -159,7 +159,7 @@ accepted on read, since the Hermes patch in §3.3 was specified against it.
 | `v` | int | yes | Schema version. `1`. Consumers reject unknown majors. |
 | `session_id` | string | yes | Hermes session key. Stable per pane. |
 | `turn_id` | string | yes | ULID for one user-turn. Groups all events of a response. |
-| `seq` | int | yes | Monotonic within a turn. Used to order and to detect gaps. |
+| `seq` | int | yes | Monotonic within a turn. Used to order and to detect gaps. A pane whose turn is missing a `seq` shows a `!` marker in its header until the missing event arrives. |
 | `kind` | enum | yes | See below. |
 | `agent` | object | no | `{ name, model, version }`. Sent on the first event of a turn. |
 
@@ -232,6 +232,13 @@ durations, because none of those are on the wire. It is a compatibility path, ne
 primary one, and panes fed by it show a dim `~` marker. Until an agent emits the
 extension it is also the *only* path, which is the honest position for v1: heddle works
 with agents exactly as they are, and works better with any that adopt §3.2.
+
+The two pane markers say different things and stack worst-first, `!~`:
+
+| Marker | Meaning |
+|---|---|
+| `!` | A `seq` in the turn never arrived. The transcript is missing events outright. |
+| `~` | Structure was recovered from text chrome rather than read from the extension. Everything arrived; some of it is approximate. |
 
 ---
 
@@ -547,6 +554,11 @@ The Matrix SDK ones are the expensive ones:
 
 - **The render thread never holds a `Client`.** Everything crosses the
   `Command`/`WorkerEvent` channel pair. Keep it that way.
+- **`ui::draw` takes `&App`.** It measures rather than decides: wrapped line counts, pane
+  heights and bar hit regions are handed back as a `Geometry` for the event loop to
+  store. Anything the renderer would have to *decide* — laying the tiling out, which
+  mutates it — happens before the frame, in `App::lay_out_panes`. A renderer that mutates
+  is a renderer no test can call.
 - **The mention picker is not modal.** Every other overlay swallows keys or switches
   mode; this one lets editing through and is recomputed from the buffer afterwards, which
   is what makes it survive a paste or a caret move rather than only the keystrokes it

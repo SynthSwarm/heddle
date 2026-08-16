@@ -7,7 +7,19 @@ Versions are pre-1.0 and mean what that usually means: the thing runs, and its s
 can still change. Breaking changes to config keys, keybindings and the agent wire
 format are possible in any 0.x release, and will be listed here.
 
-## Unreleased
+## 0.3.0 — 2026-08-16
+
+### Added
+
+- A pane looks busy while the agent is thinking. heddle now subscribes to each open
+  room's typing notifications, so a pane shows `working` from the moment the agent
+  starts composing rather than from its first token — which for a coding agent is five
+  to twenty seconds later. The state machine and the badge already handled this; nothing
+  had ever produced the event.
+- A `!` marker in the pane header when the transcript is missing events. Gap detection
+  on the agent event `seq` already worked and healed itself when a late event arrived;
+  it just had no way of telling anyone. Markers stack worst-first: `!~` is a pane that
+  is both missing events and reading them out of printed chrome.
 
 ### Fixed
 
@@ -34,6 +46,14 @@ format are possible in any 0.x release, and will be listed here.
 
 ### Changed
 
+- The renderer no longer mutates the state it draws. `ui::draw` takes `&App` and returns
+  a `Geometry` — wrapped line count, viewport height, event anchors, bar hit regions —
+  which the event loop stores, and the event loop lays the tiling out before the frame
+  rather than letting the painter do it as a side effect. The measurements are still a
+  frame old, which is inherent in measuring by drawing, but they are now returned rather
+  than written behind the caller's back, and the click seam — `tab_strip` records where
+  a tab was painted, `App::click_bar` decides what a column means — is testable against
+  a real frame for the first time.
 - Overlays are one `Option<Modal>` rather than six independent fields. Two could be open
   at once, the key overlay swallowed nothing, and the draw order disagreed with the
   dispatch order for the two security panels.

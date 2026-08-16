@@ -48,6 +48,7 @@ pub const PRINTED: &[Glyph] = &[
     g("\u{2500}", "rule", 1),
     g("\u{2026}", "ellipsis", 1),
     g("~", "degraded marker", 1),
+    g("!", "gap marker", 1),
 ];
 
 #[cfg(test)]

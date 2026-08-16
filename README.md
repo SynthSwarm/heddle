@@ -7,7 +7,7 @@ session* — streaming output, collapsible tool cards, inline diffs and keypress
 approvals, laid out with the multi-pane, multi-workspace ergonomics of a terminal
 workspace manager.
 
-> Status: **0.2.0 — beta.** Read, write, threads, mentions, encryption with interactive
+> Status: **0.3.0 — beta.** Read, write, threads, mentions, encryption with interactive
 > verification and key backup, and BSP tiling with persistent layouts. Used daily
 > against a real homeserver, but pre-1.0 in the way the number implies: interfaces,
 > config keys and the wire format may change, and there are corners nobody has walked
@@ -16,7 +16,8 @@ workspace manager.
 > Agents are not patched to suit heddle. Where one emits the structured extension
 > heddle renders it losslessly; where one does not — which today is everywhere — heddle
 > recovers what it can from the tool chrome already printed and marks those panes `~`,
-> so the loss is visible rather than pretended away. That is the design, not a stopgap.
+> so the loss is visible rather than pretended away. A pane missing events outright is
+> marked `!`. That is the design, not a stopgap.
 > See [`docs/PLAN.md`](docs/PLAN.md).
 
 ---
@@ -39,7 +40,8 @@ extension (`dev.heddle.agent.v1`) alongside the human-readable body, heddle rend
 structure losslessly and other Matrix clients are unaffected. Where it will not — which
 today is everywhere — heddle recovers what it can from the tool chrome the agent already
 prints, and marks those panes `~` so the degradation is visible rather than pretended
-away.
+away. A pane whose transcript is missing events outright is marked `!`, which is the
+same principle applied to a worse failure.
 
 Agent support is a registry rather than a hardcoded format. An *adapter* declares which
 structured key an agent writes and which shapes of chrome it prints; Hermes is the first
@@ -59,7 +61,8 @@ session.
 
 Pane state — `blocked`, `working`, `done`, `idle` — is derived from the event stream and
 rolls up to tab and workspace badges, so a screen full of agents tells you at a glance
-which one needs you.
+which one needs you. A pane goes `working` on the agent's typing notification rather than
+on its first token, so the wait for the model reads as work rather than as nothing.
 
 Typing `@` offers the room's members and sends a real Matrix mention (`m.mentions`),
 which is what actually wakes an agent — a name that appears only in the message body
