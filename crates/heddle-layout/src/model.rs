@@ -208,12 +208,19 @@ impl Tab {
         self.focused = self.panes.len() - 1;
     }
 
-    /// Remove a pane, keeping focus on a sensible neighbour.
+    /// Remove a pane, keeping focus on the pane the user was actually looking at.
     pub fn remove_pane(&mut self, id: PaneId) -> Option<Pane> {
         let i = self.panes.iter().position(|p| p.id == id)?;
         let pane = self.panes.remove(i);
-        // Focus the previous pane rather than snapping to zero: closing the pane you
-        // just finished with should leave you next to where you were.
+
+        // `focused` is an index into a vector that just got shorter, so removing
+        // anything below it shifts the pane it names. Closing pane 1 of [0,1,2,3] while
+        // focused on 2 used to leave focus on 3 -- silently, in a different
+        // conversation. Clamping alone never caught it because the index stayed in
+        // range the whole time.
+        if i < self.focused {
+            self.focused -= 1;
+        }
         self.focused = self.focused.min(self.panes.len().saturating_sub(1));
         Some(pane)
     }
@@ -534,6 +541,43 @@ mod tests {
         tab.remove_pane(PaneId::new(1));
         tab.remove_pane(PaneId::new(2));
         assert!(tab.focused_pane().is_none());
+    }
+
+    #[test]
+    fn closing_a_pane_below_the_focused_one_does_not_move_the_focus() {
+        // The bug: `focused` is an index into a vector that just got shorter, and only
+        // the upper bound was clamped. Closing pane 1 of [1,2,3,4] while looking at
+        // pane 2 left `focused` at 1, which now named pane 3 -- so the user carried on
+        // typing into a different conversation with nothing to say it had changed.
+        //
+        // Clamping could never catch this: the index stayed in range throughout.
+        let mut tab = Tab::new("!r:x", "#backend");
+        for id in 1..=4 {
+            tab.push_pane(pane(id, AgentState::Idle));
+        }
+        tab.focused = 1;
+        assert_eq!(tab.focused_pane().expect("focused").id, PaneId::new(2));
+
+        tab.remove_pane(PaneId::new(1));
+
+        assert_eq!(
+            tab.focused_pane().expect("focused").id,
+            PaneId::new(2),
+            "closing another pane must not change which pane you are looking at"
+        );
+    }
+
+    #[test]
+    fn closing_a_pane_above_the_focused_one_leaves_it_alone_too() {
+        let mut tab = Tab::new("!r:x", "#backend");
+        for id in 1..=4 {
+            tab.push_pane(pane(id, AgentState::Idle));
+        }
+        tab.focused = 1;
+
+        tab.remove_pane(PaneId::new(4));
+
+        assert_eq!(tab.focused_pane().expect("focused").id, PaneId::new(2));
     }
 
     #[test]
