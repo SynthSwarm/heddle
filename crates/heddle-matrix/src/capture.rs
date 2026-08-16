@@ -1,17 +1,15 @@
 //! Capturing real agent output, so fixtures are recordings rather than guesses.
 //!
-//! Every test of the chrome parser is currently a string somebody imagined. That is a
-//! poor way to verify a parser whose entire job is to match output it does not control,
-//! and it is the largest untested surface in the client.
+//! The chrome parser's job is to match output it does not control, and its tests are
+//! strings somebody imagined.
 //!
-//! Setting `HEDDLE_CAPTURE` to a path makes heddle append one JSON object per message
-//! it considers for agent structure, recording what arrived and what heddle made of it.
-//! The result can be replayed as a test fixture.
+//! `HEDDLE_CAPTURE=<path>` appends one JSON object per message considered for agent
+//! structure, recording what arrived and what heddle made of it, for replay as a
+//! fixture.
 //!
-//! **This writes decrypted message content to a plain file.** It is off unless the
-//! variable is set, the file is created `0600`, and it should be deleted when the
-//! recording is done. Nothing redacts it, because a capture that quietly dropped the
-//! part the parser mishandled would defeat the purpose.
+//! **This writes decrypted message content to a plain file.** Off unless the variable
+//! is set, created `0600`, and to be deleted when the recording is done. Nothing is
+//! redacted: a capture that dropped the part the parser mishandled would be useless.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -28,10 +26,8 @@ pub const CAPTURE_ENV: &str = "HEDDLE_CAPTURE";
 pub struct Record<'a> {
     /// The event this came from, or `None` while it is still a local echo.
     ///
-    /// Recorded for two reasons. It is the deduplication key -- see [`record`] -- and it
-    /// is the only way to tie a line in the capture back to a line in the log. Without
-    /// it a capture answers "what did the parser see" but never "what was that event",
-    /// which is the question a diagnosis usually turns on.
+    /// The deduplication key (see [`record`]), and the only way to tie a line in the
+    /// capture back to a line in the log.
     pub event_id: Option<&'a str>,
     pub sender: &'a str,
     /// The human-readable body, in full and unmodified.
@@ -51,8 +47,8 @@ fn path() -> Option<&'static PathBuf> {
     PATH.get_or_init(|| {
         let raw = std::env::var(CAPTURE_ENV).ok().filter(|p| !p.is_empty())?;
         let path = PathBuf::from(raw);
-        // Announced loudly and once. Recording decrypted traffic to disk is not
-        // something to discover afterwards from a stray file.
+        // Once, loudly: recording decrypted traffic must not be discovered afterwards
+        // from a stray file.
         tracing::warn!(
             path = %path.display(),
             "HEDDLE_CAPTURE is set: decrypted message bodies are being written to disk"
@@ -62,7 +58,6 @@ fn path() -> Option<&'static PathBuf> {
     .as_ref()
 }
 
-/// Whether capture is switched on.
 pub fn enabled() -> bool {
     path().is_some()
 }
@@ -75,8 +70,7 @@ pub fn enabled() -> bool {
 /// same message at different lengths. Fixtures built from that are mostly duplicates of
 /// each other, and the file is large enough to discourage reading.
 ///
-/// Failures are logged and dropped. A diagnostic that could interrupt a conversation
-/// would be worse than the missing diagnostic.
+/// Failures are logged and dropped: a diagnostic must not interrupt a conversation.
 pub fn record(record: &Record<'_>) {
     let Some(path) = path() else { return };
 
@@ -112,10 +106,9 @@ pub fn record(record: &Record<'_>) {
 
 /// Whether this event has not been recorded before.
 ///
-/// A local echo has no id yet and is always new; it acquires one a moment later and the
-/// remote echo is what gets deduplicated. A poisoned lock means another thread panicked
-/// mid-insert, and the answer is yes: capture is a diagnostic, and a duplicate line is a
-/// far better outcome than a panic propagating out of one.
+/// A local echo has no id yet and is always new; the remote echo a moment later is what
+/// gets deduplicated. A poisoned lock answers yes: a duplicate line beats a panic
+/// propagating out of a diagnostic.
 fn is_new(seen: &Mutex<HashSet<String>>, event_id: Option<&str>) -> bool {
     let Some(event_id) = event_id else {
         return true;

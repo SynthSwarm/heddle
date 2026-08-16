@@ -1628,6 +1628,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
@@ -1646,6 +1647,7 @@ dependencies = [
  "ratatui-hypertile",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tracing",
 ]
@@ -1661,6 +1663,7 @@ dependencies = [
  "matrix-sdk-ui",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -4544,6 +4547,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

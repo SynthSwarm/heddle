@@ -52,8 +52,8 @@ impl Theme {
             AgentState::Idle => self.dim,
         };
         let style = Style::default().fg(colour);
-        // Blocked is the only state that should pull the eye across a full screen of
-        // panes, so it is the only one emboldened.
+        // Blocked is the only state emboldened: the only one worth crossing a full
+        // screen of panes for.
         if state == AgentState::Blocked {
             style.add_modifier(Modifier::BOLD)
         } else {
@@ -63,10 +63,8 @@ impl Theme {
 
     /// Style for a tab or workspace carrying unread messages.
     ///
-    /// A mention is the only unread worth pulling the eye across the screen, so it
-    /// alone is accented and emboldened. Plain unread does nothing more than stop the
-    /// label being dim, which is enough to tell it apart from a quiet workspace
-    /// without competing with a blocked agent for attention.
+    /// Only a mention is accented and emboldened. Plain unread stops the label being
+    /// dim and no more, so it does not compete with a blocked agent.
     pub fn unread(&self, highlight: bool) -> Style {
         if highlight {
             Style::default()

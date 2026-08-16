@@ -56,11 +56,8 @@ pub enum Action {
     EditMessage,
     RedactMessage,
     OpenThreads,
-    /// Open the emoji picker to react to the selected message.
     ReactToSelected,
-    /// Open the emoji picker to put an emoji in the composer.
     EmojiIntoComposer,
-    /// Ask this account's other devices to verify this one.
     StartVerification,
     /// Unlock secret storage with a recovery key.
     OpenRecovery,
@@ -76,8 +73,7 @@ pub enum Action {
     // Overlays
     ToggleHelp,
 
-    /// Force a full repaint. The conventional terminal escape hatch for a screen that
-    /// has been corrupted by something outside the application's control.
+    /// Force a full repaint, for a screen corrupted from outside the application.
     Redraw,
 
     // Composer
@@ -214,16 +210,13 @@ pub struct Binding {
     pub action: &'static str,
     /// The mode the binding is live in.
     ///
-    /// This was a `prefixed: bool`, which could not distinguish Normal from Insert --
-    /// so the table listed `enter` twice ("send" and "open the selected message's
-    /// thread") and `up / down` twice ("scroll a line" and "line, then history"), and
-    /// the overlay drew all four rows with nothing to say which was which. It also
-    /// meant the drift test could only check prefixed rows, because it had no way to
-    /// know which mode to look the others up in.
+    /// Not a `prefixed: bool`: `enter` appears in this table twice, meaning "send" in
+    /// Insert and "open the selected message's thread" in Normal, and so does
+    /// `up / down`. Without the mode the overlay cannot say which row is which, and the
+    /// drift test cannot look either up.
     pub mode: Mode,
 }
 
-/// Shorthand for a table entry.
 const fn b(keys: &'static str, action: &'static str, mode: Mode) -> Binding {
     Binding { keys, action, mode }
 }
@@ -266,13 +259,10 @@ pub const BINDINGS: &[Binding] = &[
     b("q", "quit", Mode::Prefix),
 ];
 
-/// The handful of bindings terse enough for the status bar, most useful first.
+/// The handful of bindings terse enough for the status bar.
 ///
-/// Separate from [`BINDINGS`] because a status bar and a reference table want different
-/// prose: `next / prev tab` reads correctly in the overlay and is far too wide for one
-/// line beside four others. The overlay documents everything; this is the teaser.
-///
-/// Ordered by usefulness, because a narrow terminal drops them from the end.
+/// Separate from [`BINDINGS`], which carries reference prose too wide for one line
+/// beside four others. Ordered by usefulness: a narrow terminal drops them from the end.
 pub const HINTS: &[Binding] = &[
     b("i", "write", Mode::Normal),
     b("k / j", "pick", Mode::Normal),
@@ -357,8 +347,7 @@ fn map_normal(key: KeyEvent) -> (Action, Mode) {
         KeyCode::Char('l') if ctrl => (Action::Redraw, Mode::Normal),
         KeyCode::Char('u') if ctrl => (Action::ScrollUp(10), Mode::Normal),
         KeyCode::Char('d') if ctrl => (Action::ScrollDown(10), Mode::Normal),
-        // Arrows scroll by line, so reading a long message does not have to move the
-        // selection. j/k are the message-wise pair.
+        // Arrows scroll by line, j/k by message.
         KeyCode::Up => (Action::ScrollUp(1), Mode::Normal),
         KeyCode::Down => (Action::ScrollDown(1), Mode::Normal),
         KeyCode::PageUp => (Action::ScrollUp(20), Mode::Normal),
@@ -394,13 +383,12 @@ fn map_insert(key: KeyEvent) -> (Action, Mode) {
         KeyCode::Home => Action::CaretHome,
         KeyCode::End => Action::CaretEnd,
 
-        // Shift+Enter inserts a newline; plain Enter sends. Matches every chat client
-        // and every coding agent REPL.
+        // Shift+Enter inserts a newline; plain Enter sends.
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => Action::Newline,
         KeyCode::Enter => Action::Submit,
 
-        // Only ever reaches an open completion popup; there is nothing else in the
-        // composer for a tab to do, and inserting one would be a tab in a chat message.
+        // Only reaches an open completion popup; a literal tab in a chat message is
+        // never what was meant.
         KeyCode::Tab => Action::Complete,
 
         KeyCode::Char(c) if !ctrl => Action::Insert(c),
@@ -593,10 +581,8 @@ mod tests {
         // The overlay and the status hints read these tables. A row that no key
         // produces would be a lie told in the UI.
         //
-        // This used to skip every row that was not a single prefixed key -- 28 of the
-        // 40, including every `a / b` pair and everything outside Prefix mode. It
-        // splits the pairs now and looks each row up in the mode the table says it
-        // belongs to, which is a question `prefixed: bool` could not answer.
+        // Pairs are split, and each row is looked up in the mode the table claims for
+        // it, so the exemption list is the named chords rather than most of the table.
         let p = Prefix::default();
 
         for binding in BINDINGS.iter().chain(HINTS) {

@@ -19,7 +19,6 @@ use heddle_matrix::{
 use heddle_render::{Options, Overrides, Theme};
 use std::collections::{HashMap, HashSet};
 
-/// How much of a split to move per resize keypress.
 const RESIZE_STEP: f32 = 0.05;
 
 /// How close to the top of the loaded transcript the user must scroll before older
@@ -34,9 +33,7 @@ pub const EVENT_BUDGET: usize = 128;
 /// What the composer is about to do, when it is not sending a new message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
-    /// Submit will reply to this event.
     Reply(String),
-    /// Submit will replace this event's content.
     Edit(String),
 }
 
@@ -64,7 +61,6 @@ struct Typing {
     last_sent_ms: u64,
 }
 
-/// The open thread picker.
 #[derive(Debug, Clone, Default)]
 pub struct ThreadPicker {
     pub room_id: String,
@@ -125,17 +121,10 @@ pub struct BarHits {
 
 /// The overlay that is open, if any.
 ///
-/// One field rather than six, because only one can be open and saying so in prose did
-/// not work. The comment on the old dispatch chain read "it is checked before the
-/// thread picker only because the two can never be open at once" -- and they could:
-/// the thread picker's match had a `_ => {}` arm, so `:` fell through it into the main
-/// keymap, opened the palette, and left two overlays on screen at once. The palette was
-/// checked first, so the picker underneath became unreachable and its own `Esc` was
-/// eaten. The key overlay was worse: it was drawn but appeared in no chain at all, so
-/// `D` still armed a redaction behind it.
+/// One field rather than six, so the exclusivity is structural: there is no dispatch
+/// order to get wrong and nothing to fall through into the main keymap.
 ///
-/// With one field there is no ordering to get wrong and nothing to fall through. Note
-/// [`MentionPicker`] is deliberately *not* here: it is a filter on the composer rather
+/// [`MentionPicker`] is deliberately not here. It is a filter on the composer rather
 /// than a modal, and the composer keeps taking keys underneath it.
 #[derive(Debug, Clone)]
 pub enum Modal {
@@ -143,10 +132,7 @@ pub enum Modal {
     ///
     /// The emoji on screen are a security decision with a human at the other end, so
     /// nothing may act underneath it -- splitting a pane or sending a message while the
-    /// user believes they are answering a yes/no question. Being a variant rather than
-    /// a field is what guarantees that now; it used to be first in a hand-ordered chain
-    /// whose draw order in `ui::draw` disagreed with it, so the recovery panel painted
-    /// on top of the verification prompt while verification consumed the keys.
+    /// user believes they are answering a yes/no question.
     Verification(Verification),
     /// The recovery panel. Holds a secret mid-typing.
     Recovery(RecoveryPanel),
@@ -154,7 +140,6 @@ pub enum Modal {
     Emoji(crate::emoji::Picker),
     /// The command palette. A search box too.
     Palette(Palette),
-    /// The thread picker.
     Threads(ThreadPicker),
     /// The `<prefix> ?` key overlay.
     Help,
@@ -211,7 +196,6 @@ pub struct App {
     pub workspaces: Workspaces,
     /// One tiling tree per room, keyed by room ID.
     pub tilings: HashMap<String, Tiling>,
-    /// Timeline entries per view.
     pub timelines: HashMap<View, Vec<Entry>>,
     /// Agent sessions, keyed by thread root.
     pub agents: AgentStore,
@@ -235,7 +219,6 @@ pub struct App {
     pub viewport_height: u16,
     /// Clickable regions of the workspace and tab bars, recorded by the renderer.
     pub bars: BarHits,
-    /// The overlay that is open, if any. See [`Modal`].
     pub modal: Option<Modal>,
     /// Selected message per view, by event id. Reply, edit and redact all act on it.
     pub selected: HashMap<View, String>,
@@ -248,7 +231,6 @@ pub struct App {
     pub members: HashMap<String, Vec<MemberSummary>>,
     /// Rooms already asked about, so a room with no members is not asked about forever.
     members_asked: HashSet<String>,
-    /// The open mention picker, if any.
     pub mentions: Option<MentionPicker>,
     /// The split border the mouse currently has hold of, and the room it belongs to.
     ///
@@ -361,22 +343,19 @@ impl App {
         Layout::capture(&self.workspaces, &self.tilings)
     }
 
-    /// Record that the arrangement has changed and should be saved.
     fn touch_layout(&mut self) {
         self.layout_dirty = true;
     }
 
     /// Open an overlay, replacing whatever was open.
     ///
-    /// A keypress cannot reach this while something is already open -- the overlay
-    /// swallows it -- so in practice the replacement path is the worker's: a
-    /// verification request arriving from another device takes over whatever was on
-    /// screen, which is what it should do.
+    /// A keypress cannot reach this while something is already open, so the caller is
+    /// in practice the worker: a verification request from another device takes over
+    /// whatever was on screen, which is what it should do.
     pub fn open_modal(&mut self, modal: Modal) {
         self.modal = Some(modal);
     }
 
-    /// Close whatever overlay is open.
     pub fn close_modal(&mut self) {
         self.modal = None;
     }
@@ -423,7 +402,6 @@ impl App {
         }
     }
 
-    /// Take the commands produced since the last call.
     pub fn take_commands(&mut self) -> Vec<Command> {
         std::mem::take(&mut self.pending)
     }
@@ -432,7 +410,6 @@ impl App {
         self.pending.push(command);
     }
 
-    /// The view the focused pane is showing.
     pub fn focused_view(&self) -> Option<View> {
         let tab = self.workspaces.focused()?.focused_tab()?;
         let pane = tab.focused_pane()?;
@@ -442,7 +419,6 @@ impl App {
         })
     }
 
-    /// The focused view's composer, for drawing. Empty when nothing is focused.
     pub fn composer(&self) -> Option<&Composer> {
         self.composers.get(&self.focused_view()?)
     }
@@ -454,9 +430,6 @@ impl App {
     }
 
     /// Move the caret up, falling back to recalling an older sent message.
-    ///
-    /// Matches every chat client: up is "the line above" when there is one and "the
-    /// thing I said before" when there is not.
     fn composer_up(&mut self) {
         if let Some(composer) = self.composer_mut() {
             if !composer.up() {
@@ -475,11 +448,9 @@ impl App {
 
     /// Event ids of the selectable messages in the focused view, oldest first.
     ///
-    /// Messages only. Notices carry an event id and render a row, so they used to be
-    /// selectable, which put the marker on membership changes and redactions -- and
-    /// since those cluster at the end of a transcript, walking down appeared to run past
-    /// the last message onto rows nothing can be done with. Every action reachable from
-    /// the selection (reply, edit, redact, open thread) needs a message anyway.
+    /// Messages only. Notices carry an event id and render a row, but every action
+    /// reachable from the selection -- reply, edit, redact, open thread -- needs a
+    /// message, and notices cluster at the end where they look like overrun.
     fn selectable(&self) -> Vec<String> {
         self.focused_view()
             .and_then(|v| self.timelines.get(&v))
@@ -493,7 +464,6 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// The selected event in the focused view.
     pub fn selected_event(&self) -> Option<&str> {
         let view = self.focused_view()?;
         self.selected.get(&view).map(String::as_str)
@@ -501,14 +471,12 @@ impl App {
 
     /// Move the selection. `delta` is in messages; negative is towards older.
     ///
-    /// With nothing selected, the first move selects the newest message, which is what
-    /// someone pressing "up" in a chat client means.
+    /// With nothing selected, the first move selects the newest message.
     fn select_by(&mut self, delta: i32) {
         let ids = self.selectable();
         if ids.is_empty() {
-            // Nothing to select yet — an empty or still-loading room. Scroll instead of
-            // swallowing the keypress, so the transcript never feels dead. Older is up,
-            // which is the same negative delta `scroll_by` already means.
+            // Empty or still-loading room: scroll rather than swallow the keypress.
+            // Older is up, the same negative delta `scroll_by` already means.
             self.scroll_by(delta);
             return;
         }
@@ -528,11 +496,9 @@ impl App {
         self.selected.insert(view.clone(), ids[next].clone());
         self.scroll_to_selection();
 
-        // At the ends, "keep the selection on screen" is not enough. The newest message
-        // is usually followed by notices, so stopping the moment it is merely visible
-        // leaves those below it and the pane looks stuck short of the bottom; and the
-        // oldest loaded message is the point at which more history is wanted, exactly as
-        // it is when scrolling there by hand.
+        // Snap to the ends rather than merely bringing the selection on screen: the
+        // newest message is usually followed by notices, and the oldest loaded one is
+        // the point at which more history is wanted.
         if next + 1 == ids.len() {
             self.scroll.insert(view.clone(), 0);
         } else if next == 0 {
@@ -544,7 +510,7 @@ impl App {
 
     /// Scroll so the selected message is on screen.
     ///
-    /// Uses the anchors the renderer recorded last frame; only it knows which row an
+    /// Uses the anchors the renderer recorded last frame: only it knows which row an
     /// event landed on.
     fn scroll_to_selection(&mut self) {
         let Some(view) = self.focused_view() else {
@@ -593,7 +559,6 @@ impl App {
         }
     }
 
-    /// Begin a reply to the selected message.
     fn begin_reply(&mut self) {
         let Some(id) = self.selected_event().map(ToOwned::to_owned) else {
             self.status = Some("select a message first".into());
@@ -603,7 +568,6 @@ impl App {
         self.mode = Mode::Insert;
     }
 
-    /// Begin editing the selected message, loading it into the composer.
     fn begin_edit(&mut self) {
         let Some(id) = self.selected_event().map(ToOwned::to_owned) else {
             self.status = Some("select a message first".into());
@@ -613,7 +577,7 @@ impl App {
             self.status = Some("that is not an editable message".into());
             return;
         };
-        // The server would reject it anyway; saying so now is cheaper and clearer.
+        // The server would reject it anyway.
         if !is_own {
             self.status = Some("you can only edit your own messages".into());
             return;
@@ -641,13 +605,12 @@ impl App {
             self.queue(Command::Redact { view, event_id: id });
             self.status = Some("deleted".into());
         } else {
-            // Redaction cannot be undone, so it does not get to be one keypress.
+            // Redaction cannot be undone, so it is not one keypress.
             self.confirm_redact = Some(id);
             self.status = Some("press D again to delete".into());
         }
     }
 
-    /// Abandon a reply, edit or arming redaction.
     fn cancel_pending(&mut self) {
         if self.composing.take().is_some() {
             if let Some(composer) = self.composer_mut() {
@@ -688,15 +651,11 @@ impl App {
 
     /// Start a thread on the selected message.
     ///
-    /// A thread has no existence of its own in Matrix: it is a root event plus whatever
-    /// relates to it, so "starting" one is opening a pane rooted at a message that has no
-    /// replies yet. Nothing is sent here. The first message typed into the pane goes
-    /// through the thread-focused timeline, which attaches the `m.thread` relation and
-    /// brings the thread into being -- so an abandoned pane leaves nothing behind.
-    ///
-    /// `enter` is the other half of this: it opens a thread that already exists. Starting
-    /// one deliberately needs a different key, or every stray `enter` on a message would
-    /// invite a thread nobody wanted.
+    /// A thread has no existence of its own in Matrix -- it is a root event plus what
+    /// relates to it -- so this only opens a pane rooted at a message with no replies.
+    /// Nothing is sent. The first message typed into the pane goes through the
+    /// thread-focused timeline, which attaches `m.thread` and brings the thread into
+    /// being, so an abandoned pane leaves nothing behind.
     fn start_thread(&mut self) {
         let Some(view) = self.focused_view() else {
             return;
@@ -719,7 +678,6 @@ impl App {
         self.open_thread_pane(root, title);
     }
 
-    /// Open the thread on the selected message.
     fn accept_selection(&mut self) {
         let Some((root, title)) = self.selected_thread() else {
             self.status = Some("that message has no thread".into());
@@ -739,7 +697,7 @@ impl App {
             return;
         };
 
-        // Already open: focus it rather than growing a second pane onto the same thread.
+        // Already open: focus it rather than opening a second pane on one thread.
         if let Some(existing) = self
             .workspaces
             .focused()
@@ -751,10 +709,8 @@ impl App {
             return;
         }
 
-        // Geometry. The first thread splits the room pane vertically, so transcript and
-        // thread sit side by side. Later threads stack under the newest thread instead,
-        // because splitting the room pane again would squeeze the transcript towards
-        // nothing while the threads stayed wide.
+        // The first thread splits the room pane vertically; later ones stack under the
+        // newest thread, so the transcript is not squeezed towards nothing.
         let (anchor, dir) = match self.newest_thread_pane() {
             Some(id) => (Some(id), Dir::Down),
             None => (self.room_pane(), Dir::Right),
@@ -766,7 +722,7 @@ impl App {
             if let Some(tab) = self
                 .workspaces
                 .focused_mut()
-                .and_then(Workspace_focused_tab_mut)
+                .and_then(|w| w.focused_tab_mut())
             {
                 tab.focus(id);
             }
@@ -778,14 +734,13 @@ impl App {
         if let Some(tab) = self
             .workspaces
             .focused_mut()
-            .and_then(Workspace_focused_tab_mut)
+            .and_then(|w| w.focused_tab_mut())
         {
             tab.push_pane(Pane::new(new_id, PaneKind::Thread { room_id, root }, title));
         }
         self.focus_moved();
     }
 
-    /// The pane showing the room's main timeline, if it is still open.
     fn room_pane(&self) -> Option<PaneId> {
         self.workspaces
             .focused()?
@@ -796,7 +751,6 @@ impl App {
             .map(|p| p.id)
     }
 
-    /// The most recently opened thread pane.
     fn newest_thread_pane(&self) -> Option<PaneId> {
         self.workspaces
             .focused()?
@@ -812,8 +766,8 @@ impl App {
 
     /// Record that the composer was edited.
     ///
-    /// Deliberately does no clock work and queues nothing: a notice per keystroke would
-    /// be one request per character. The tick decides what the room needs to hear.
+    /// No clock work and no queueing: the tick decides what the room hears. A notice
+    /// per keystroke would be one request per character.
     fn note_typing(&mut self) {
         let Some(room_id) = self.focused_view().map(|v| v.room_id) else {
             return;
@@ -829,8 +783,8 @@ impl App {
 
         match &mut self.typing {
             Some(typing) if typing.room_id == room_id => typing.dirty = true,
-            // Typing in a different room from the one last announced: tell the old room
-            // we stopped first, or it shows an indicator until the notice lapses.
+            // Tell the previously announced room we stopped, or it shows an indicator
+            // until the notice lapses.
             Some(_) => {
                 self.stop_typing();
                 self.typing = Some(fresh);
@@ -848,8 +802,8 @@ impl App {
         if typing.dirty {
             typing.dirty = false;
             typing.last_input_ms = now_ms;
-            // Re-assert on a timer rather than per keystroke: the notice has a lifetime,
-            // so it needs refreshing while a long message is written.
+            // The notice has a server-side lifetime, so it needs refreshing while a
+            // long message is written.
             let stale = now_ms.saturating_sub(typing.last_sent_ms) >= TYPING_REFRESH_MS;
             if !typing.active || stale {
                 typing.active = true;
@@ -884,17 +838,14 @@ impl App {
         }
     }
 
-    /// Open the emoji picker to put an emoji in the composer.
     fn open_emoji_for_composer(&mut self) {
         self.open_modal(Modal::Emoji(crate::emoji::Picker::new(
             crate::emoji::Target::Composer,
         )));
-        // The picker is a search box, so typing has to reach it. Insert mode is what
-        // turns a keypress into `Insert(c)` rather than a normal-mode command.
+        // Insert mode turns a keypress into `Insert(c)`, which the search box needs.
         self.mode = Mode::Insert;
     }
 
-    /// Open the emoji picker to react to the selected message.
     fn open_emoji_for_reaction(&mut self) {
         let Some(event_id) = self.selected_event().map(ToOwned::to_owned) else {
             self.status = Some("select a message to react to".into());
@@ -906,7 +857,6 @@ impl App {
         self.mode = Mode::Insert;
     }
 
-    /// Route a key to the open emoji picker.
     fn emoji_action(&mut self, action: Action) {
         let Some(Modal::Emoji(picker)) = &mut self.modal else {
             return;
@@ -916,18 +866,15 @@ impl App {
             Action::Cancel => self.close_emoji(),
             Action::Insert(c) => picker.push(c),
             Action::Backspace => picker.pop(),
-            // Both pairs move the highlight: arrows are what the composer's own bindings
-            // send here, j/k are what someone arriving from the transcript will press.
+            // Arrows arrive from the composer's bindings, j/k from the transcript's.
             Action::CaretUp | Action::ScrollUp(_) | Action::SelectOlder => picker.up(),
             Action::CaretDown | Action::ScrollDown(_) | Action::SelectNewer => picker.down(),
             Action::Submit | Action::Accept => self.accept_emoji(),
-            // Anything else is swallowed rather than acted on: a stray binding firing
-            // underneath an overlay is how a picker ends up splitting a pane.
+            // Swallowed: a binding firing underneath an overlay splits panes.
             _ => {}
         }
     }
 
-    /// Apply the highlighted emoji and close the picker.
     fn accept_emoji(&mut self) {
         let Some(Modal::Emoji(picker)) = &self.modal else {
             return;
@@ -946,8 +893,7 @@ impl App {
                     }
                 }
                 self.close_modal();
-                // Straight back to typing: choosing an emoji is part of writing the
-                // message, not a detour out of it.
+                // Straight back to insert: the emoji is part of the message.
                 self.mode = Mode::Insert;
                 return;
             }
@@ -988,7 +934,6 @@ impl App {
         self.queue(Command::ListThreads { room_id });
     }
 
-    /// Open the highlighted thread as a pane beside the current one.
     fn open_selected_thread(&mut self) {
         let Some(picker) = self.threads() else {
             return;
@@ -1015,22 +960,17 @@ impl App {
 
             WorkerEvent::Rooms(rooms) => {
                 self.apply_rooms(rooms);
-                // The app opens its focused view once at startup, but the room list has
-                // not arrived yet at that point so there is nothing to focus and the
-                // call is a no-op. Without re-trying here the transcript stays empty
-                // until the user happens to touch a pane or a tab.
+                // The startup call is a no-op: the room list has not arrived yet, so
+                // there is nothing to focus.
                 self.open_focused_view();
             }
 
             WorkerEvent::Timeline { view, entries } => {
-                // Whatever the request achieved, it is no longer in flight. Clearing on
-                // any snapshot also covers the case where pagination returned nothing.
+                // Cleared on any snapshot, including one that returned nothing.
                 self.paginating.remove(&view);
                 self.ingest_agent_events(&view, &entries);
-                // A room-level shield, drawn from evidence rather than from a roster.
-                // Auditing every member's devices would mean a device list per member
-                // per room; what the user needs to know is that this room contains
-                // messages heddle cannot vouch for, and the messages themselves say so.
+                // Drawn from the messages themselves rather than from a device audit,
+                // which would mean a device list per member per room.
                 let suspect = entries.iter().any(|e| {
                     matches!(&e.kind, EntryKind::Message(m) if matches!(m.shield, Shield::Warning(_)))
                 });
@@ -1043,8 +983,7 @@ impl App {
             }
 
             WorkerEvent::Typing { room_id, users } => {
-                // An agent typing means `working`, which is what makes a pane look busy
-                // during model latency, before the first token lands.
+                // `working` during model latency, before the first token lands.
                 let typing = users.iter().any(|u| self.config.agent.is_agent(u));
                 for session in self.session_ids_for_room(&room_id) {
                     if let Some(s) = self.agents.get_mut(&session) {
@@ -1067,9 +1006,8 @@ impl App {
             }
 
             WorkerEvent::Members { room_id, members } => {
-                // Cached rather than handed to an open picker: the roster belongs to the
-                // room, not to one moment of typing, and the picker is opened and closed
-                // once per mention.
+                // Cached against the room rather than handed to the open picker, which
+                // is opened and closed once per mention.
                 self.members.insert(room_id, members);
                 self.refilter_mentions();
             }
@@ -1077,9 +1015,7 @@ impl App {
             WorkerEvent::Warning(text) => self.status = Some(text),
 
             WorkerEvent::Verification(state) => {
-                // A finished flow reports itself in the status line and gets out of the
-                // way. Leaving a "verified" panel on screen would mean the user has to
-                // dismiss a dialog to acknowledge good news.
+                // A finished flow reports itself in the status line and closes.
                 match &state {
                     Verification::Done => {
                         self.status = Some("device verified".into());
@@ -1098,10 +1034,8 @@ impl App {
 
             WorkerEvent::Recovery(state) => {
                 self.recovery = state;
-                // The prompt has no other way to learn it succeeded. Left to itself it
-                // sits on "unlocking…" for ever, over a screen full of messages that
-                // plainly did decrypt -- which tells the user the client has hung at the
-                // exact moment it actually worked.
+                // The prompt has no other way to learn it succeeded, and would sit on
+                // "unlocking…" for ever over messages that plainly did decrypt.
                 let waiting = matches!(
                     self.modal,
                     Some(Modal::Recovery(RecoveryPanel::AskKey {
@@ -1117,9 +1051,7 @@ impl App {
             }
 
             WorkerEvent::RecoveryFailed(reason) => {
-                // Kept open, emptied, and told why: a mistyped recovery key is worth a
-                // second attempt, and closing the prompt would make the user find the
-                // key again from the start.
+                // Kept open and emptied: a mistyped key is worth a second attempt.
                 self.open_modal(Modal::Recovery(RecoveryPanel::AskKey {
                     key: String::new(),
                     submitted: false,
@@ -1129,17 +1061,15 @@ impl App {
             }
 
             WorkerEvent::RecoveryKeyCreated(key) => {
-                // Straight to the panel, and nowhere else. It is never logged and never
-                // put in the status line: the server keeps no copy, so this is the only
-                // time it can be read, and it must not end up somewhere it outlives the
-                // moment.
+                // The panel only. Never logged, never in the status line: the server
+                // keeps no copy, so this is the one time it can be read.
                 self.open_modal(Modal::Recovery(RecoveryPanel::ShowKey { key }));
                 self.needs_redraw = true;
             }
 
             WorkerEvent::DeviceVerified(verified) => {
-                // `None` means the crypto layer has not decided yet; keeping the last
-                // known answer avoids flickering the shield off and on during startup.
+                // `None` means the crypto layer has not decided; keeping the last
+                // answer stops the shield flickering during startup.
                 if verified.is_some() {
                     self.device_verified = verified;
                 }
@@ -1170,13 +1100,9 @@ impl App {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| ORPHAN_WORKSPACE.to_owned());
-            // The orphan workspace is titled with its own marker rather than a word, so
-            // it reads as "the rooms with no Space" instead of a section heading.
-            // SPEC.md §2.
-            //
-            // A Space workspace is titled after the Space. Falling back to the room's own
-            // name would title the workspace after whichever of its rooms happened to be
-            // processed first, which only shows up once rooms actually have parents.
+            // The orphan workspace carries its marker as its title; SPEC.md §2. A
+            // Space workspace is titled after the Space, never after a member room --
+            // that would name it for whichever room was processed first.
             let title = if workspace_id == ORPHAN_WORKSPACE {
                 ORPHAN_WORKSPACE
             } else {
@@ -1198,10 +1124,8 @@ impl App {
                     tab.is_encrypted = room.is_encrypted;
                     tab.unread = Unread::new(room.notification_count, room.highlight_count);
 
-                    // A room the user had arranged comes back arranged. Anything else --
-                    // no saved entry, an unreadable one, or one that disagrees with
-                    // itself -- falls through to a single pane on the main timeline,
-                    // which is the arrangement every room starts life with anyway.
+                    // No saved entry, an unreadable one, or one that disagrees with
+                    // itself falls through to a single pane on the main timeline.
                     let tiling = match self.saved_layout.take_room(&room.room_id, &mut tab) {
                         Some(tiling) => tiling,
                         None => {
@@ -1231,18 +1155,16 @@ impl App {
 
     /// Put the user back where they left off, once the rooms to do it with exist.
     ///
-    /// Attempted after every room batch rather than once at startup, because sync
-    /// delivers rooms over several responses and the workspace someone was last in is
-    /// rarely in the first one. It stops at the first user-driven focus change: a
-    /// client that yanks the view away half a second after launch, because a late room
-    /// finally arrived, is worse than one that simply starts where it starts.
+    /// Attempted after every room batch: sync delivers rooms over several responses and
+    /// the workspace someone was last in is rarely in the first. Stops at the first
+    /// user-driven focus change, so a late room cannot yank the view away.
     fn restore_focus(&mut self) {
         if !self.restoring_focus {
             return;
         }
 
-        // Per-workspace tabs first, so that focusing the saved workspace lands on the
-        // saved room in one step rather than showing its first tab and then switching.
+        // Tabs first, so focusing the saved workspace lands on the saved room in one
+        // step rather than showing its first tab and then switching.
         for (workspace_id, room_id) in &self.saved_layout.tabs {
             if let Some(workspace) = self
                 .workspaces
@@ -1257,8 +1179,7 @@ impl App {
         }
 
         let Some(wanted) = self.saved_layout.workspace.clone() else {
-            // Nothing more to wait for; the tabs above are applied on every batch and
-            // are harmless to reapply.
+            // Nothing more to wait for.
             return;
         };
         let Some(index) = self.workspaces.items.iter().position(|w| w.id == wanted) else {
@@ -1268,8 +1189,8 @@ impl App {
         self.workspaces.focus(index);
         self.restoring_focus = false;
         self.needs_redraw = true;
-        // No `open_focused_view` here: the caller does it after every room batch, and
-        // doing it twice queues the same view at the worker twice.
+        // The caller opens the focused view after every batch; doing it here too
+        // queues the same view at the worker twice.
     }
 
     /// Fold a view's agent events into the store.
@@ -1328,25 +1249,21 @@ impl App {
 
     /// Route a key to the verification overlay.
     ///
-    /// Only the keys that mean something are honoured, and everything else is swallowed.
-    /// The answer to "do these emoji match" is yes, no, or not now; a client that let
-    /// any other key through would be a client where a mistyped `j` dismissed a security
-    /// prompt.
+    /// The answer to "do these emoji match" is yes, no or not now; everything else is
+    /// swallowed, so a mistyped `j` cannot dismiss a security prompt.
     fn verification_action(&mut self, action: Action) {
         let Some(Modal::Verification(state)) = &self.modal else {
             return;
         };
 
         match (state, action) {
-            // Accepting a request is not yet a judgement about keys: it only agrees to
-            // start comparing them.
+            // Agreeing to compare keys, not yet a judgement about them.
             (Verification::Requested { .. }, Action::Approve | Action::Accept) => {
                 self.queue(Command::AcceptVerification);
             }
 
-            // This is the judgement. `Deny` reports a mismatch rather than a withdrawal,
-            // because a user pressing "they do not match" is reporting an attack, and the
-            // other side needs to hear that rather than a shrug.
+            // `Deny` reports a mismatch, not a withdrawal: the user is reporting an
+            // attack and the other side needs to hear which it was.
             (Verification::Compare { .. }, Action::Approve | Action::Accept) => {
                 self.queue(Command::ConfirmVerification);
             }
@@ -1359,8 +1276,8 @@ impl App {
                 self.queue(Command::CancelVerification);
             }
 
-            // Redraw stays available: a corrupted screen is exactly when a user needs to
-            // re-read emoji before answering.
+            // Redraw stays available: a corrupted screen is when the emoji most need
+            // re-reading.
             (_, Action::Redraw) => self.needs_redraw = true,
 
             _ => {}
@@ -1369,10 +1286,9 @@ impl App {
 
     /// Route a key to the recovery panel.
     ///
-    /// Only what each state actually asks for is honoured, and everything else is
-    /// swallowed. This panel can hold a secret mid-typing, destroy a working recovery
-    /// key, or be showing the only copy of a new one, and none of those are places for a
-    /// stray binding to reach past.
+    /// Only what each state asks for; everything else is swallowed. The panel can hold
+    /// a secret mid-typing, destroy a working recovery key, or be showing the only copy
+    /// of a new one.
     fn recovery_action(&mut self, action: Action) {
         let Some(Modal::Recovery(panel)) = &mut self.modal else {
             return;
@@ -1409,9 +1325,8 @@ impl App {
             },
 
             RecoveryPanel::ConfirmReset => match action {
-                // Only an explicit yes. Resetting leaves every other device holding a
-                // key that no longer opens anything, so it is not something to fall into
-                // by pressing enter on a dialog one did not read.
+                // Explicit yes only: a reset leaves every other device holding a key
+                // that no longer opens anything.
                 Action::Approve => {
                     *panel = RecoveryPanel::Busy("creating a new recovery key…");
                     self.queue(Command::ResetRecoveryKey);
@@ -1420,13 +1335,12 @@ impl App {
                 _ => {}
             },
 
-            // Nothing to answer while the server is being waited on, and cancelling
-            // would not recall the request.
+            // Nothing to answer, and cancelling would not recall the request.
             RecoveryPanel::Busy(_) => {}
 
             RecoveryPanel::ShowKey { .. } => match action {
-                // Any deliberate acknowledgement closes it, but nothing else does: this
-                // is the only time the key is ever displayed.
+                // Deliberate acknowledgement only: this is the one time the key is
+                // ever displayed.
                 Action::Submit | Action::Accept | Action::Approve | Action::Cancel => {
                     self.close_recovery();
                 }
@@ -1441,7 +1355,6 @@ impl App {
         self.mode = Mode::Normal;
     }
 
-    /// Route a key to the command palette.
     fn palette_action(&mut self, action: Action) {
         let Some(Modal::Palette(palette)) = &mut self.modal else {
             return;
@@ -1450,9 +1363,8 @@ impl App {
         match action {
             Action::Insert(ch) => palette.push(ch),
             Action::Backspace => palette.pop(),
-            // Arrows come through as caret movement, because the palette is typed into
-            // from insert mode; they are the only way to walk the list while the letters
-            // are all going into the query.
+            // The palette is typed into from insert mode, so arrows arrive as caret
+            // movement and are the only way to walk the list.
             Action::CaretUp | Action::ScrollUp(_) => palette.up(),
             Action::CaretDown | Action::ScrollDown(_) => palette.down(),
             Action::Cancel | Action::CommandPalette => self.close_palette(),
@@ -1461,11 +1373,10 @@ impl App {
         }
     }
 
-    /// Run the highlighted command, having first closed the palette.
+    /// Run the highlighted command.
     ///
-    /// Closing first is not tidiness: the command is dispatched back through
-    /// `apply_action`, which hands every key to the open overlay, so leaving the palette
-    /// open would feed the command straight back into it and do nothing.
+    /// The palette closes first: the action is dispatched back through `apply_action`,
+    /// which hands every key to the open overlay.
     fn run_chosen_command(&mut self) {
         let Some(action) = self
             .palette()
@@ -1487,9 +1398,8 @@ impl App {
 
     /// Route a key to whichever overlay is open.
     ///
-    /// Every arm consumes the key. An overlay that let one through is how a picker ends
-    /// up splitting a pane behind itself, and the thread picker's `_ => {}` did exactly
-    /// that: `:` fell past it into the main keymap and opened the palette on top.
+    /// Every arm consumes the key: an overlay that lets one through is how a picker
+    /// ends up splitting the pane it is covering.
     fn modal_action(&mut self, action: Action) {
         match &mut self.modal {
             Some(Modal::Verification(_)) => self.verification_action(action),
@@ -1506,14 +1416,10 @@ impl App {
                 }
                 Action::Accept => self.open_selected_thread(),
                 Action::Cancel | Action::OpenThreads => self.close_modal(),
-                // Everything else is swallowed. The picker owns navigation while it is
-                // open, so the j/k that scroll a transcript walk the list instead of
-                // doing both at once -- and nothing else acts underneath it.
+                // Swallowed, so j/k walk the list rather than also scrolling the
+                // transcript underneath.
                 _ => {}
             },
-            // The key overlay used to be drawn without appearing in any dispatch chain
-            // at all, so `D` still armed a redaction and `Enter` still sent, behind a
-            // panel covering the transcript they were acting on.
             Some(Modal::Help) => match action {
                 Action::Cancel | Action::ToggleHelp => self.close_modal(),
                 _ => {}
@@ -1523,30 +1429,23 @@ impl App {
     }
 
     pub fn apply_action(&mut self, action: Action) {
-        // An open overlay owns every key. There is one of them by construction, so this
-        // is a single check rather than a chain of five whose order had to be reasoned
-        // about -- and, in two cases, was reasoned about wrongly. See [`Modal`].
+        // An open overlay owns every key. See [`Modal`].
         if self.modal.is_some() {
             self.modal_action(action);
             return;
         }
 
-        // The mention picker is a filter on the composer, not a replacement for it, so
-        // it takes only the three keys that mean something to a list and lets every
-        // editing key through to the buffer underneath. The popup is then recomputed
-        // from that buffer at the end of this function.
-        //
-        // Only while it has something to show. An armed `@` that matches nobody draws
-        // nothing, and a popup nobody can see must not swallow the return key -- that
-        // way lies a message that will not send and no way to find out why.
+        // A filter on the composer, so it takes only the three keys a list needs and
+        // lets every editing key through; the popup is recomputed from the buffer at the
+        // end of this function. Only while it has something to show: an invisible popup
+        // that swallowed the return key would be a message that will not send.
         if self
             .mentions
             .as_ref()
             .is_some_and(|p| !p.matches.is_empty())
         {
             match action {
-                // Arrow keys only. The wheel belongs to the transcript: a list of four
-                // names is not what someone reaching for the mouse means to scroll.
+                // Arrows only; the wheel belongs to the transcript.
                 Action::CaretUp => {
                     if let Some(p) = &mut self.mentions {
                         p.selected = p.selected.saturating_sub(1);
@@ -1561,16 +1460,13 @@ impl App {
                     self.needs_redraw = true;
                     return;
                 }
-                // Enter completes rather than sends, which is what every client with an
-                // autocomplete does; Esc first is how you send the text as written.
+                // Enter completes rather than sends. Esc first sends as written.
                 Action::Submit | Action::Complete => {
                     self.accept_mention();
                     return;
                 }
                 Action::Cancel => {
-                    // Only the popup. `keymap` has already set Normal on the way in, and
-                    // dropping out of the composer as well would punish a user who just
-                    // wanted the list gone.
+                    // The popup only. `keymap` already set Normal on the way in.
                     self.mentions = None;
                     self.mode = Mode::Insert;
                     self.needs_redraw = true;
@@ -1583,8 +1479,8 @@ impl App {
         match action {
             Action::None => {}
             Action::Quit => {
-                // Quitting without this leaves the room showing a typing indicator until
-                // the server expires it.
+                // Otherwise the room shows a typing indicator until the server expires
+                // it.
                 self.stop_typing();
                 self.should_quit = true;
             }
@@ -1675,8 +1571,7 @@ impl App {
             }
             Action::CaretUp => self.composer_up(),
             Action::CaretDown => self.composer_down(),
-            // Reaching here means no completion was on offer, so tab does nothing rather
-            // than putting a tab character into a chat message.
+            // No completion on offer, so tab does nothing rather than inserting one.
             Action::Complete => {}
             Action::Submit => self.submit(),
 
@@ -1693,9 +1588,8 @@ impl App {
             Action::NewThread => self.start_thread(),
 
             Action::OpenRecovery => {
-                // What the key opens depends entirely on where the account stands, and
-                // offering the wrong one is worse than offering nothing: asking for a
-                // key that was never created, or quietly replacing one that works.
+                // What the key opens depends on where the account stands: the wrong
+                // panel asks for a key never created, or replaces one that works.
                 self.open_modal(Modal::Recovery(match self.recovery {
                     RecoveryState::Disabled => RecoveryPanel::OfferEnable,
                     RecoveryState::Enabled => RecoveryPanel::ConfirmReset,
@@ -1753,30 +1647,27 @@ impl App {
             }
 
             Action::FuzzyJump => {
-                // Jumping to a room or thread by name earns its keep across many
-                // Spaces; with a handful, `<prefix> w` and `<prefix> n` already reach
-                // everything. Deferred to M6 with the rest of the convenience work.
+                // Deferred to M6; `<prefix> w` and `<prefix> n` reach everything until
+                // there are enough Spaces for this to earn its keep.
                 self.status = Some("fuzzy jump is not implemented yet".into());
             }
             Action::CommandPalette => {
                 self.open_modal(Modal::Palette(Palette::new()));
-                // The palette is a search box, so keys have to arrive as characters
-                // rather than as the commands they mean in normal mode.
+                // A search box, so keys must arrive as characters.
                 self.mode = Mode::Insert;
             }
         }
 
-        // The popup follows the buffer rather than the keystrokes, so it is recomputed
-        // once here from whatever the edit left behind. Doing it per arm would mean
-        // fourteen call sites and one of them eventually forgotten.
+        // Recomputed once from the buffer the edit left behind, rather than at each of
+        // the fourteen arms that could have changed it.
         if touches_composer(action) {
             self.refilter_mentions();
         }
     }
 
     fn submit(&mut self) {
-        // Sending is the clearest possible "finished typing", and it must not wait for
-        // the idle timer: the agent sees the message and a live typing notice at once.
+        // Sending must not wait for the idle timer, or the agent sees the message and
+        // a live typing notice at once.
         self.stop_typing();
         let Some(view) = self.focused_view() else {
             self.status = Some("no pane focused".into());
@@ -1786,9 +1677,8 @@ impl App {
         let Some(body) = self.composers.entry(view.clone()).or_default().take() else {
             return;
         };
-        // Read back off the finished text rather than tracked while typing, so a name
-        // typed out in full mentions its owner exactly like one picked from the list,
-        // and one deleted afterwards mentions nobody.
+        // Read off the finished text, so a name typed in full mentions its owner and
+        // one deleted afterwards mentions nobody.
         let mentions = self.mentioned_in(&view.room_id, &body);
 
         let command = match self.composing.take() {
@@ -1825,8 +1715,7 @@ impl App {
         let Some(new_id) = self.focused_tiling_mut().and_then(|t| t.split(dir)) else {
             return;
         };
-        // A new pane starts on the same view as the one it was split from; the user
-        // then navigates it elsewhere. Splitting into an empty pane would be useless.
+        // The new pane starts on the view it was split from.
         let title = view
             .thread_root
             .clone()
@@ -1843,7 +1732,7 @@ impl App {
         if let Some(tab) = self
             .workspaces
             .focused_mut()
-            .and_then(Workspace_focused_tab_mut)
+            .and_then(|w| w.focused_tab_mut())
         {
             tab.push_pane(Pane::new(new_id, kind, title));
         }
@@ -1851,8 +1740,7 @@ impl App {
     }
 
     fn close_pane(&mut self) {
-        // A tab with no panes shows nothing and offers no way back, so the last one
-        // stays. Closing the tab itself is the operation the user wants there.
+        // A tab with no panes offers no way back, so the last one stays.
         let remaining = self
             .workspaces
             .focused()
@@ -1870,7 +1758,7 @@ impl App {
         if let Some(tab) = self
             .workspaces
             .focused_mut()
-            .and_then(Workspace_focused_tab_mut)
+            .and_then(|w| w.focused_tab_mut())
         {
             tab.remove_pane(closed);
             if let Some(id) = focused {
@@ -1888,7 +1776,7 @@ impl App {
         if let Some(tab) = self
             .workspaces
             .focused_mut()
-            .and_then(Workspace_focused_tab_mut)
+            .and_then(|w| w.focused_tab_mut())
         {
             tab.focus(id);
         }
@@ -1904,9 +1792,8 @@ impl App {
 
     /// Take hold of the split border under the pointer, if there is one.
     ///
-    /// Returns whether a drag began, so the caller knows not to treat the same press as
-    /// a click into a pane. Grabbing a border does not move focus: the pane you are
-    /// reading should not change because you widened the one beside it.
+    /// Returns whether a drag began, so the caller does not also treat the press as a
+    /// click into a pane. Grabbing a border does not move focus.
     pub fn begin_drag(&mut self, column: u16, row: u16) -> bool {
         let Some(room_id) = self
             .workspaces
@@ -1927,7 +1814,6 @@ impl App {
         true
     }
 
-    /// Move a held border to the pointer.
     pub fn drag_to(&mut self, column: u16, row: u16) {
         let Some((room_id, handle)) = &self.dragging else {
             return;
@@ -1936,19 +1822,16 @@ impl App {
             return;
         };
         if tiling.drag(handle, column, row) {
-            // Panes have moved under text ratatui believes is already correct, and the
-            // same stale-cell problem that follows a focus change follows this.
+            // Panes have moved under text ratatui believes is already correct.
             self.needs_redraw = true;
             self.layout_dirty = true;
         }
     }
 
-    /// Let go of the border, if one was held.
     pub fn end_drag(&mut self) {
         self.dragging = None;
     }
 
-    /// Whether a border is currently being dragged.
     pub fn is_dragging(&self) -> bool {
         self.dragging.is_some()
     }
@@ -1961,7 +1844,7 @@ impl App {
         if let Some(tab) = self
             .workspaces
             .focused_mut()
-            .and_then(Workspace_focused_tab_mut)
+            .and_then(|w| w.focused_tab_mut())
         {
             tab.focus(id);
         }
@@ -1970,10 +1853,9 @@ impl App {
 
     /// The user moved focus: repaint, mark the new view seen, and stream it.
     ///
-    /// The repaint is not cosmetic. ratatui rewrites only the cells it believes have
-    /// changed, and a glyph that paints wider than it was measured leaves that belief
-    /// out of step with the screen. Switching to a shorter transcript then leaves the
-    /// previous room's text visible underneath it.
+    /// ratatui rewrites only cells it believes have changed, and a glyph painting wider
+    /// than it measured leaves that belief out of step with the screen. Switching to a
+    /// shorter transcript would leave the previous room's text visible underneath.
     fn focus_moved(&mut self) {
         // The notice belongs to the room being left, so it has to go before the focus
         // does; afterwards there is nothing left pointing at the old room.
@@ -2020,9 +1902,8 @@ impl App {
     /// Route a left click on the workspace or tab bar.
     ///
     /// Returns `true` when the click landed on a bar, so the caller does not also
-    /// hit-test the panes. Clicks anywhere on a bar are swallowed, including the gaps
-    /// between cells: falling through to the tiling would focus a pane the user did not
-    /// aim at.
+    /// hit-test the panes. The gaps between cells are swallowed too: falling through
+    /// would focus a pane the user did not aim at.
     pub fn click_bar(&mut self, column: u16, row: u16) -> bool {
         if row == self.bars.workspace_row && !self.bars.workspaces.is_empty() {
             let index = self
@@ -2068,11 +1949,9 @@ impl App {
         false
     }
 
-    /// Ask the worker to stream every view on show, not just the focused one.
+    /// Ask the worker to stream every view on show.
     ///
     /// Unfocused panes render their own transcript, so they need their own timeline.
-    /// Streaming only the focused view is what left the room pane blank the moment a
-    /// thread took focus.
     pub fn open_focused_view(&mut self) {
         let views: Vec<View> = self
             .workspaces
@@ -2094,11 +1973,9 @@ impl App {
                 continue;
             }
             self.queue(Command::OpenView(view.clone()));
-            // A live timeline starts with only what sync delivered, which for a room
-            // opened at launch is usually nothing. Without this first page the pane is
-            // simply empty and the client looks broken. The worker handles commands in
-            // order and `OpenView` is awaited, so the timeline exists by the time this
-            // is processed.
+            // A live timeline starts with only what sync delivered, which at launch is
+            // usually nothing. The worker handles commands in order and awaits
+            // `OpenView`, so the timeline exists by the time this is processed.
             self.paginating.insert(view.clone());
             self.queue(Command::Paginate { view, count: 0 });
         }
@@ -2108,9 +1985,7 @@ impl App {
 
     /// Ask who is in the focused room, once.
     ///
-    /// Asked on focus rather than when `@` is typed so the picker has a list to show the
-    /// moment it opens. A roster that arrives a round trip after the popup does is a
-    /// popup that appears empty and then jumps.
+    /// On focus rather than on `@`, so the picker has a list the moment it opens.
     fn ask_for_members(&mut self) {
         let Some(room_id) = self
             .workspaces
@@ -2120,8 +1995,8 @@ impl App {
         else {
             return;
         };
-        // Tracked separately from `members` because a room can legitimately answer with
-        // nobody, and an empty answer must not look like an unasked question.
+        // Separate from `members`: a room can answer with nobody, and that must not
+        // look like an unasked question.
         if self.members_asked.insert(room_id.clone()) {
             self.queue(Command::ListMembers { room_id });
         }
@@ -2129,9 +2004,8 @@ impl App {
 
     /// Recompute the mention picker from the composer, opening or closing it as needed.
     ///
-    /// Called after every composer edit rather than driven by its own keystrokes: the
-    /// buffer is the truth about what is being typed, and deriving the query from it is
-    /// what makes the popup survive a backspace, a caret move, or a pasted line.
+    /// Derived from the buffer after every edit rather than from its own keystrokes, so
+    /// the popup survives a backspace, a caret move or a pasted line.
     fn refilter_mentions(&mut self) {
         let Some(view) = self.focused_view() else {
             self.mentions = None;
@@ -2149,9 +2023,8 @@ impl App {
 
         let members = self.members.get(&view.room_id).map(Vec::as_slice);
         let matches = rank_members(members.unwrap_or_default(), &query);
-        // An armed `@` with nothing behind it draws no popup, but stays armed: the next
-        // character may well match, and closing here would mean the picker never opens
-        // for a room whose roster arrives late.
+        // An armed `@` matching nothing draws no popup but stays armed: the next
+        // character may match, and the roster may still be arriving.
         let selected = match &self.mentions {
             // Keep the highlight where the user put it while the query is unchanged.
             Some(open) if open.start == start && open.matches == matches => {
@@ -2234,8 +2107,7 @@ impl App {
 
     /// The largest meaningful scroll offset: one screen short of the oldest line.
     ///
-    /// Derived from the geometry the renderer recorded, since wrapping depends on the
-    /// pane width and the app cannot know it.
+    /// From the geometry the renderer recorded; wrapping depends on the pane width.
     fn max_scroll(&self) -> u16 {
         self.rendered_lines.saturating_sub(self.viewport_height)
     }
@@ -2245,12 +2117,9 @@ impl App {
             return;
         };
         let current = *self.scroll.get(&view).unwrap_or(&0);
-        // Scroll is an offset *from the bottom*, so scrolling up increases it.
-        //
-        // Clamping at the top is what makes scrolling back down work. Unclamped, every
-        // keypress past the oldest line increments a counter with no visible effect,
-        // and scrolling down then has to unwind all of it before the transcript moves —
-        // which looks exactly like the newest messages having been lost.
+        // Scroll is an offset *from the bottom*, so scrolling up increases it, and it
+        // is clamped: unclamped, keypresses past the oldest line pile up invisibly and
+        // scrolling down has to unwind all of them before anything moves.
         let next = ((current as i32 - delta).max(0) as u16).min(self.max_scroll());
         self.scroll.insert(view.clone(), next);
         if delta < 0 {
@@ -2260,8 +2129,7 @@ impl App {
 
     /// Request older events once the user is within [`PAGINATE_MARGIN`] of the top.
     fn paginate_if_near_top(&mut self, view: &View, scroll: u16) {
-        // Already at the start of the room: there is nothing older to fetch, and asking
-        // anyway would re-request on every keypress.
+        // At the start of the room: asking again would re-request per keypress.
         if self
             .timelines
             .get(view)
@@ -2285,18 +2153,17 @@ impl App {
     }
 
     fn set_scroll(&mut self, value: u16) {
-        // `ScrollTop` passes u16::MAX rather than computing the ceiling itself. Left
-        // unclamped that would need 65,000 keypresses to scroll back to the bottom.
+        // `ScrollTop` passes u16::MAX rather than computing the ceiling; unclamped
+        // that would need 65,000 keypresses to get back to the bottom.
         let value = value.min(self.max_scroll());
         let Some(view) = self.focused_view() else {
             return;
         };
         self.scroll.insert(view.clone(), value);
-        // Jumping to the top is as much a pagination trigger as scrolling there.
+        // Jumping to the top triggers pagination like scrolling there does.
         self.paginate_if_near_top(&view, value);
     }
 
-    /// Toggle the newest tool card in the focused view.
     fn toggle_card(&mut self) {
         use heddle_matrix::{AgentPayload, EntryKind};
 
@@ -2349,8 +2216,8 @@ impl App {
 
         let (id, emoji) = match pending {
             Pending::Approval(approval) => {
-                // Prefer the emoji Hermes actually advertised; fall back to the
-                // conventional pair so an older gateway still works.
+                // The emoji Hermes advertised, falling back to the conventional pair
+                // for an older gateway.
                 let wanted = if approve { "approve" } else { "deny" };
                 let emoji = approval
                     .reactions
@@ -2413,16 +2280,9 @@ impl App {
     }
 }
 
-/// Helper so `and_then` can borrow a tab mutably out of a workspace.
-#[allow(non_snake_case)]
-fn Workspace_focused_tab_mut(w: &mut heddle_layout::Workspace) -> Option<&mut Tab> {
-    w.focused_tab_mut()
-}
-
 /// Whether an action can have changed the composer's text or caret.
 ///
-/// The mention picker is recomputed after exactly these, and after nothing else: a
-/// pane split or a scroll leaves the buffer alone, and re-deriving the popup from an
+/// The mention picker is recomputed after exactly these. Re-deriving it from an
 /// unchanged buffer would reopen a picker the user had just dismissed.
 fn touches_composer(action: Action) -> bool {
     matches!(
@@ -2446,17 +2306,10 @@ fn touches_composer(action: Action) -> bool {
 
 /// The text heddle writes into the message for a mention.
 ///
-/// The localpart, not the display name, and never the raw display name of someone whose
-/// name is shared. Two reasons, both about the message being readable back:
-///
-/// - A display name may contain spaces, and a mention that contains a space cannot be
-///   found again by [`mention_words`], so it would be offered by the picker and then
-///   silently fail to mention anyone.
-/// - Two members can show the same name. `@alex` would then name nobody in particular,
-///   and the reader has no way to tell which was meant.
-///
-/// So an unambiguous member gets `@localpart` and everyone else gets their full ID.
-/// `m.mentions` carries the authoritative user ID either way; this is what a human sees.
+/// An unambiguous member gets `@localpart`; everyone else gets their full ID. Display
+/// names are never used: they may contain spaces, which [`mention_words`] cannot read
+/// back, and two members can share one. `m.mentions` carries the authoritative user ID
+/// either way.
 fn mention_text(member: &MemberSummary, room: &[MemberSummary]) -> String {
     let own = localpart(&member.user_id);
     let shared = room
@@ -2484,13 +2337,11 @@ fn localpart(user_id: &str) -> &str {
 
 /// Every `@word` in a message, without its sigil.
 ///
-/// Word here means what [`Composer::mention_query`] means by it, so that what the picker
-/// wrote can be read back: a run starting at a word boundary and ending at whitespace.
-///
-/// Trailing punctuation is trimmed, because "thanks @bob!" mentions bob and so does
-/// "ask @bob." — including the full-stop case, which also leaves a trailing dot off a
-/// homeserver name without eating the dots inside it. Underscore and hyphen survive:
-/// they end no sentence and they are ordinary in a localpart.
+/// Word means what [`Composer::mention_query`] means by it -- a run from a word boundary
+/// to whitespace -- so what the picker wrote can be read back. Trailing punctuation is
+/// trimmed, including the full stop, which also strips a trailing dot from a homeserver
+/// name without eating the dots inside it. Underscore and hyphen survive: they end no
+/// sentence and are ordinary in a localpart.
 fn mention_words(body: &str) -> Vec<&str> {
     let trailing = |c: char| c.is_ascii_punctuation() && c != '_' && c != '-';
     body.split_whitespace()
@@ -2502,12 +2353,9 @@ fn mention_words(body: &str) -> Vec<&str> {
 
 /// Which member, if any, a written `@word` names.
 ///
-/// Tried as a full user ID, then a localpart, then a display name. Each step only
-/// answers when it names exactly one member: two people can share a localpart across
-/// homeservers and two more can share a display name, and picking the first of them
-/// would put a notification in front of somebody who was never addressed. A name that
-/// names two people names neither, and the message goes out mentioning nobody rather
-/// than mentioning the wrong person.
+/// Tried as a full user ID, then a localpart, then a display name. Each step answers
+/// only when it names exactly one member: localparts collide across homeservers and
+/// display names collide outright, and the wrong notification is worse than none.
 fn resolve_mention<'a>(members: &'a [MemberSummary], word: &str) -> Option<&'a MemberSummary> {
     let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
 
@@ -2527,9 +2375,8 @@ fn only(members: &[MemberSummary], f: impl Fn(&MemberSummary) -> bool) -> Option
 
 /// Members matching `query`, best first, as indices into `members`.
 ///
-/// An empty query offers everyone, in the order the worker sorted them. Otherwise both
-/// the display name and the localpart are scored and the better of the two wins, so
-/// `@qui` finds "Quintin" and `@wri` finds a bot whose display name is "Retinue".
+/// An empty query offers everyone in the worker's order. Otherwise display name and
+/// localpart are both scored and the better wins.
 fn rank_members(members: &[MemberSummary], query: &str) -> Vec<usize> {
     if query.is_empty() {
         return (0..members.len()).collect();
@@ -5230,13 +5077,7 @@ mod tests {
 
     #[test]
     fn a_second_overlay_cannot_open_over_the_first() {
-        // The bug this makes impossible. The thread picker's match had a `_ => {}` arm,
-        // so `:` fell through it into the main keymap and opened the palette -- leaving
-        // both on screen, both drawn, with the palette checked first so the picker
-        // underneath was unreachable and even its own escape was eaten.
-        //
-        // Now the picker owns the key and nothing happens, which is also the better
-        // answer: the user gets the overlay they already asked for.
+        // The open overlay owns the key, so the second one never opens at all.
         let mut app = app_with_two_rooms();
         app.apply_action(Action::OpenThreads);
         assert!(app.threads().is_some());
@@ -5249,8 +5090,6 @@ mod tests {
 
     #[test]
     fn the_thread_picker_swallows_keys_that_would_act_behind_it() {
-        // `_ => {}` used to let everything it did not recognise fall through to the
-        // main keymap, so a picker could split the pane it was covering.
         let mut app = app_with_two_rooms();
         app.apply_action(Action::OpenThreads);
         let before = pane_count(&app);
@@ -5263,9 +5102,6 @@ mod tests {
 
     #[test]
     fn the_key_overlay_swallows_keys_that_would_act_behind_it() {
-        // The help overlay was drawn but appeared in no dispatch chain at all, so `D`
-        // still armed a redaction and a split still split, behind a panel covering the
-        // transcript they were acting on.
         let mut app = app_with_two_rooms();
         app.apply_action(Action::ToggleHelp);
         let before = pane_count(&app);

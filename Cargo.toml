@@ -11,8 +11,7 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-# The floor is set by matrix-sdk 0.18, which requires 1.93. Declaring anything lower
-# is a fiction: the workspace has never built on it.
+# Set by matrix-sdk 0.18, which requires 1.93.
 rust-version = "1.93"
 license = "Apache-2.0"
 repository = "https://github.com/SynthSwarm/heddle"
@@ -28,8 +27,8 @@ heddle-agent = { path = "crates/heddle-agent" }
 heddle-render = { path = "crates/heddle-render" }
 heddle-layout = { path = "crates/heddle-layout" }
 
-# Matrix. `bundled-sqlite` avoids a system libsqlite3 build dependency, keeping the
-# binary self-contained. TLS is handled internally by the SDK as of 0.18.
+# `bundled-sqlite` avoids a system libsqlite3 build dependency. TLS is internal to the
+# SDK as of 0.18.
 matrix-sdk = { version = "0.18.0", features = [
     "e2e-encryption",
     "sqlite",
@@ -39,11 +38,9 @@ matrix-sdk = { version = "0.18.0", features = [
 ] }
 matrix-sdk-ui = { version = "0.18.0" }
 
-# TUI
-# `unstable-rendered-line-info` gates Paragraph::line_count, which is the only way to
-# learn how many rows a transcript wrapped to at a given width. Scroll clamping needs
-# that number; the alternative is reimplementing ratatui's wrap algorithm here and
-# having it drift silently. One call site, in ui::draw_panes.
+# `unstable-rendered-line-info` gates Paragraph::line_count, the only way to learn how
+# many rows a transcript wrapped to at a given width. Scroll clamping needs it. One call
+# site, in ui::draw_panes.
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 # `serde`: layout persistence stores the crate's own `Node` tree. See
@@ -66,6 +63,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2.5"
 directories = "6.0.0"
 clap = { version = "4.6.5", features = ["derive"] }
+# Test-only: self-deleting temp directories.
+tempfile = "3.27.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

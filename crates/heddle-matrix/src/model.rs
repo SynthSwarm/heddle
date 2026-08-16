@@ -84,9 +84,7 @@ pub struct Entry {
 #[derive(Debug, Clone)]
 pub enum EntryKind {
     Message(Message),
-    /// A day boundary.
     DateDivider(u64),
-    /// The user's own read marker.
     ReadMarker,
     /// Start of the timeline; nothing older exists.
     TimelineStart,
@@ -98,13 +96,11 @@ pub enum EntryKind {
 
 /// How much the authenticity of a message can be trusted.
 ///
-/// Taken from the SDK's own shield calculation rather than derived here. Deciding what
-/// counts as trustworthy is exactly the judgement a client should not be improvising:
-/// the rules cover unsigned devices, unverified identities, senders who changed their
-/// keys after being verified, and events whose sender does not own the Megolm session.
+/// From the SDK's own shield calculation, whose rules cover unsigned devices, unverified
+/// identities, senders who changed keys after being verified, and events whose sender
+/// does not own the Megolm session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shield {
-    /// Nothing to say.
     None,
     /// Worth noting but not alarming: authenticity cannot be fully established.
     Caution(ShieldReason),
@@ -226,16 +222,14 @@ pub struct MemberSummary {
     pub display_name: String,
     /// Whether another joined member shows the same display name.
     ///
-    /// Taken from the SDK's own disambiguation rather than recomputed, because deciding
-    /// when two people look alike is exactly the judgement a client should not improvise.
+    /// From the SDK's own disambiguation, which sees the whole room.
     pub ambiguous: bool,
 }
 
 /// How far an interactive device verification has got.
 ///
-/// Only one runs at a time. Verification is a conversation with a human at both ends,
-/// and a client showing two sets of emoji at once is a client inviting the user to
-/// confirm the wrong one.
+/// Only one runs at a time: two sets of emoji on screen invite confirming the wrong
+/// one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verification {
     /// Another of our devices asked to verify. Nothing has been agreed yet.
@@ -258,7 +252,6 @@ pub enum Verification {
 }
 
 impl Verification {
-    /// Whether this state is the end of the flow.
     pub fn is_finished(&self) -> bool {
         matches!(self, Self::Done | Self::Cancelled { .. })
     }
@@ -266,12 +259,11 @@ impl Verification {
 
 /// Whether this account's secrets can be recovered on a new device.
 ///
-/// "Recovery" is secret storage plus a key backup: the cross-signing keys and the Megolm
-/// keys, encrypted under a key only the user holds. Without it a fresh device can read
-/// nothing sent before it existed, however well verified it is.
+/// Secret storage plus a key backup: cross-signing and Megolm keys, encrypted under a
+/// key only the user holds. Without it a fresh device can read nothing sent before it
+/// existed, however well verified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryState {
-    /// Not asked yet.
     Unknown,
     /// Set up, and this device holds every secret.
     Enabled,
@@ -319,7 +311,6 @@ pub enum Command {
         body: String,
         mentions: Vec<String>,
     },
-    /// Redact an event.
     Redact {
         view: View,
         event_id: String,
@@ -353,8 +344,8 @@ pub enum Command {
     /// The emoji match. Signs the other device and, for a self-verification, gets this
     /// one signed in return.
     ConfirmVerification,
-    /// The emoji do not match. Reported to the other side as a mismatch rather than a
-    /// plain cancel, because the two mean very different things.
+    /// The emoji do not match. Reported as a mismatch rather than a plain cancel: one
+    /// is an attack, the other a change of mind.
     MismatchVerification,
     /// Withdraw from a verification without judging it.
     CancelVerification,
@@ -371,10 +362,8 @@ pub enum Command {
 impl Command {
     /// The variant name, with nothing else attached.
     ///
-    /// For logging. `Command` derives `Debug` for tests and for `WorkerEvent::Fatal`
-    /// context, but several variants carry a decrypted message body, and a client that
-    /// writes those into a log file has undone the point of encrypting them. Log this
-    /// instead.
+    /// For logging: several variants carry a decrypted message body, and a client that
+    /// writes those to a log file has undone the point of encrypting them.
     pub fn kind(&self) -> &'static str {
         match self {
             Command::OpenView(..) => "OpenView",
@@ -436,9 +425,8 @@ pub enum WorkerEvent {
     Verification(Verification),
     /// Whether this device has been signed by the account's own identity.
     ///
-    /// `None` means the crypto layer cannot answer yet, which is not the same as "no".
-    /// Drawing a warning shield at a user whose device is merely unexamined would train
-    /// them to ignore the shield that matters.
+    /// `None` means the crypto layer cannot answer yet, which is not "no": a warning
+    /// shield at an unexamined device trains the user to ignore the one that matters.
     DeviceVerified(Option<bool>),
     /// Whether this account's secrets can be recovered, re-sent whenever it changes.
     Recovery(RecoveryState),

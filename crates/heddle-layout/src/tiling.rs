@@ -118,7 +118,6 @@ impl Tiling {
         }
     }
 
-    /// Capture the tiling for persistence.
     pub fn snapshot(&self) -> TilingSnapshot {
         TilingSnapshot {
             tree: self.inner.root().clone(),
@@ -137,9 +136,8 @@ impl Tiling {
         let mut tiling = Self::new();
         tiling.inner.set_root(snapshot.tree.clone())?;
 
-        // Focus and zoom are advisory: a pane id that is not in the tree means the file
-        // disagrees with itself, and losing the cursor position is a far better outcome
-        // than refusing to restore the layout at all.
+        // Advisory: an id not in the tree means the file disagrees with itself, and
+        // losing the cursor position beats refusing to restore.
         if let Some(id) = snapshot.focused.map(PaneId::new) {
             let _ = tiling.inner.focus_pane(id);
         }
@@ -151,20 +149,17 @@ impl Tiling {
         Ok(tiling)
     }
 
-    /// The pane the user is interacting with.
     pub fn focused(&self) -> Option<PaneId> {
         self.inner.focused_pane()
     }
 
-    /// Focus a specific pane.
     pub fn focus(&mut self, id: PaneId) -> bool {
         self.inner.focus_pane(id).is_ok()
     }
 
     /// Split the focused pane, returning the new pane's id.
     pub fn split(&mut self, dir: Dir) -> Option<PaneId> {
-        // Splitting while zoomed is confusing: the new pane would be invisible. Unzoom
-        // first so the result is what the user sees.
+        // Unzoom first, or the new pane would be invisible.
         self.zoomed = None;
         self.inner.split_focused(dir.axis()).ok()
     }
@@ -204,9 +199,9 @@ impl Tiling {
             .min_by_key(|p| {
                 let r = p.rect;
                 let (px, py) = (r.x + r.width / 2, r.y + r.height / 2);
-                // Primary: distance along the axis of travel. Secondary: perpendicular
-                // offset, so moving right from a tall pane lands on the pane opposite
-                // rather than a distant corner.
+                // Distance along the axis of travel first, perpendicular offset
+                // second, so moving right from a tall pane lands opposite rather than
+                // in a distant corner.
                 let (along, across) = match dir {
                     Dir::Left | Dir::Right => (px.abs_diff(cx), py.abs_diff(cy)),
                     Dir::Up | Dir::Down => (py.abs_diff(cy), px.abs_diff(cx)),
@@ -225,17 +220,11 @@ impl Tiling {
             return;
         };
 
-        // Walk up to the nearest ancestor split that actually runs along `dir`.
-        //
-        // Taking the immediate parent and moving whatever border it happened to be was
-        // the bug: `<prefix> H` on a pane in a vertically stacked pair moved the
-        // *vertical* border, so asking for narrower made it shorter. Nothing checked
-        // the split's direction -- `Node::Split` carries one and the old `ratio_at`
-        // destructured it away with `..`.
-        //
-        // Walking up rather than giving up matches what tmux and i3 do: a pane with no
-        // horizontal border of its own resizes the one belonging to the column it sits
-        // in, which is the border the user can see moving.
+        // The nearest ancestor split that runs along `dir`, not simply the parent --
+        // the parent may divide the other axis, and moving it would make a pane shorter
+        // when the user asked for narrower. Walking up rather than giving up is what
+        // tmux and i3 do: a pane with no vertical border of its own resizes the one
+        // belonging to the column it sits in, which is the border the user can see.
         let axis = dir.axis();
         let mut cut = path.len();
         let (split_path, first_child, current) = loop {
@@ -347,12 +336,11 @@ impl Tiling {
 /// The direction and ratio of the split at `path`, or `None` if the path does not name
 /// a split.
 ///
-/// The direction is returned because [`Tiling::resize`] needs it: a ratio on its own
-/// cannot tell you whether moving it makes a pane wider or shorter. Reading both back
-/// out of the tree rather than shadowing them in a side table -- the engine has no
-/// getter, but the tree it hands back has the numbers in it, and a second copy could
-/// only ever drift, most obviously after a restore where the side table would start
-/// empty and the first resize would snap a carefully placed border back to the middle.
+/// Both, because a ratio on its own cannot say whether moving it makes a pane wider or
+/// shorter. Read out of the tree rather than shadowed in a side table: the engine has
+/// no getter, but the tree it returns has the numbers, and a second copy would drift --
+/// most obviously after a restore, where it would start empty and the first resize
+/// would snap a placed border back to the middle.
 fn split_at(root: &Node, path: &[usize]) -> Option<(Direction, f32)> {
     let mut node = root;
     for step in path {
@@ -399,8 +387,7 @@ mod tests {
         t.split(Dir::Right).expect("splits");
         let placements = t.layout(AREA);
         assert_eq!(placements.len(), 2);
-        // The name of this test is the assertion: it used to check only that the panes
-        // did not overlap the area, which a 1x1 pane beside an empty one satisfies.
+
         assert_eq!(placements[0].rect.width, AREA.width / 2);
         assert_eq!(placements[1].rect.width, AREA.width / 2);
         assert_eq!(placements[0].rect.height, AREA.height);
@@ -442,10 +429,7 @@ mod tests {
 
     #[test]
     fn resizing_does_not_move_the_border_of_the_wrong_axis() {
-        // The bug: `resize` took the pane's immediate parent split and moved it
-        // whichever way it happened to run. In a vertically stacked pair, asking for
-        // narrower made the pane shorter -- `ratio_at` returned the ratio and threw the
-        // direction away, so nothing could tell the difference.
+        // Asking for narrower must not make the pane shorter.
         let mut t = Tiling::new();
         t.split(Dir::Down).expect("splits");
         let height = focused_height(&mut t, AREA);
@@ -463,9 +447,8 @@ mod tests {
 
     #[test]
     fn resizing_reaches_past_the_parent_to_the_border_it_can_move() {
-        // A pane inside a vertical stack, inside a horizontal split. It has no vertical
-        // border of its own, so `<prefix> L` moves the one belonging to the column it
-        // sits in -- which is the border the user can see. tmux and i3 both do this.
+        // A pane in a vertical stack inside a horizontal split has no vertical border
+        // of its own, so the resize reaches the column's.
         let mut t = Tiling::new();
         t.split(Dir::Right).expect("splits right");
         t.split(Dir::Down).expect("splits down");

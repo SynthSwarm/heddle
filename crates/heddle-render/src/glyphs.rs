@@ -1,38 +1,22 @@
 //! Every glyph heddle prints, and the width the renderer lays it out at.
 //!
-//! One table, because there were three and they disagreed. The transcript had a test
-//! called `every_glyph_the_transcript_prints_is_measured_as_it_is_painted` that checked
-//! four hardcoded emoji; the doctor had a `PRINTED_GLYPHS` list of five, one of which
-//! (`❓`) the transcript explicitly refuses to draw; and `SPEC.md` claimed the client
-//! printed nothing but East\_Asian\_Width=Wide glyphs. None of the three could catch a
-//! new glyph being added, which is the only failure they existed to prevent.
+//! One table, so a glyph cannot reach the UI without the doctor learning to probe it.
 //!
-//! # Why the width matters
+//! `unicode-width` decides how many cells ratatui reserves. A terminal that paints a
+//! glyph wider leaves a cell the renderer believes it has written, so the row rots as
+//! the transcript scrolls under it.
 //!
-//! `unicode-width` is what ratatui uses to decide how many cells a span occupies. If
-//! the terminal paints a glyph wider than that, the extra cell is one the renderer
-//! believes it has already written, so it is never cleared and the row rots as the
-//! transcript scrolls under it.
-//!
-//! The hazard is not "narrow glyphs". It is *disagreement*. Two kinds of glyph are
-//! safe:
-//!
-//! - `EAW=Wide` emoji. `unicode-width` says two cells and terminals paint two.
-//! - Text-presentation symbols and box drawing (`EAW=Neutral` or `Ambiguous`).
-//!   `unicode-width` says one cell and terminals paint one, outside a CJK locale.
-//!
-//! What is not safe is a `Neutral`/`Ambiguous` codepoint that terminals promote to
-//! *emoji* presentation and paint at two cells while `unicode-width` still says one.
-//! `⚠` U+26A0 is the canonical example, and it was the `Blocked` badge in every pane,
-//! tab and workspace header -- while a comment in `transcript.rs` named it as a glyph
-//! that "would rot the transcript". The comment was right; the usage was wrong.
+//! The hazard is *disagreement*, not narrowness: `EAW=Wide` emoji measure two and paint
+//! two, and text-presentation symbols measure one and paint one. Unsafe is a
+//! `Neutral`/`Ambiguous` codepoint that terminals promote to emoji presentation, `⚠`
+//! U+26A0 being the usual one.
 
 /// A glyph heddle prints, what it means, and the width it is laid out at.
 pub struct Glyph {
     pub glyph: &'static str,
     pub what: &'static str,
-    /// Cells the renderer reserves. Always `UnicodeWidthStr::width(glyph)`; carried
-    /// explicitly so the table states the assumption rather than restating the call.
+    /// Cells the renderer reserves. Always `UnicodeWidthStr::width(glyph)`, stated
+    /// here so the assumption is checkable.
     pub cells: usize,
 }
 
@@ -42,9 +26,7 @@ const fn g(glyph: &'static str, what: &'static str, cells: usize) -> Glyph {
 
 /// Every glyph heddle prints.
 ///
-/// Add a glyph to the UI, add it here. `no_glyph_is_laid_out_at_a_width_it_is_not`
-/// keeps the third column honest, and the doctor measures the whole table against the
-/// user's actual terminal.
+/// Add a glyph to the UI, add it here: the doctor can only measure what it is given.
 pub const PRINTED: &[Glyph] = &[
     // Wide: two cells, and terminals agree.
     g("\u{1F464}", "human sender", 2),
@@ -75,8 +57,8 @@ mod tests {
 
     #[test]
     fn no_glyph_is_laid_out_at_a_width_it_is_not() {
-        // The table's third column is what the renderer reserves. If it disagrees with
-        // `unicode-width`, ratatui and the table are describing different screens.
+        // If the third column disagrees with `unicode-width`, the table and ratatui
+        // are describing different screens.
         for Glyph { glyph, what, cells } in PRINTED {
             assert_eq!(
                 UnicodeWidthStr::width(*glyph),
@@ -89,10 +71,8 @@ mod tests {
 
     #[test]
     fn no_glyph_is_one_a_terminal_is_likely_to_paint_as_an_emoji() {
-        // The failure this whole module exists for: a codepoint `unicode-width` calls
-        // one cell that the terminal paints as a two-cell emoji. These are the ones in
-        // the ranges heddle draws from that have an Emoji_Presentation or a widely
-        // implemented emoji fallback, and none of them may be used at width 1.
+        // A codepoint `unicode-width` calls one cell and the terminal paints as a
+        // two-cell emoji. These are the ones in the ranges heddle draws from.
         const EMOJI_PRONE: &[char] = &[
             '\u{26A0}', // ⚠ warning
             '\u{2757}', // ❗

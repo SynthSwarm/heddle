@@ -5,9 +5,8 @@
 //! built by hand — which threads they had side by side, how wide they made them, which
 //! one they were looking at. That is what this file persists, and nothing else.
 //!
-//! Because it is cheap to rebuild, it is also cheap to throw away. Every failure path
-//! here degrades to "start with one pane per room" rather than to an error the user has
-//! to deal with before they can read their messages.
+//! Cheap to rebuild, so cheap to throw away: every failure path here degrades to one
+//! pane per room rather than to an error blocking the user from their messages.
 //!
 //! See `docs/SPEC.md` §4.1.
 
@@ -20,10 +19,9 @@ use std::path::{Path, PathBuf};
 
 /// Schema version of the layout file.
 ///
-/// A file written by a different version is discarded rather than migrated. Migration
-/// code is a liability that has to be carried for ever, and the cost of getting this
-/// wrong — someone's carefully arranged panes silently rearranged — is worse than the
-/// cost of getting it right, which is one relaunch spent re-splitting.
+/// A file from a different version is discarded, not migrated: the cost of a wrong
+/// migration is someone's arrangement silently rearranged, and the cost of discarding is
+/// one relaunch spent re-splitting.
 pub const VERSION: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -97,9 +95,8 @@ impl Default for Layout {
 impl Layout {
     /// Capture the current arrangement.
     ///
-    /// Rooms with a single pane are recorded like any other. Skipping them would save a
-    /// few bytes and lose the ability to tell "this room was never opened" from "this
-    /// room was deliberately left with one pane".
+    /// Single-pane rooms are recorded too, so "never opened" stays distinguishable from
+    /// "deliberately left with one pane".
     pub fn capture(workspaces: &Workspaces, tilings: &HashMap<String, Tiling>) -> Self {
         let mut tabs = BTreeMap::new();
         let mut rooms = BTreeMap::new();
@@ -140,14 +137,12 @@ impl Layout {
 
     /// Take a room's saved arrangement, rebuilding its tiling and panes.
     ///
-    /// Consuming rather than borrowing, so a room that appears twice in the room list —
-    /// which happens, since sync re-sends summaries — is restored once and then behaves
-    /// like any other tab.
+    /// Consuming: sync re-sends summaries, so a room appears in the room list more than
+    /// once and must be restored only the first time.
     ///
-    /// Returns `None` when there is nothing saved, when the tree will not load, or when
-    /// the panes and the tree disagree about which panes exist. In every case the
-    /// caller falls back to a fresh single-pane tab, which is always correct if not
-    /// always what the user had.
+    /// `None` when nothing is saved, the tree will not load, or the panes and the tree
+    /// disagree about which panes exist. The caller then starts a fresh single-pane
+    /// tab.
     pub fn take_room(&mut self, room_id: &str, tab: &mut Tab) -> Option<Tiling> {
         let saved = self.rooms.remove(room_id)?;
         if saved.panes.is_empty() {
@@ -162,9 +157,8 @@ impl Layout {
             }
         };
 
-        // A pane in the file that is not a leaf of the tree would be drawn nowhere, and
-        // a leaf with no pane would be drawn empty for ever. Either means the file is
-        // internally inconsistent, and half-restoring it is worse than not restoring it.
+        // A pane that is not a leaf would be drawn nowhere; a leaf with no pane would
+        // be drawn empty for ever.
         let leaves = tiling.pane_ids();
         if leaves.len() != saved.panes.len()
             || !saved
@@ -192,9 +186,8 @@ impl Layout {
 
     /// Load from `path`, or return an empty layout when there is nothing usable there.
     ///
-    /// A missing file is the ordinary first-run case. A corrupt or stale one is
-    /// reported and then ignored: refusing to start because a disposable cache will not
-    /// parse would be a poor trade.
+    /// A missing file is the ordinary first run. A corrupt or stale one is logged and
+    /// ignored.
     pub fn load(path: &Path) -> Self {
         match Self::read(path) {
             Ok(layout) => layout,
@@ -266,6 +259,7 @@ mod tests {
     use crate::model::Workspace;
     use crate::tiling::Dir;
     use ratatui::layout::Rect;
+    use tempfile::TempDir;
 
     const AREA: Rect = Rect {
         x: 0,
@@ -438,55 +432,24 @@ mod tests {
         assert!(layout.take_room("!new:x", &mut tab).is_none());
     }
 
-    const PREFIX: &str = "heddle-layout";
-
-    /// A temporary directory that removes itself.
-    ///
-    /// The helper this replaces created a directory per test and never removed one, so
-    /// every `cargo test` run left a little more behind in `$TMPDIR`. `Drop` runs on the
-    /// failure path too, which a `remove_dir_all` at the end of the happy path does not.
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "{}-{}-{tag}-{:?}",
-                PREFIX,
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("scratch dir");
-            Self(dir)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// A layout path inside a self-removing directory.
-    ///
-    /// The guard is returned alongside, because dropping it deletes the directory: a
-    /// test that keeps only the path would have its file removed out from under it.
-    fn scratch(tag: &str) -> (Scratch, PathBuf) {
-        let dir = Scratch::new(tag);
-        let path = dir.0.join("layout.json");
+    /// A layout path in a directory that deletes itself. Returned together, because
+    /// dropping the guard removes the file.
+    fn scratch() -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let path = dir.path().join("layout.json");
         (dir, path)
     }
 
     #[test]
     fn a_missing_file_is_the_ordinary_first_run() {
-        let (_scratch, path) = scratch("missing");
+        let (_scratch, path) = scratch();
         let _ = std::fs::remove_file(&path);
         assert!(Layout::load(&path).rooms.is_empty());
     }
 
     #[test]
     fn a_layout_survives_a_trip_through_the_filesystem() {
-        let (_scratch, path) = scratch("roundtrip");
+        let (_scratch, path) = scratch();
         let (workspaces, tilings) = arranged();
         Layout::capture(&workspaces, &tilings)
             .save(&path)
@@ -501,14 +464,14 @@ mod tests {
 
     #[test]
     fn a_corrupt_file_costs_a_layout_not_a_launch() {
-        let (_scratch, path) = scratch("corrupt");
+        let (_scratch, path) = scratch();
         std::fs::write(&path, "{ this is not json").expect("seed");
         assert!(Layout::load(&path).rooms.is_empty());
     }
 
     #[test]
     fn a_file_from_another_version_is_discarded_not_guessed_at() {
-        let (_scratch, path) = scratch("version");
+        let (_scratch, path) = scratch();
         let (workspaces, tilings) = arranged();
         let mut layout = Layout::capture(&workspaces, &tilings);
         layout.version = VERSION + 1;
@@ -522,7 +485,7 @@ mod tests {
 
     #[test]
     fn saving_does_not_leave_a_temporary_file_behind() {
-        let (_scratch, path) = scratch("atomic");
+        let (_scratch, path) = scratch();
         let (workspaces, tilings) = arranged();
         Layout::capture(&workspaces, &tilings)
             .save(&path)

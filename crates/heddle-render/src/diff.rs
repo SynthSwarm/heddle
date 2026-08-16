@@ -1,12 +1,8 @@
 //! Diff rendering for `tool.result` bodies with `mime: text/x-diff`.
 //!
-//! This is the payload that makes a Matrix agent session feel like a local one: without
-//! it a file edit is just the word "edit".
+//! Without this a file edit is just the word "edit".
 //!
-//! Unified diffs only. There was a `render_pair` that diffed a before/after pair here
-//! too, advertised in this paragraph and kept alive by a single test -- but nothing on
-//! the wire produces a pair, and `ResultKind` has no variant for one. It went, and
-//! `similar` went with it.
+//! Unified diffs only: nothing on the wire produces a before/after pair.
 
 use crate::theme::Theme;
 use ratatui::style::Style;
@@ -33,13 +29,8 @@ pub fn render_unified(diff: &str, theme: &Theme) -> Vec<Line<'static>> {
 
 /// Whether a `---`/`+++` line is a file header rather than deleted or added content.
 ///
-/// Position, not spelling. `--- a/x.sql` and `--- an old comment` are identical in
-/// shape -- one is a header, the other is a deleted SQL comment -- and no amount of
-/// looking at the line itself will tell them apart. What does is that headers appear in
-/// the preamble, before the first `@@` hunk, and content only appears after one.
-///
-/// Matching on the bare prefix meant a diff of a SQL, Lua or Haskell file silently
-/// under-reported its own `+12 -3` summary and painted the missing lines as chrome.
+/// Position, not spelling: `--- a/x.sql` and `--- an old comment` are identical in
+/// shape. Headers appear in the preamble, before the first `@@`; content only after.
 fn is_file_header(line: &str, in_hunk: bool) -> bool {
     !in_hunk && (line.starts_with("---") || line.starts_with("+++"))
 }
@@ -124,9 +115,7 @@ mod tests {
     #[test]
     fn content_that_merely_looks_like_a_header_is_counted() {
         // Deleting a SQL or Lua comment produces `--- comment`; adding one in C++ can
-        // produce `+++foo`. Testing the bare prefix classified both as file headers, so
-        // they were dropped from the summary and painted as chrome -- a diff of a
-        // migration under-reported its own size.
+        // produce `+++foo`. Neither is a file header.
         let diff = "--- a/x.sql\n+++ b/x.sql\n@@ -1 +1 @@\n--- an old comment\n+++new value\n";
         assert_eq!(stats(diff), (1, 1));
 
@@ -160,7 +149,7 @@ mod tests {
         let theme = Theme::default();
         let big: String = (0..200).map(|i| format!("+line {i}\n")).collect();
         let folded = fold(render_unified(&big, &theme), &theme);
-        // Literals, so the test cannot be satisfied by changing the constant.
+        // Literals: an assertion against the constant is satisfied by changing it.
         assert_eq!(folded.len(), 24);
         let marker = folded[12].spans[0].content.to_string();
         assert!(marker.contains("more lines"), "got {marker:?}");

@@ -117,11 +117,9 @@ pub fn terminal() -> Vec<Finding> {
 
 /// Ask the terminal how wide it actually paints the glyphs heddle prints.
 ///
-/// This is the one measurement worth making by experiment rather than by table.
-/// `unicode-width` reports an intention; the terminal reports a fact, and where they
-/// disagree every column to the right of the glyph is wrong. Emoji with East Asian
-/// Width `Neutral` are the usual culprits and are banned from the transcript for that
-/// reason, but a terminal is free to surprise us about the rest.
+/// `unicode-width` reports an intention and the terminal reports a fact; where they
+/// disagree every column right of the glyph is wrong. EAW=Neutral emoji are the usual
+/// culprits, but a terminal is free to surprise us about the rest.
 fn glyph_widths() -> Finding {
     let mut disagreements = Vec::new();
 
@@ -154,8 +152,8 @@ fn measure(glyph: &str) -> std::io::Result<usize> {
     use std::io::Write;
 
     enable_raw_mode()?;
-    // Restore raw mode however this returns: leaving a terminal raw would force the
-    // user to blind-type `reset`, which is a poor reward for running a diagnostic.
+    // Restore raw mode however this returns; otherwise the user must blind-type
+    // `reset`.
     let result = (|| {
         let mut out = std::io::stdout();
         let (before, _) = crossterm::cursor::position()?;
@@ -246,8 +244,8 @@ fn permissions(what: &str, path: &Path, most: u32) -> Finding {
             if mode & !most == 0 {
                 Finding::ok(what, format!("{mode:04o}"))
             } else {
-                // The store holds the access token and every Megolm key this device has
-                // ever seen. Group- or world-readable is a real leak, not a nit.
+                // The store holds the access token and every Megolm key this device
+                // has seen.
                 Finding::warn(
                     what,
                     format!(
@@ -270,46 +268,11 @@ fn permissions(what: &str, _path: &Path, _most: u32) -> Finding {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
+    use tempfile::TempDir;
     use unicode_width::UnicodeWidthStr;
 
-    const PREFIX: &str = "heddle-doctor";
-
-    /// A temporary directory that removes itself.
-    ///
-    /// The helper this replaces created a directory per test and never removed one, so
-    /// every `cargo test` run left a little more behind in `$TMPDIR`. `Drop` runs on the
-    /// failure path too, which a `remove_dir_all` at the end of the happy path does not.
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "{}-{}-{tag}-{:?}",
-                PREFIX,
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("scratch dir");
-            Self(dir)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    impl std::ops::Deref for Scratch {
-        type Target = std::path::Path;
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    fn scratch(tag: &str) -> Scratch {
-        Scratch::new(tag)
+    fn scratch() -> TempDir {
+        tempfile::tempdir().expect("scratch dir")
     }
 
     fn worst(findings: &[Finding]) -> Status {
@@ -326,8 +289,12 @@ mod tests {
 
     #[test]
     fn a_missing_session_is_a_failure_that_says_what_to_run() {
-        let dir = scratch("missing");
-        let findings = store("work", &dir.join("store"), &dir.join("nope.json"));
+        let dir = scratch();
+        let findings = store(
+            "work",
+            &dir.path().join("store"),
+            &dir.path().join("nope.json"),
+        );
         assert_eq!(worst(&findings), Status::Fail);
         let detail = findings[0].detail.clone().expect("detail");
         assert!(detail.contains("heddle --profile work login"), "{detail}");
@@ -335,12 +302,12 @@ mod tests {
 
     #[test]
     fn a_corrupt_session_is_reported_as_such() {
-        let dir = scratch("corrupt");
-        let session = dir.join("session.json");
+        let dir = scratch();
+        let session = dir.path().join("session.json");
         std::fs::write(&session, "{ not json").expect("seed");
-        std::fs::create_dir_all(dir.join("store")).expect("store");
+        std::fs::create_dir_all(dir.path().join("store")).expect("store");
 
-        let findings = store("work", &dir.join("store"), &session);
+        let findings = store("work", &dir.path().join("store"), &session);
         assert_eq!(findings[0].status, Status::Fail);
         assert!(findings[0]
             .detail
@@ -351,10 +318,10 @@ mod tests {
 
     #[test]
     fn a_healthy_store_reports_the_device_it_is_pinned_to() {
-        let dir = scratch("healthy");
-        let session = dir.join("session.json");
+        let dir = scratch();
+        let session = dir.path().join("session.json");
         std::fs::write(&session, r#"{"device_id":"WYQEISWIKB"}"#).expect("seed");
-        let store_dir = dir.join("store");
+        let store_dir = dir.path().join("store");
         std::fs::create_dir_all(&store_dir).expect("store");
         std::fs::write(store_dir.join("matrix-sdk-state.sqlite3"), "x").expect("db");
 
@@ -376,10 +343,10 @@ mod tests {
     fn an_empty_store_beside_a_valid_session_is_warned_about() {
         // Deleting the store under a live login presents as every room being
         // undecryptable, which looks like a server problem and is not one.
-        let dir = scratch("empty");
-        let session = dir.join("session.json");
+        let dir = scratch();
+        let session = dir.path().join("session.json");
         std::fs::write(&session, r#"{"device_id":"AAA"}"#).expect("seed");
-        let store_dir = dir.join("store");
+        let store_dir = dir.path().join("store");
         std::fs::create_dir_all(&store_dir).expect("store");
 
         let findings = store("work", &store_dir, &session);
@@ -391,13 +358,13 @@ mod tests {
     #[test]
     fn a_world_readable_session_is_warned_about_with_the_fix() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = scratch("perms");
-        let session = dir.join("session.json");
+        let dir = scratch();
+        let session = dir.path().join("session.json");
         std::fs::write(&session, r#"{"device_id":"AAA"}"#).expect("seed");
         std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        std::fs::create_dir_all(dir.join("store")).expect("store");
+        std::fs::create_dir_all(dir.path().join("store")).expect("store");
 
-        let findings = store("work", &dir.join("store"), &session);
+        let findings = store("work", &dir.path().join("store"), &session);
         let perms = findings
             .iter()
             .find(|f| f.name == "session file")
@@ -408,13 +375,8 @@ mod tests {
 
     #[test]
     fn the_doctor_probes_every_glyph_heddle_prints() {
-        // The point of the probe is to catch the terminal that disagrees with
-        // `unicode-width`. It can only do that for glyphs it is given, so it is given
-        // the table rather than a copy of part of it.
-        //
-        // The copy it used to hold had five entries. One of them was `❓`, which the
-        // transcript explicitly refuses to draw, and it omitted every one-cell glyph --
-        // so the probe reported an all-clear on a set that was mostly not the set.
+        // The probe can only catch a disagreeing terminal for glyphs it is given, so
+        // it is given the table rather than a copy of part of it.
         assert!(heddle_render::PRINTED.len() > 5);
         for heddle_render::Glyph { glyph, what, cells } in heddle_render::PRINTED {
             assert_eq!(

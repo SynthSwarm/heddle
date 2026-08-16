@@ -56,7 +56,6 @@ impl Default for Agent {
 }
 
 impl Agent {
-    /// The agent integrations this config asks for.
     pub fn adapters(&self) -> heddle_agent::Adapters {
         heddle_agent::Adapters::by_id(self.adapters.iter().map(String::as_str))
             .textual(self.fallback_parse)
@@ -105,11 +104,9 @@ impl Default for Ui {
 
 /// Every section and key heddle acts on.
 ///
-/// Used to warn about anything else in the file. A config key that is read, ignored and
-/// never mentioned is worse than one that does not exist: it tells the user their
-/// preference was applied when it was not. Warning is preferred to rejecting, because a
-/// stale key left over from an older version should cost a line in the log rather than
-/// a client that will not start.
+/// Anything else in the file is warned about: a key read and ignored tells the user
+/// their preference was applied when it was not. Warned rather than rejected, so a
+/// stale key from an older version costs a log line rather than a refusal to start.
 const KNOWN: &[(&str, &[&str])] = &[
     ("profile", &["user_id", "homeserver", "default"]),
     (
@@ -134,8 +131,7 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
     // parses a bare value rather than a document, so parsing a config file through it
     // fails and this function silently approves of everything.
     let Ok(root) = toml::from_str::<toml::Table>(text) else {
-        // Unparseable is not this function's problem to report; the caller's own
-        // deserialisation will fail with a better message.
+        // The caller's own deserialisation reports this with a better message.
         return Vec::new();
     };
 
@@ -180,9 +176,7 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
 impl Config {
     /// Load from `path`, or return defaults when it does not exist.
     ///
-    /// Anything in the file heddle does not act on is warned about rather than ignored
-    /// in silence. A setting that appears to have been accepted but was not is the one
-    /// failure mode a config file must not have.
+    /// Keys heddle does not act on are warned about; see [`KNOWN`].
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(text) => {
@@ -201,8 +195,7 @@ impl Config {
         if let Some(name) = requested {
             return self.profile.get(name).map(|p| (name.to_owned(), p.clone()));
         }
-        // An explicit `default = true` wins; otherwise fall back to the only profile
-        // present, which is the common single-account case.
+        // An explicit `default = true` wins; otherwise the only profile present.
         self.profile
             .iter()
             .find(|(_, p)| p.default)
@@ -214,7 +207,6 @@ impl Config {
             .map(|(name, p)| (name.clone(), p.clone()))
     }
 
-    /// Whether any profile is configured at all.
     pub fn has_profiles(&self) -> bool {
         !self.profile.is_empty()
     }
@@ -222,13 +214,9 @@ impl Config {
 
 /// Add a `[profile.<name>]` block to the config file unless one is already there.
 ///
-/// Appended as text rather than by re-serialising the whole `Config`, because a round
-/// trip through `toml::to_string` would silently discard every comment and any ordering
-/// the user chose. A config file is something a person edits by hand, and a tool that
-/// quietly reformats it is a tool they stop trusting with the file.
-///
-/// Returns whether a block was written, so the caller can stay quiet on a re-login
-/// rather than claiming to have done something it did not.
+/// Appended as text: a round trip through `toml::to_string` discards every comment and
+/// any ordering the user chose. Returns whether a block was written, so the caller can
+/// stay quiet on a re-login.
 pub fn append_profile(path: &Path, name: &str, profile: &Profile) -> anyhow::Result<bool> {
     let existing = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -236,15 +224,13 @@ pub fn append_profile(path: &Path, name: &str, profile: &Profile) -> anyhow::Res
         Err(e) => return Err(e.into()),
     };
 
-    // Parse before writing: appending to a file we cannot understand risks compounding
-    // an existing syntax error with a second one the user did not make.
+    // Parse first: appending to a file we cannot understand compounds the error.
     let parsed: Config = toml::from_str(&existing)?;
     if parsed.profile.contains_key(name) {
         return Ok(false);
     }
 
-    // The first profile becomes the default, so that a single-account install works
-    // with a bare `heddle` and no further editing.
+    // The first profile becomes the default, so a bare `heddle` works.
     let default = !parsed.has_profiles();
 
     let mut block = String::new();
@@ -306,10 +292,8 @@ impl Dirs {
 
     /// Where a profile's pane arrangement is remembered.
     ///
-    /// State rather than data: it is entirely derived from what the user did last time
-    /// and can be thrown away without losing anything the homeserver will not send
-    /// again. Per profile, because two accounts have different rooms and sharing one
-    /// file between them would mean each launch discarding the other's arrangement.
+    /// Discardable: everything in it is derived from what the user did last time. Per
+    /// profile, since two accounts have different rooms.
     pub fn layout_file(&self, profile: &str) -> PathBuf {
         self.state.join("layout").join(format!("{profile}.json"))
     }
@@ -319,6 +303,7 @@ impl Dirs {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn missing_config_yields_defaults() {
@@ -490,49 +475,11 @@ mod tests {
         assert!(!configured.is_agent("@someone-else:x"));
     }
 
-    const PREFIX: &str = "heddle-cfg";
-
-    /// A temporary directory that removes itself.
-    ///
-    /// The helper this replaces created a directory per test and never removed one, so
-    /// every `cargo test` run left a little more behind in `$TMPDIR`. `Drop` runs on the
-    /// failure path too, which a `remove_dir_all` at the end of the happy path does not.
-    struct Scratch(std::path::PathBuf);
-
-    impl Scratch {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "{}-{}-{tag}-{:?}",
-                PREFIX,
-                std::process::id(),
-                std::thread::current().id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("scratch dir");
-            Self(dir)
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    impl std::ops::Deref for Scratch {
-        type Target = std::path::Path;
-        fn deref(&self) -> &Self::Target {
-            &self.0
-        }
-    }
-
-    /// A scratch config path, unique per test so they can run in parallel.
-    ///
-    /// The guard comes back with it: dropping it removes the directory, so a test that
-    /// kept only the path would lose the file out from under itself.
-    fn scratch(tag: &str) -> (Scratch, PathBuf) {
-        let dir = Scratch::new(tag);
-        let path = dir.join("config.toml");
+    /// A config path in a directory that deletes itself. Returned together, because
+    /// dropping the guard removes the file.
+    fn scratch() -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let path = dir.path().join("config.toml");
         (dir, path)
     }
 
@@ -546,7 +493,7 @@ mod tests {
 
     #[test]
     fn logging_in_creates_a_usable_profile_from_nothing() {
-        let (_scratch, path) = scratch("fresh");
+        let (_scratch, path) = scratch();
         let _ = std::fs::remove_file(&path);
 
         assert!(append_profile(&path, "lab", &profile("@q:example.org")).expect("writes"));
@@ -563,7 +510,7 @@ mod tests {
 
     #[test]
     fn a_second_profile_does_not_steal_the_default() {
-        let (_scratch, path) = scratch("second");
+        let (_scratch, path) = scratch();
         let _ = std::fs::remove_file(&path);
 
         append_profile(&path, "first", &profile("@a:example.org")).expect("first");
@@ -581,7 +528,7 @@ mod tests {
 
     #[test]
     fn logging_in_again_changes_nothing() {
-        let (_scratch, path) = scratch("again");
+        let (_scratch, path) = scratch();
         let _ = std::fs::remove_file(&path);
 
         append_profile(&path, "lab", &profile("@q:example.org")).expect("first");
@@ -600,7 +547,7 @@ mod tests {
 
     #[test]
     fn hand_written_comments_and_settings_survive() {
-        let (_scratch, path) = scratch("comments");
+        let (_scratch, path) = scratch();
         let original = "# my notes, kept by hand\n\
                         [ui]\n\
                         prefix = \"ctrl+b\"  # deliberate\n";
@@ -623,7 +570,7 @@ mod tests {
 
     #[test]
     fn a_broken_config_is_not_made_worse() {
-        let (_scratch, path) = scratch("broken");
+        let (_scratch, path) = scratch();
         std::fs::write(&path, "[ui\nthis is not toml").expect("seed");
 
         assert!(
@@ -639,7 +586,7 @@ mod tests {
 
     #[test]
     fn quoting_survives_a_hostile_display_name() {
-        let (_scratch, path) = scratch("quoting");
+        let (_scratch, path) = scratch();
         let _ = std::fs::remove_file(&path);
 
         let nasty = r#"@odd"user\name:example.org"#;

@@ -43,9 +43,8 @@ pub trait Adapter: Send + Sync + std::fmt::Debug {
 
     /// Recover what can be recovered from the human-readable body.
     ///
-    /// Return [`Parsed::default`] to decline. Note that declining and recovering
-    /// nothing are the same thing, deliberately: an adapter that finds no tool calls
-    /// has no opinion worth acting on.
+    /// Return [`Parsed::default`] to decline. Declining and recovering nothing are the
+    /// same thing: an adapter that finds no tool calls has no opinion worth acting on.
     fn textual(&self, _body: &str) -> Parsed {
         Parsed::default()
     }

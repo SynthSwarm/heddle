@@ -1,4 +1,4 @@
-//! The `dev.hermes.agent.v1` wire format.
+//! The `dev.heddle.agent.v1` wire format.
 //!
 //! Hermes carries a rich internal stream ([`MessageChunk`], [`ToolCallChunk`],
 //! [`ToolCallFinished`] and friends in `gateway/stream_events.py`) but flattens it to a
@@ -26,18 +26,16 @@ pub const CONTENT_KEY: &str = "dev.heddle.agent.v1";
 
 /// The key Hermes' own patch was specified against, accepted for compatibility.
 ///
-/// The schema is heddle's, not any one agent's. Naming it after the first agent to
-/// carry it discourages the second from adopting it, and an agent that has to write
-/// `dev.hermes.agent.v1` to be understood by a client it has no relationship with is
-/// being asked to lie about who it is. Both keys are read; [`CONTENT_KEY`] is what
-/// anything heddle documents should write.
+/// The schema is heddle's, not any one agent's, and a key named after the first agent
+/// to carry it discourages the second from adopting it. Both keys are read;
+/// [`CONTENT_KEY`] is what anything heddle documents should write.
 pub const LEGACY_CONTENT_KEY: &str = "dev.hermes.agent.v1";
 
 /// The schema major this build understands. Envelopes with a higher `v` are rejected
 /// rather than misinterpreted.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// A single structured agent event, read from the `dev.hermes.agent.v1` key of an
+/// A single structured agent event, read from the [`CONTENT_KEY`] of an
 /// `m.room.message` content (or of its `m.new_content` when the event is an edit).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentEvent {
@@ -49,7 +47,6 @@ pub struct AgentEvent {
     pub turn_id: String,
     /// Monotonic within a turn. Used for ordering and gap detection.
     pub seq: u64,
-    /// What kind of event this is.
     pub kind: Kind,
 
     /// Sent on the first event of a turn.
@@ -171,16 +168,16 @@ impl ToolStatus {
 pub enum ResultKind {
     /// Unified diff. Rendered with an add/delete gutter and syntax highlighting.
     Diff,
-    /// Collapsible tree.
+    /// Pretty-printed and folded past a threshold.
     Json,
-    /// Full markdown render.
+    /// Rendered as a monospace block; the markdown renderer is not wired to tool
+    /// bodies yet.
     Markdown,
     /// Monospace block, folded past a threshold.
     Plain,
 }
 
 impl Tool {
-    /// Resolve the renderer for this tool's result body.
     pub fn result_kind(&self) -> ResultKind {
         match self.mime.as_deref() {
             Some("text/x-diff" | "text/x-patch" | "application/x-patch") => ResultKind::Diff,
