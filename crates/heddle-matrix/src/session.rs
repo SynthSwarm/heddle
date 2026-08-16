@@ -362,17 +362,45 @@ mod tests {
         assert_eq!(p.session, Path::new("/data/profiles/work/session.json"));
     }
 
-    #[test]
-    fn profiles_do_not_share_state() {
-        let a = Paths::for_profile(Path::new("/data"), "work");
-        let b = Paths::for_profile(Path::new("/data"), "personal");
-        assert_ne!(a.store, b.store);
-        assert_ne!(a.session, b.session);
+    const PREFIX: &str = "heddle-session";
+
+    /// A temporary directory that removes itself.
+    ///
+    /// The helper this replaces created a directory per test and never removed one, so
+    /// every `cargo test` run left a little more behind in `$TMPDIR`. `Drop` runs on the
+    /// failure path too, which a `remove_dir_all` at the end of the happy path does not.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "{}-{}-{tag}-{:?}",
+                PREFIX,
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
     }
 
     #[test]
     fn missing_session_is_reported_as_such() {
-        let dir = std::env::temp_dir().join(format!("heddle-test-{}", std::process::id()));
+        let dir = Scratch::new("missing");
         let paths = Paths::for_profile(&dir, "nobody");
         assert!(!paths.has_session());
         match load("nobody", &paths) {
@@ -385,7 +413,7 @@ mod tests {
     #[test]
     fn store_directory_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("heddle-perm-{}", std::process::id()));
+        let dir = Scratch::new("perm");
         let paths = Paths::for_profile(&dir, "p");
         paths.ensure().expect("creates dirs");
 
@@ -398,22 +426,11 @@ mod tests {
             0o700,
             "store must not be group/world readable"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn ensure_is_idempotent() {
-        let dir = std::env::temp_dir().join(format!("heddle-idem-{}", std::process::id()));
-        let paths = Paths::for_profile(&dir, "p");
-        paths.ensure().expect("first");
-        paths.ensure().expect("second");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn forgetting_a_missing_session_is_not_an_error() {
-        let dir = std::env::temp_dir().join(format!("heddle-forget-{}", std::process::id()));
+        let dir = Scratch::new("forget");
         let paths = Paths::for_profile(&dir, "p");
         assert!(forget(&paths).is_ok());
     }

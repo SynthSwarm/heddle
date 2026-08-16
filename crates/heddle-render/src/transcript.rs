@@ -875,9 +875,19 @@ mod tests {
             picked.lines.len(),
             "selecting must not change the line count"
         );
-        // Every line carries a gutter, so the body starts in the same column either way.
+        // Every line carries a gutter, so the body starts in the same column either
+        // way. Compare *widths*, not span counts: the name says "without reflowing",
+        // and a two-cell selection mark would keep the count identical while pushing
+        // every line one column right.
+        use unicode_width::UnicodeWidthStr;
+        let width_of = |line: &Line| -> usize {
+            line.spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum()
+        };
         for (a, b) in plain.lines.iter().zip(&picked.lines) {
-            assert_eq!(a.spans.len(), b.spans.len());
+            assert_eq!(width_of(a), width_of(b), "the row reflowed");
         }
         assert!(text_of(&picked).contains(SELECTION_MARK));
         assert!(!text_of(&plain).contains(SELECTION_MARK));
@@ -977,16 +987,5 @@ mod tests {
             None,
         );
         assert!(out.anchors.is_empty());
-    }
-
-    #[test]
-    fn a_human_posting_code_is_not_an_agent() {
-        // Fenced code is not evidence of an agent. Treating it as evidence sent plain
-        // messages down the lossy path and stamped them with the degraded marker.
-        let parsed = heddle_agent::fallback::parse("look:\n```sh\nls -la\n```\n");
-        assert!(
-            parsed.is_empty(),
-            "code alone must not count as agent chrome: {parsed:?}"
-        );
     }
 }

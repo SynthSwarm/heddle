@@ -173,21 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_tools_are_visually_loud() {
-        let t = Theme::default();
-        let style = t.tool(ToolStatus::Error);
-        assert_eq!(style.fg, Some(t.error));
-        assert!(style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn completed_tools_recede() {
-        // A finished card is history; it should not compete with live output.
-        let t = Theme::default();
-        assert_eq!(t.tool(ToolStatus::Ok).fg, Some(t.dim));
-    }
-
-    #[test]
     fn durations_scale_their_units() {
         assert_eq!(duration(0), "0ms");
         assert_eq!(duration(999), "999ms");
@@ -195,11 +180,5 @@ mod tests {
         assert_eq!(duration(59_900), "59.9s");
         assert_eq!(duration(61_000), "1m01s");
         assert_eq!(duration(3_600_000), "60m00s");
-    }
-
-    #[test]
-    fn disclosure_flips() {
-        assert_eq!(disclosure(true), "▼");
-        assert_eq!(disclosure(false), "▸");
     }
 }

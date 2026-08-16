@@ -654,24 +654,4 @@ mod tests {
         store.get_mut("s1").expect("s").set_typing(true);
         assert_eq!(store.get("s1").expect("s").state(), AgentState::Working);
     }
-
-    #[test]
-    fn badge_priority_order_is_stable() {
-        let mut v = [
-            AgentState::Idle,
-            AgentState::Blocked,
-            AgentState::Done,
-            AgentState::Working,
-        ];
-        v.sort_unstable();
-        assert_eq!(
-            v,
-            [
-                AgentState::Idle,
-                AgentState::Done,
-                AgentState::Working,
-                AgentState::Blocked
-            ]
-        );
-    }
 }

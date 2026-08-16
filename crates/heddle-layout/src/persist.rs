@@ -438,26 +438,55 @@ mod tests {
         assert!(layout.take_room("!new:x", &mut tab).is_none());
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "heddle-layout-{}-{tag}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        dir.join("layout.json")
+    const PREFIX: &str = "heddle-layout";
+
+    /// A temporary directory that removes itself.
+    ///
+    /// The helper this replaces created a directory per test and never removed one, so
+    /// every `cargo test` run left a little more behind in `$TMPDIR`. `Drop` runs on the
+    /// failure path too, which a `remove_dir_all` at the end of the happy path does not.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "{}-{}-{tag}-{:?}",
+                PREFIX,
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A layout path inside a self-removing directory.
+    ///
+    /// The guard is returned alongside, because dropping it deletes the directory: a
+    /// test that keeps only the path would have its file removed out from under it.
+    fn scratch(tag: &str) -> (Scratch, PathBuf) {
+        let dir = Scratch::new(tag);
+        let path = dir.0.join("layout.json");
+        (dir, path)
     }
 
     #[test]
     fn a_missing_file_is_the_ordinary_first_run() {
-        let path = scratch("missing");
+        let (_scratch, path) = scratch("missing");
         let _ = std::fs::remove_file(&path);
         assert!(Layout::load(&path).rooms.is_empty());
     }
 
     #[test]
     fn a_layout_survives_a_trip_through_the_filesystem() {
-        let path = scratch("roundtrip");
+        let (_scratch, path) = scratch("roundtrip");
         let (workspaces, tilings) = arranged();
         Layout::capture(&workspaces, &tilings)
             .save(&path)
@@ -472,14 +501,14 @@ mod tests {
 
     #[test]
     fn a_corrupt_file_costs_a_layout_not_a_launch() {
-        let path = scratch("corrupt");
+        let (_scratch, path) = scratch("corrupt");
         std::fs::write(&path, "{ this is not json").expect("seed");
         assert!(Layout::load(&path).rooms.is_empty());
     }
 
     #[test]
     fn a_file_from_another_version_is_discarded_not_guessed_at() {
-        let path = scratch("version");
+        let (_scratch, path) = scratch("version");
         let (workspaces, tilings) = arranged();
         let mut layout = Layout::capture(&workspaces, &tilings);
         layout.version = VERSION + 1;
@@ -493,7 +522,7 @@ mod tests {
 
     #[test]
     fn saving_does_not_leave_a_temporary_file_behind() {
-        let path = scratch("atomic");
+        let (_scratch, path) = scratch("atomic");
         let (workspaces, tilings) = arranged();
         Layout::capture(&workspaces, &tilings)
             .save(&path)

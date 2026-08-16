@@ -315,7 +315,10 @@ mod tests {
         t.mime = Some("text/plain".into());
         t.body = Some((0..100).map(|i| format!("line {i}\n")).collect());
         let lines = body(&t, &theme);
-        assert_eq!(lines.len(), PLAIN_FOLD + 1);
+        // The literal, not `PLAIN_FOLD + 1`. Written against the constant, this test
+        // still passed with `PLAIN_FOLD = 0` -- it restated the implementation instead
+        // of pinning the behaviour SPEC §5.2 documents.
+        assert_eq!(lines.len(), 21, "20 lines and an elision marker");
     }
 
     #[test]

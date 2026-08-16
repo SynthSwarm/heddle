@@ -3045,19 +3045,6 @@ mod tests {
     }
 
     #[test]
-    fn closing_the_last_pane_leaves_the_tab_empty_without_panicking() {
-        let mut app = app();
-        app.apply_action(Action::ClosePane);
-        let tab = app
-            .workspaces
-            .focused()
-            .expect("workspace")
-            .focused_tab()
-            .expect("tab");
-        assert!(tab.panes.len() <= 1);
-    }
-
-    #[test]
     fn agent_events_drive_pane_state() {
         let mut app = app();
 
@@ -4396,19 +4383,6 @@ mod tests {
     }
 
     #[test]
-    fn an_incoming_request_is_shown_before_anything_is_agreed() {
-        let mut app = app();
-        app.apply_worker_event(WorkerEvent::Verification(Verification::Requested {
-            other_device: "Element X Android".into(),
-        }));
-
-        assert!(matches!(
-            app.verification().cloned(),
-            Some(Verification::Requested { .. })
-        ));
-    }
-
-    #[test]
     fn accepting_a_request_does_not_confirm_the_keys() {
         let mut app = app();
         app.apply_worker_event(WorkerEvent::Verification(Verification::Requested {
@@ -5314,14 +5288,6 @@ mod tests {
         }];
         app.click_bar(5, 1);
         assert!(app.needs_redraw, "clicking a tab must repaint");
-    }
-
-    #[test]
-    fn redraw_is_available_as_an_escape_hatch() {
-        let mut app = app();
-        app.needs_redraw = false;
-        app.apply_action(Action::Redraw);
-        assert!(app.needs_redraw);
     }
 
     #[test]

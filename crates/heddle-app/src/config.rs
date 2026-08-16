@@ -490,15 +490,50 @@ mod tests {
         assert!(!configured.is_agent("@someone-else:x"));
     }
 
+    const PREFIX: &str = "heddle-cfg";
+
+    /// A temporary directory that removes itself.
+    ///
+    /// The helper this replaces created a directory per test and never removed one, so
+    /// every `cargo test` run left a little more behind in `$TMPDIR`. `Drop` runs on the
+    /// failure path too, which a `remove_dir_all` at the end of the happy path does not.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "{}-{}-{tag}-{:?}",
+                PREFIX,
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
     /// A scratch config path, unique per test so they can run in parallel.
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "heddle-cfg-{}-{tag}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        dir.join("config.toml")
+    ///
+    /// The guard comes back with it: dropping it removes the directory, so a test that
+    /// kept only the path would lose the file out from under itself.
+    fn scratch(tag: &str) -> (Scratch, PathBuf) {
+        let dir = Scratch::new(tag);
+        let path = dir.join("config.toml");
+        (dir, path)
     }
 
     fn profile(user: &str) -> Profile {
@@ -511,7 +546,7 @@ mod tests {
 
     #[test]
     fn logging_in_creates_a_usable_profile_from_nothing() {
-        let path = scratch("fresh");
+        let (_scratch, path) = scratch("fresh");
         let _ = std::fs::remove_file(&path);
 
         assert!(append_profile(&path, "lab", &profile("@q:example.org")).expect("writes"));
@@ -528,7 +563,7 @@ mod tests {
 
     #[test]
     fn a_second_profile_does_not_steal_the_default() {
-        let path = scratch("second");
+        let (_scratch, path) = scratch("second");
         let _ = std::fs::remove_file(&path);
 
         append_profile(&path, "first", &profile("@a:example.org")).expect("first");
@@ -546,7 +581,7 @@ mod tests {
 
     #[test]
     fn logging_in_again_changes_nothing() {
-        let path = scratch("again");
+        let (_scratch, path) = scratch("again");
         let _ = std::fs::remove_file(&path);
 
         append_profile(&path, "lab", &profile("@q:example.org")).expect("first");
@@ -565,7 +600,7 @@ mod tests {
 
     #[test]
     fn hand_written_comments_and_settings_survive() {
-        let path = scratch("comments");
+        let (_scratch, path) = scratch("comments");
         let original = "# my notes, kept by hand\n\
                         [ui]\n\
                         prefix = \"ctrl+b\"  # deliberate\n";
@@ -588,7 +623,7 @@ mod tests {
 
     #[test]
     fn a_broken_config_is_not_made_worse() {
-        let path = scratch("broken");
+        let (_scratch, path) = scratch("broken");
         std::fs::write(&path, "[ui\nthis is not toml").expect("seed");
 
         assert!(
@@ -604,7 +639,7 @@ mod tests {
 
     #[test]
     fn quoting_survives_a_hostile_display_name() {
-        let path = scratch("quoting");
+        let (_scratch, path) = scratch("quoting");
         let _ = std::fs::remove_file(&path);
 
         let nasty = r#"@odd"user\name:example.org"#;

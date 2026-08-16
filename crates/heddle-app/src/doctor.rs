@@ -272,14 +272,44 @@ mod tests {
     use super::*;
     use unicode_width::UnicodeWidthStr;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "heddle-doctor-{}-{tag}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch");
-        dir
+    const PREFIX: &str = "heddle-doctor";
+
+    /// A temporary directory that removes itself.
+    ///
+    /// The helper this replaces created a directory per test and never removed one, so
+    /// every `cargo test` run left a little more behind in `$TMPDIR`. `Drop` runs on the
+    /// failure path too, which a `remove_dir_all` at the end of the happy path does not.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "{}-{}-{tag}-{:?}",
+                PREFIX,
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = std::path::Path;
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
+        Scratch::new(tag)
     }
 
     fn worst(findings: &[Finding]) -> Status {

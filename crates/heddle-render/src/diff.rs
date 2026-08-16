@@ -160,8 +160,9 @@ mod tests {
         let theme = Theme::default();
         let big: String = (0..200).map(|i| format!("+line {i}\n")).collect();
         let folded = fold(render_unified(&big, &theme), &theme);
-        assert_eq!(folded.len(), FOLD_THRESHOLD);
-        let marker = folded[FOLD_THRESHOLD / 2].spans[0].content.to_string();
+        // Literals, so the test cannot be satisfied by changing the constant.
+        assert_eq!(folded.len(), 24);
+        let marker = folded[12].spans[0].content.to_string();
         assert!(marker.contains("more lines"), "got {marker:?}");
     }
 

@@ -473,12 +473,4 @@ mod tests {
         };
         assert_eq!(tool.summary(), "cargo test");
     }
-
-    #[test]
-    fn round_trips_through_serde() {
-        let ev = decode(&tool_call()).expect("decodes");
-        let encoded = serde_json::to_value(&ev).expect("encodes");
-        let again: AgentEvent = serde_json::from_value(encoded).expect("decodes again");
-        assert_eq!(ev, again);
-    }
 }

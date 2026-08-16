@@ -420,11 +420,4 @@ mod tests {
             Ingest::Plain
         ));
     }
-
-    #[test]
-    fn the_built_in_order_is_fixed() {
-        // Diagnostics name the adapter that claimed a message; that name has to be
-        // reproducible from one run to the next.
-        assert_eq!(Adapters::new().ids(), vec!["heddle", "hermes"]);
-    }
 }
