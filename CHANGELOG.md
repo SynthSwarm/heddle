@@ -7,7 +7,7 @@ Versions are pre-1.0 and mean what that usually means: the thing runs, and its s
 can still change. Breaking changes to config keys, keybindings and the agent wire
 format are possible in any 0.x release, and will be listed here.
 
-## Unreleased
+## 0.3.0 — 2026-08-16
 
 ### Added
 
@@ -16,7 +16,6 @@ format are possible in any 0.x release, and will be listed here.
   starts composing rather than from its first token — which for a coding agent is five
   to twenty seconds later. The state machine and the badge already handled this; nothing
   had ever produced the event.
-
 - A `!` marker in the pane header when the transcript is missing events. Gap detection
   on the agent event `seq` already worked and healed itself when a late event arrived;
   it just had no way of telling anyone. Markers stack worst-first: `!~` is a pane that

@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| **Status** | Living. Describes 0.2.0 as shipped. |
+| **Status** | Living. Describes 0.3.0 as shipped. |
 | **Date** | 2026-08-16 |
 | **Language** | Rust (edition 2021, MSRV 1.93) |
 | **Licence** | Apache-2.0 |
