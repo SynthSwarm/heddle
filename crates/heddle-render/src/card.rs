@@ -137,8 +137,21 @@ fn render_plain(text: &str, theme: &Theme) -> Vec<Line<'static>> {
 }
 
 /// Pretty-print JSON, falling back to plain text when it does not parse.
+///
+/// A tool result arrives as whatever the agent serialised, which for a `Json` body is
+/// usually one long line. Re-indenting it is the difference between a card and a wall.
+/// Still folded by `render_plain`, so a large document does not take the pane.
 fn render_json(text: &str, theme: &Theme) -> Vec<Line<'static>> {
-    render_plain(text, theme)
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => match serde_json::to_string_pretty(&value) {
+            Ok(pretty) => render_plain(&pretty, theme),
+            Err(_) => render_plain(text, theme),
+        },
+        // Not JSON after all. The mime is a claim by the agent, not a guarantee, and a
+        // card that renders nothing because the claim was wrong is worse than one that
+        // renders the bytes.
+        Err(_) => render_plain(text, theme),
+    }
 }
 
 /// Indent a line so card bodies sit visually under their header.
@@ -165,6 +178,51 @@ mod tests {
             body: Some("--- a/x\n+++ b/x\n+new\n-old".into()),
             truncated: false,
         }
+    }
+
+    #[test]
+    fn a_json_body_is_reindented() {
+        // `render_json` used to be a one-line forwarder to `render_plain` under a doc
+        // comment describing a function nobody had written. A tool result arrives as
+        // one long line, and the card is where it becomes readable.
+        let theme = Theme::default();
+        let tool = Tool {
+            name: "read".into(),
+            index: 0,
+            args: None,
+            preview: None,
+            status: ToolStatus::Ok,
+            duration_ms: None,
+            mime: Some("application/json".into()),
+            body: Some(r#"{"a":1,"b":[2,3]}"#.into()),
+            truncated: false,
+        };
+
+        let lines = body(&tool, &theme);
+        assert!(lines.len() > 1, "one line is not pretty-printed");
+    }
+
+    #[test]
+    fn a_json_body_that_is_not_json_is_still_shown() {
+        // The mime is a claim by the agent, not a guarantee.
+        let theme = Theme::default();
+        let tool = Tool {
+            name: "read".into(),
+            index: 0,
+            args: None,
+            preview: None,
+            status: ToolStatus::Ok,
+            duration_ms: None,
+            mime: Some("application/json".into()),
+            body: Some("not json at all".into()),
+            truncated: false,
+        };
+
+        let text: String = body(&tool, &theme)
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("not json at all"), "{text}");
     }
 
     #[test]

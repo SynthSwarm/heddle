@@ -342,15 +342,6 @@ impl Tiling {
     pub fn pane_ids(&self) -> Vec<PaneId> {
         ratatui_hypertile::raw::collect_pane_ids(self.inner.root())
     }
-
-    /// Number of panes.
-    pub fn len(&self) -> usize {
-        self.inner.panes_iter().count()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 /// The direction and ratio of the split at `path`, or `None` if the path does not name
