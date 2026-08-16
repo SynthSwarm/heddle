@@ -47,6 +47,14 @@ format are possible in any 0.x release, and will be listed here.
 
 ### Changed
 
+- The renderer no longer mutates the state it draws. `ui::draw` takes `&App` and returns
+  a `Geometry` — wrapped line count, viewport height, event anchors, bar hit regions —
+  which the event loop stores, and the event loop lays the tiling out before the frame
+  rather than letting the painter do it as a side effect. The measurements are still a
+  frame old, which is inherent in measuring by drawing, but they are now returned rather
+  than written behind the caller's back, and the click seam — `tab_strip` records where
+  a tab was painted, `App::click_bar` decides what a column means — is testable against
+  a real frame for the first time.
 - Overlays are one `Option<Modal>` rather than six independent fields. Two could be open
   at once, the key overlay swallowed nothing, and the draw order disagreed with the
   dispatch order for the two security panels.

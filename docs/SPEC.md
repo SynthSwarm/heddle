@@ -554,6 +554,11 @@ The Matrix SDK ones are the expensive ones:
 
 - **The render thread never holds a `Client`.** Everything crosses the
   `Command`/`WorkerEvent` channel pair. Keep it that way.
+- **`ui::draw` takes `&App`.** It measures rather than decides: wrapped line counts, pane
+  heights and bar hit regions are handed back as a `Geometry` for the event loop to
+  store. Anything the renderer would have to *decide* — laying the tiling out, which
+  mutates it — happens before the frame, in `App::lay_out_panes`. A renderer that mutates
+  is a renderer no test can call.
 - **The mention picker is not modal.** Every other overlay swallows keys or switches
   mode; this one lets editing through and is recomputed from the buffer afterwards, which
   is what makes it survive a paste or a caret move rather than only the keystrokes it

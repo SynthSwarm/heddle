@@ -9,7 +9,7 @@ use crate::keymap::{Action, Mode, Prefix};
 use crate::palette::Palette;
 use heddle_agent::{AgentState, AgentStore};
 use heddle_layout::{
-    Dir, Layout, Pane, PaneId, PaneKind, SplitHandle, Tab, Tiling, Unread, Workspaces,
+    Dir, Layout, Pane, PaneId, PaneKind, Placement, SplitHandle, Tab, Tiling, Unread, Workspaces,
     ORPHAN_WORKSPACE,
 };
 use heddle_matrix::{
@@ -17,6 +17,7 @@ use heddle_matrix::{
     ThreadSummary, Verification, View, WorkerEvent,
 };
 use heddle_render::{Options, Overrides, Theme};
+use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
 
 const RESIZE_STEP: f32 = 0.05;
@@ -119,6 +120,30 @@ pub struct BarHits {
     pub new_tab: Option<(u16, u16)>,
 }
 
+/// What the renderer measured while painting a frame.
+///
+/// Only the renderer can know any of it: wrapped line counts, pane heights, label widths
+/// and emoji widths are all decided by the terminal geometry, not by the state. So it is
+/// returned by [`crate::ui::draw`] and stored by the event loop rather than written
+/// through a `&mut App`, which keeps `draw` a function of the state it paints and gives
+/// the click seam -- `tab_strip` produces the [`Hit`]s, `App::click_bar` consumes them --
+/// two halves that a test can hold up against each other.
+///
+/// Everything that reads this is one frame behind, which is the price of measuring by
+/// drawing. At any sane frame rate that is invisible; it is written down because it is
+/// not obvious from any single call site.
+#[derive(Debug, Clone, Default)]
+pub struct Geometry {
+    /// Rendered line count of the focused transcript, after wrapping.
+    pub rendered_lines: u16,
+    /// Visible height of the focused pane.
+    pub viewport_height: u16,
+    /// Row of each event in the focused transcript.
+    pub anchors: Vec<heddle_render::transcript::Anchor>,
+    /// Clickable regions of the workspace and tab bars.
+    pub bars: BarHits,
+}
+
 /// The overlay that is open, if any.
 ///
 /// One field rather than six, so the exclusivity is structural: there is no dispatch
@@ -183,10 +208,8 @@ pub enum RecoveryPanel {
 /// the whole update path testable without a homeserver or a tty, and it is why the test
 /// module below is larger than this one.
 ///
-/// The exception is the handful of fields the renderer writes back -- `rendered_lines`,
-/// `viewport_height`, `bars`, `anchors`. Only the renderer knows them, and everything
-/// that reads them is therefore one frame behind. Noted here because it is not obvious
-/// from any single call site.
+/// The renderer measures rather than decides: it takes `&App` and hands back a
+/// [`Geometry`], which the event loop stores in `geometry`.
 pub struct App {
     pub config: Config,
     pub theme: Theme,
@@ -212,13 +235,9 @@ pub struct App {
     /// Views with a pagination request in flight. Without this, holding `<c-u>` at the
     /// top of a transcript would queue one request per keypress.
     paginating: HashSet<View>,
-    /// Rendered line count of the focused transcript, recorded by the renderer. The app
-    /// cannot compute it: wrapping depends on the pane width.
-    pub rendered_lines: u16,
-    /// Visible height of the focused pane, recorded by the renderer.
-    pub viewport_height: u16,
-    /// Clickable regions of the workspace and tab bars, recorded by the renderer.
-    pub bars: BarHits,
+    /// What the renderer measured last frame. Written by the event loop from
+    /// [`crate::ui::draw`]'s return value; see [`Geometry`].
+    pub geometry: Geometry,
     pub modal: Option<Modal>,
     /// Selected message per view, by event id. Reply, edit and redact all act on it.
     pub selected: HashMap<View, String>,
@@ -250,8 +269,6 @@ pub struct App {
     typing: Option<Typing>,
     /// Event armed for redaction, awaiting a confirming second keypress.
     confirm_redact: Option<String>,
-    /// Row of each event in the focused transcript, recorded by the renderer.
-    pub anchors: Vec<heddle_render::transcript::Anchor>,
     /// Set when the terminal must be fully repainted rather than diffed.
     ///
     /// ratatui only rewrites cells it believes have changed. A glyph that paints wider
@@ -313,9 +330,7 @@ impl App {
             sync: SyncState::Idle,
             status: None,
             paginating: HashSet::new(),
-            rendered_lines: 0,
-            viewport_height: 0,
-            bars: BarHits::default(),
+            geometry: Geometry::default(),
             modal: None,
             selected: HashMap::new(),
             composing: None,
@@ -328,7 +343,6 @@ impl App {
             unverified_rooms: HashSet::new(),
             typing: None,
             confirm_redact: None,
-            anchors: Vec::new(),
             needs_redraw: false,
             should_quit: false,
             restoring_focus: saved_layout.workspace.is_some() || !saved_layout.tabs.is_empty(),
@@ -520,6 +534,7 @@ impl App {
             return;
         };
         let Some(row) = self
+            .geometry
             .anchors
             .iter()
             .find(|a| &a.event_id == id)
@@ -528,7 +543,7 @@ impl App {
             return;
         };
 
-        let height = self.viewport_height.max(1);
+        let height = self.geometry.viewport_height.max(1);
         let max = self.max_scroll();
         let offset = max.saturating_sub(*self.scroll.get(&view).unwrap_or(&0));
 
@@ -1713,6 +1728,25 @@ impl App {
         self.tilings.get_mut(&room_id)
     }
 
+    /// Lay the focused room's panes out in `area`, creating its tiling if this is the
+    /// first time the room has been drawn.
+    ///
+    /// Driven by the event loop just before the frame, rather than by the renderer while
+    /// painting it: laying out mutates the tiling -- it caches the area, which is what
+    /// later resolves clicks and drags -- and that belongs to the app, not the painter.
+    /// Empty when no room is focused.
+    pub fn lay_out_panes(&mut self, area: Rect) -> Vec<Placement> {
+        let Some(room_id) = self
+            .workspaces
+            .focused()
+            .and_then(|w| w.focused_tab())
+            .map(|t| t.room_id.clone())
+        else {
+            return Vec::new();
+        };
+        self.tilings.entry(room_id).or_default().layout(area)
+    }
+
     fn split(&mut self, dir: Dir) {
         let Some(view) = self.focused_view() else {
             return;
@@ -1910,8 +1944,9 @@ impl App {
     /// hit-test the panes. The gaps between cells are swallowed too: falling through
     /// would focus a pane the user did not aim at.
     pub fn click_bar(&mut self, column: u16, row: u16) -> bool {
-        if row == self.bars.workspace_row && !self.bars.workspaces.is_empty() {
+        if row == self.geometry.bars.workspace_row && !self.geometry.bars.workspaces.is_empty() {
             let index = self
+                .geometry
                 .bars
                 .workspaces
                 .iter()
@@ -1925,8 +1960,8 @@ impl App {
             return true;
         }
 
-        if row == self.bars.tab_row {
-            if self.bars.new_tab.is_some_and(|(x0, x1)| {
+        if row == self.geometry.bars.tab_row {
+            if self.geometry.bars.new_tab.is_some_and(|(x0, x1)| {
                 let hit = Hit { x0, x1, index: 0 };
                 hit.contains(column)
             }) {
@@ -1934,6 +1969,7 @@ impl App {
                 return true;
             }
             let index = self
+                .geometry
                 .bars
                 .tabs
                 .iter()
@@ -2114,7 +2150,9 @@ impl App {
     ///
     /// From the geometry the renderer recorded; wrapping depends on the pane width.
     fn max_scroll(&self) -> u16 {
-        self.rendered_lines.saturating_sub(self.viewport_height)
+        self.geometry
+            .rendered_lines
+            .saturating_sub(self.geometry.viewport_height)
     }
 
     fn scroll_by(&mut self, delta: i32) {
@@ -2144,7 +2182,10 @@ impl App {
             return;
         }
 
-        let ceiling = self.rendered_lines.saturating_sub(self.viewport_height);
+        let ceiling = self
+            .geometry
+            .rendered_lines
+            .saturating_sub(self.geometry.viewport_height);
         if scroll + PAGINATE_MARGIN < ceiling {
             return;
         }
@@ -3218,8 +3259,8 @@ mod tests {
         let _ = app.take_commands();
 
         // Geometry the renderer would have recorded: a long transcript in a short pane.
-        app.rendered_lines = 200;
-        app.viewport_height = 20;
+        app.geometry.rendered_lines = 200;
+        app.geometry.viewport_height = 20;
 
         app.apply_action(Action::ScrollUp(10));
         assert!(
@@ -3256,8 +3297,8 @@ mod tests {
         });
         let _ = app.take_commands();
 
-        app.rendered_lines = 200;
-        app.viewport_height = 20;
+        app.geometry.rendered_lines = 200;
+        app.geometry.viewport_height = 20;
         app.apply_action(Action::ScrollUp(200));
         assert!(
             app.take_commands().is_empty(),
@@ -3725,8 +3766,8 @@ mod tests {
         assert_eq!(app.focused_view(), Some(View::room("!a:x")));
 
         // Geometry as the renderer would have recorded it.
-        app.bars.tab_row = 1;
-        app.bars.tabs = vec![
+        app.geometry.bars.tab_row = 1;
+        app.geometry.bars.tabs = vec![
             Hit {
                 x0: 1,
                 x1: 13,
@@ -3750,8 +3791,8 @@ mod tests {
     #[test]
     fn a_click_on_the_bar_never_falls_through_to_a_pane() {
         let mut app = app_with_two_rooms();
-        app.bars.tab_row = 1;
-        app.bars.tabs = vec![Hit {
+        app.geometry.bars.tab_row = 1;
+        app.geometry.bars.tabs = vec![Hit {
             x0: 1,
             x1: 13,
             index: 0,
@@ -3768,8 +3809,8 @@ mod tests {
     fn clicking_a_workspace_focuses_it() {
         let mut app = app_with_two_rooms();
         app.workspaces.entry("!space:x", "hermes-proj");
-        app.bars.workspace_row = 0;
-        app.bars.workspaces = vec![
+        app.geometry.bars.workspace_row = 0;
+        app.geometry.bars.workspaces = vec![
             Hit {
                 x0: 1,
                 x1: 13,
@@ -3905,8 +3946,8 @@ mod tests {
     #[test]
     fn selecting_the_newest_message_pins_the_transcript_to_the_bottom() {
         let mut app = app_with_messages();
-        app.rendered_lines = 200;
-        app.viewport_height = 20;
+        app.geometry.rendered_lines = 200;
+        app.geometry.viewport_height = 20;
         let view = app.focused_view().expect("view");
         app.scroll.insert(view.clone(), 120);
 
@@ -3923,8 +3964,8 @@ mod tests {
     #[test]
     fn selecting_the_oldest_message_scrolls_to_the_top_and_asks_for_more() {
         let mut app = app_with_messages();
-        app.rendered_lines = 200;
-        app.viewport_height = 20;
+        app.geometry.rendered_lines = 200;
+        app.geometry.viewport_height = 20;
         let view = app.focused_view().expect("view");
 
         app.apply_action(Action::SelectOlder);
@@ -4693,8 +4734,8 @@ mod tests {
     fn selection_falls_back_to_scrolling_when_there_is_nothing_to_select() {
         // An empty or still-loading room must not swallow the keypress and feel dead.
         let mut app = app();
-        app.rendered_lines = 200;
-        app.viewport_height = 20;
+        app.geometry.rendered_lines = 200;
+        app.geometry.viewport_height = 20;
         let view = app.focused_view().expect("view");
 
         app.apply_action(Action::SelectOlder);
@@ -5093,8 +5134,8 @@ mod tests {
     #[test]
     fn scrolling_never_goes_below_the_bottom() {
         let mut app = app();
-        app.rendered_lines = 200;
-        app.viewport_height = 20;
+        app.geometry.rendered_lines = 200;
+        app.geometry.viewport_height = 20;
 
         app.apply_action(Action::ScrollDown(50));
         let view = app.focused_view().expect("view");
@@ -5108,8 +5149,8 @@ mod tests {
     fn scrolling_up_past_the_top_does_not_strand_the_transcript() {
         let mut app = app();
         // 200 wrapped rows in a 20-row pane: 180 is as far up as it goes.
-        app.rendered_lines = 200;
-        app.viewport_height = 20;
+        app.geometry.rendered_lines = 200;
+        app.geometry.viewport_height = 20;
         let view = app.focused_view().expect("view");
 
         app.apply_action(Action::ScrollUp(1_000));
@@ -5128,8 +5169,8 @@ mod tests {
     #[test]
     fn jumping_to_the_top_is_reversible() {
         let mut app = app();
-        app.rendered_lines = 200;
-        app.viewport_height = 20;
+        app.geometry.rendered_lines = 200;
+        app.geometry.viewport_height = 20;
         let view = app.focused_view().expect("view");
 
         // ScrollTop passes u16::MAX; unclamped it would take 65,000 keypresses to
@@ -5236,8 +5277,8 @@ mod tests {
         assert!(app.needs_redraw, "switching tab must repaint");
 
         app.needs_redraw = false;
-        app.bars.tab_row = 1;
-        app.bars.tabs = vec![Hit {
+        app.geometry.bars.tab_row = 1;
+        app.geometry.bars.tabs = vec![Hit {
             x0: 1,
             x1: 13,
             index: 0,
