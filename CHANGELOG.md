@@ -7,6 +7,36 @@ Versions are pre-1.0 and mean what that usually means: the thing runs, and its s
 can still change. Breaking changes to config keys, keybindings and the agent wire
 format are possible in any 0.x release, and will be listed here.
 
+## 0.3.1 — 2026-08-17
+
+No changes to the client itself. This release exists because getting heddle installed
+was harder than running it.
+
+### Added
+
+- An install script. `curl -fsSL …/install.sh | sh` fetches the latest release, verifies
+  its SHA-256 and installs the binary, replacing an existing copy rather than sitting
+  beside it. Building from source was previously the only documented route in, which
+  asks for a Rust toolchain and a full compile of the Matrix SDK tree before anyone can
+  see whether the client is worth having.
+- arm64 binaries, `aarch64-unknown-linux-gnu` and `-musl`, built on native arm64
+  runners. Apple silicon under Docker, Graviton, Ampere and the Pi-class home server
+  were all told to build from source — including, awkwardly, the machine heddle is
+  developed on.
+
+### Fixed
+
+- Releases are no longer marked as prereleases purely for being 0.x. GitHub's
+  `/releases/latest` omits prereleases, so the endpoint that install scripts and
+  packaging bots reach for reported v0.2.0 for the whole life of v0.3.0. A prerelease is
+  now one tagged as such — `v0.3.1-rc1` — which is a different claim from being pre-1.0.
+  The prose in this file still applies: config keys, keybindings and the wire format can
+  change in any 0.x release.
+- The release workflow's musl step wrote a hardcoded `CC_x86_64_…` variable. Correct for
+  the only two targets that existed, and silently ignored on any other, which is exactly
+  the sort of thing that surfaces as a confusing C compiler error the first time the
+  matrix grows.
+
 ## 0.3.0 — 2026-08-16
 
 ### Added

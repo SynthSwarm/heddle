@@ -7,7 +7,7 @@ session* — streaming output, collapsible tool cards, inline diffs and keypress
 approvals, laid out with the multi-pane, multi-workspace ergonomics of a terminal
 workspace manager.
 
-> Status: **0.3.0 — beta.** Read, write, threads, mentions, encryption with interactive
+> Status: **0.3.1 — beta.** Read, write, threads, mentions, encryption with interactive
 > verification and key backup, and BSP tiling with persistent layouts. Used daily
 > against a real homeserver, but pre-1.0 in the way the number implies: interfaces,
 > config keys and the wire format may change, and there are corners nobody has walked
@@ -85,9 +85,9 @@ This fetches the latest release, verifies its SHA-256 checksum, and installs `he
 into `~/.local/bin` — or `/usr/local/bin` when run as root. It replaces an existing
 install rather than duplicating it, so re-running it is how you upgrade.
 
-Released binaries are **x86_64 Linux only** today, statically linked against musl. On any
-other platform, including Apple silicon and arm64 Linux, the script says so and stops;
-build from source instead.
+Released binaries cover **x86_64 and arm64 Linux**, statically linked against musl. macOS
+and Windows have no published binary yet; the script says so and stops rather than
+guessing, and building from source works there.
 
 If piping a script into a shell makes you twitch — reasonable — read it first, or drive
 it directly:
@@ -95,7 +95,7 @@ it directly:
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/SynthSwarm/heddle/main/install.sh
 less install.sh
-sh install.sh --version 0.3.0 --dir ~/bin
+sh install.sh --version 0.3.1 --dir ~/bin
 ```
 
 | Flag | Environment | Meaning |

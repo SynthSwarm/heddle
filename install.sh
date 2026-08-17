@@ -135,9 +135,19 @@ detect_target() {
 	Linux:x86_64 | Linux:amd64)
 		echo "x86_64-unknown-linux-musl"
 		;;
+	Linux:aarch64 | Linux:arm64)
+		echo "aarch64-unknown-linux-musl"
+		;;
+	Darwin:*)
+		err "no released binary for macOS yet."
+		err "Build from source:"
+		err "  git clone https://github.com/${REPO}"
+		err "  cd heddle && cargo build --release"
+		exit 1
+		;;
 	*)
 		err "no released binary for ${os} ${arch}."
-		err "heddle currently publishes x86_64 Linux only. Build from source:"
+		err "heddle publishes x86_64 and arm64 Linux. Build from source:"
 		err "  git clone https://github.com/${REPO}"
 		err "  cd heddle && cargo build --release"
 		exit 1
