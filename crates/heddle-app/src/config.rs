@@ -173,6 +173,45 @@ pub fn unknown_keys(text: &str) -> Vec<String> {
     complaints
 }
 
+/// Normalise a homeserver as typed into one that can be parsed as a URL.
+///
+/// `matrix.example.org` is what people type and what every homeserver's own
+/// documentation prints, but it is not a URL: `reqwest` rejects it before making a
+/// request, and the doctor reported that as `builder error` -- a message that describes
+/// the failing library rather than the mistake. Defaulting the scheme to `https` is the
+/// only sane reading, since a Matrix homeserver reached over cleartext is not a
+/// configuration heddle should make easy to arrive at by accident.
+///
+/// An explicit scheme is left alone, including `http`, which is wanted for a homeserver
+/// on localhost during development. A trailing slash is trimmed here so that callers
+/// joining paths do not each have to remember to.
+pub fn normalise_homeserver(homeserver: &str) -> String {
+    let trimmed = homeserver.trim();
+    let with_scheme = if has_scheme(trimmed) {
+        trimmed.to_owned()
+    } else {
+        format!("https://{trimmed}")
+    };
+    with_scheme.trim_end_matches('/').to_owned()
+}
+
+/// Whether the value already carries a URL scheme.
+///
+/// Matched on the shape a scheme has -- letter, then letters, digits, `+`, `-` or `.`,
+/// then `://` -- rather than on a list of known schemes. `matrix.example.org:8448` must
+/// not be mistaken for one, which a naive search for `:` would do, and that host:port
+/// form is common enough to be worth getting right.
+fn has_scheme(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once("://") else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 impl Config {
     /// Load from `path`, or return defaults when it does not exist.
     ///
@@ -183,7 +222,15 @@ impl Config {
                 for complaint in unknown_keys(&text) {
                     tracing::warn!(file = %path.display(), "{complaint}");
                 }
-                Ok(toml::from_str(&text)?)
+                let mut config: Self = toml::from_str(&text)?;
+                // Also on the way in, not only when `login` writes it. Configs
+                // predating that fix exist, and are hand-edited besides; a file that
+                // says `matrix.example.org` should work rather than fail at the first
+                // request with a message about a builder.
+                for profile in config.profile.values_mut() {
+                    profile.homeserver = normalise_homeserver(&profile.homeserver);
+                }
+                Ok(config)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
@@ -594,5 +641,70 @@ mod tests {
 
         let cfg = Config::load(&path).expect("parses despite the quotes");
         assert_eq!(cfg.profile["odd"].user_id, nasty);
+    }
+
+    #[test]
+    fn a_homeserver_without_a_scheme_gets_https() {
+        assert_eq!(
+            normalise_homeserver("matrix.example.org"),
+            "https://matrix.example.org"
+        );
+    }
+
+    #[test]
+    fn an_explicit_scheme_is_left_alone() {
+        // http is deliberate for a homeserver on localhost, so it is not upgraded.
+        assert_eq!(
+            normalise_homeserver("http://localhost:8008"),
+            "http://localhost:8008"
+        );
+        assert_eq!(
+            normalise_homeserver("https://matrix.example.org"),
+            "https://matrix.example.org"
+        );
+    }
+
+    #[test]
+    fn a_port_is_not_mistaken_for_a_scheme() {
+        // Searching for ':' rather than "://" reads this as already-schemed and leaves
+        // it unusable, which is the bug this function exists to remove.
+        assert_eq!(
+            normalise_homeserver("matrix.example.org:8448"),
+            "https://matrix.example.org:8448"
+        );
+    }
+
+    #[test]
+    fn trailing_slashes_and_padding_are_trimmed() {
+        assert_eq!(
+            normalise_homeserver("  https://matrix.example.org/  "),
+            "https://matrix.example.org"
+        );
+        assert_eq!(
+            normalise_homeserver("matrix.example.org/"),
+            "https://matrix.example.org"
+        );
+    }
+
+    #[test]
+    fn a_hand_written_config_without_a_scheme_still_works() {
+        // The case that was actually hit: a config written before `login` normalised
+        // anything. Loading it must produce something a URL parser accepts, or every
+        // request fails with a message about a builder rather than about the config.
+        let (_scratch, path) = scratch();
+        std::fs::write(
+            &path,
+            "[profile.default]\n\
+             user_id = \"@you:example.org\"\n\
+             homeserver = \"matrix.example.org\"\n\
+             default = true\n",
+        )
+        .expect("writes");
+
+        let cfg = Config::load(&path).expect("parses");
+        assert_eq!(
+            cfg.profile["default"].homeserver,
+            "https://matrix.example.org"
+        );
     }
 }

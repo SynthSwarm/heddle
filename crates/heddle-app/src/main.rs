@@ -109,6 +109,11 @@ async fn run(cli: Cli, dirs: Dirs) -> Result<()> {
             let password = std::env::var(&password_env).with_context(|| {
                 format!("${password_env} is not set; export it or pass --password-env")
             })?;
+            // Normalised before it is used rather than before it is written, so the
+            // session and the config block are created from the same string. Writing a
+            // corrected value while logging in with the raw one is how a profile ends up
+            // pointing somewhere the login never touched.
+            let homeserver = config::normalise_homeserver(&homeserver);
             let name = cli.profile.as_deref().unwrap_or("default");
             let paths = session::Paths::for_profile(&dirs.data, name);
             let (client, cross_signing) =
