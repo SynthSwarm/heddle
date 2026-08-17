@@ -7,6 +7,19 @@ Versions are pre-1.0 and mean what that usually means: the thing runs, and its s
 can still change. Breaking changes to config keys, keybindings and the agent wire
 format are possible in any 0.x release, and will be listed here.
 
+## Unreleased
+
+### Fixed
+
+- A homeserver written without a scheme is accepted. `login` recorded `--homeserver`
+  exactly as typed, so `matrix.example.org` — which is what people type, and what
+  homeserver documentation prints — produced a profile that no URL parser would accept.
+  The failure surfaced as `unreachable: builder error` from `--check`, a message about
+  the offending library rather than about the mistake, and from a doctor whose whole
+  purpose is to say what is wrong. The scheme now defaults to `https` at login and again
+  when a config is loaded, so hand-written and pre-existing files are repaired too. An
+  explicit `http://` is left alone, for a homeserver on localhost.
+
 ## 0.3.1 — 2026-08-17
 
 No changes to the client itself. This release exists because getting heddle installed
