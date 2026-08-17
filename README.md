@@ -7,7 +7,7 @@ session* — streaming output, collapsible tool cards, inline diffs and keypress
 approvals, laid out with the multi-pane, multi-workspace ergonomics of a terminal
 workspace manager.
 
-> Status: **0.3.0 — beta.** Read, write, threads, mentions, encryption with interactive
+> Status: **0.3.1 — beta.** Read, write, threads, mentions, encryption with interactive
 > verification and key backup, and BSP tiling with persistent layouts. Used daily
 > against a real homeserver, but pre-1.0 in the way the number implies: interfaces,
 > config keys and the wire format may change, and there are corners nobody has walked
@@ -70,23 +70,58 @@ notifies nobody.
 
 ## Requirements
 
-- Rust 1.93+
 - A homeserver with **native sliding sync** (MSC4186, advertised as
   `org.matrix.simplified_msc3575`). Recent Synapse has it. This is a hard requirement:
   `matrix-sdk-ui`'s `RoomListService` has no `/sync` fallback.
+- Rust 1.93+, if you are building from source.
 
-Check before you start:
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/SynthSwarm/heddle/main/install.sh | sh
+```
+
+This fetches the latest release, verifies its SHA-256 checksum, and installs `heddle`
+into `~/.local/bin` — or `/usr/local/bin` when run as root. It replaces an existing
+install rather than duplicating it, so re-running it is how you upgrade.
+
+Released binaries cover **x86_64 and arm64 Linux**, statically linked against musl. macOS
+and Windows have no published binary yet; the script says so and stops rather than
+guessing, and building from source works there.
+
+If piping a script into a shell makes you twitch — reasonable — read it first, or drive
+it directly:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/SynthSwarm/heddle/main/install.sh
+less install.sh
+sh install.sh --version 0.3.1 --dir ~/bin
+```
+
+| Flag | Environment | Meaning |
+|---|---|---|
+| `--version` | `HEDDLE_VERSION` | Version to install. Default: newest release. |
+| `--dir` | `HEDDLE_INSTALL_DIR` | Install directory. |
+| `--target` | `HEDDLE_TARGET` | Release target triple. Default: detected. |
+
+### From source
+
+```sh
+git clone https://github.com/SynthSwarm/heddle
+cd heddle
+cargo build --release
+# target/release/heddle
+```
+
+### Verify
 
 ```sh
 heddle --check
 ```
 
-## Install
-
-```sh
-cargo build --release
-# target/release/heddle
-```
+The doctor checks the terminal, the store and the homeserver — including whether the
+homeserver advertises the sliding sync support heddle cannot run without. Worth doing
+before your first login rather than after it fails.
 
 ## Use
 
