@@ -25,3 +25,7 @@
 node_modules/
 # Spike crypto store: device keys, not to be committed.
 plugins/opencode/spike/store/
+# Spike runtime state: crypto store (device keys), IndexedDB backing, room bookkeeping.
+plugins/opencode/spike/indexeddb/
+plugins/opencode/spike/encrypted-room.txt
+plugins/opencode/spike/last-run.json
