@@ -29,3 +29,7 @@ plugins/opencode/spike/store/
 plugins/opencode/spike/indexeddb/
 plugins/opencode/spike/encrypted-room.txt
 plugins/opencode/spike/last-run.json
+# Built plugin output and its local crypto store.
+plugins/opencode/dist/
+plugins/opencode/.store/
+plugins/opencode/indexeddb/
