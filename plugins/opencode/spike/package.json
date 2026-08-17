@@ -1,0 +1,9 @@
+{
+  "name": "heddle-opencode-spike",
+  "private": true,
+  "type": "module",
+  "description": "Phase 0 throwaway: proves Node can do Matrix E2EE well enough for the plugin. Not shipped.",
+  "dependencies": {
+    "matrix-js-sdk": "^37.0.0"
+  }
+}
