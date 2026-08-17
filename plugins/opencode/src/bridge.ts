@@ -12,9 +12,10 @@
  *  - **Only `message.delta` is edited.** It is the single kind exempt from the replay
  *    guard, so re-sending it under the same `seq` is allowed and is how streaming works.
  *
- *  - **`tool.call` and `tool.result` are separate events**, paired by `tool.index`, not
- *    an edit of one another. `store.rs` looks the call up by index and updates the card
- *    in place, keeping the arguments the call carried.
+ *  - **A tool is one event, edited.** The transcript renders one card per Matrix event,
+ *    so sending `tool.call` and `tool.result` as two events leaves a card stuck on
+ *    "running" beside its own result for ever. The call frame is edited into the result,
+ *    which means they share the event's single `seq`.
  *
  *  - **Deltas carry cumulative text.** heddle prefix-checks and replaces, so sending the
  *    whole message so far is correct and appending fragments would duplicate.
@@ -48,7 +49,13 @@ function ulid(): string {
 
 interface ToolSlot {
 	index: number;
-	callSent: boolean;
+	/** The Matrix event this tool owns, edited from `running` to its result. */
+	eventId: string | null;
+	/** The single `seq` that event owns, reused by every frame of it. */
+	seq: number;
+	sending: boolean;
+	/** Latest state that arrived mid-send, applied once the send completes. */
+	pending: Part | null;
 	resultSent: boolean;
 }
 
@@ -224,55 +231,91 @@ export class Bridge {
 
 		let slot = t.tools.get(part.id);
 		if (!slot) {
-			slot = { index: t.nextToolIndex++, callSent: false, resultSent: false };
+			slot = {
+				index: t.nextToolIndex++,
+				eventId: null,
+				seq: 0,
+				sending: false,
+				pending: null,
+				resultSent: false,
+			};
 			t.tools.set(part.id, slot);
+		}
+		if (slot.resultSent) return;
+		// A fast tool can complete while its call frame is still in flight. Dropping the
+		// update would leave the card running for ever, so the latest state is held and
+		// applied once the send finishes.
+		if (slot.sending) {
+			slot.pending = part;
+			return;
 		}
 
 		const state = part.state ?? {};
 		const status = state.status ?? "pending";
+		if (status === "pending") return;
 		const root = await this.thread(s, this.titleFor(s));
+		const done = status === "completed" || status === "error";
 
-		if (!slot.callSent && (status === "running" || status === "completed" || status === "error")) {
-			const tool: Tool = {
-				name,
-				index: slot.index,
-				args: state.input,
-				preview: state.title ?? previewOf(state.input),
-				status: "running",
-			};
-			const ev = this.envelope(s, t, "tool.call", t.nextSeq++);
-			ev.tool = tool;
-			await this.transport.send(
-				this.config.roomId,
-				root,
-				`🔧 ${name}${tool.preview ? `: "${tool.preview}"` : ""}`,
-				ev,
-			);
-			slot.callSent = true;
-		}
+		slot.sending = true;
+		try {
+			if (!slot.eventId) {
+				// The call frame: a new event, which owns one seq for its whole lifecycle.
+				slot.seq = t.nextSeq++;
+				const tool: Tool = {
+					name,
+					index: slot.index,
+					args: state.input,
+					preview: state.title ?? previewOf(state.input),
+					status: "running",
+				};
+				const ev = this.envelope(s, t, "tool.call", slot.seq);
+				ev.tool = tool;
+				slot.eventId = await this.transport.send(
+					this.config.roomId,
+					root,
+					`🔧 ${name}${tool.preview ? `: "${tool.preview}"` : ""}`,
+					ev,
+				);
+			}
 
-		if (!slot.resultSent && (status === "completed" || status === "error")) {
-			const ok = status === "completed";
-			const raw = ok ? (state.output ?? "") : (state.error ?? "failed");
-			const { body, truncated } = truncate(raw);
-			const start = state.time?.start;
-			const end = state.time?.end;
-			const tool: Tool = {
-				name,
-				index: slot.index,
-				status: ok ? "ok" : "error",
-				duration_ms: start && end ? Math.max(0, end - start) : undefined,
-				mime: mimeFor(name, body),
-				body,
-				truncated,
-			};
-			// A separate event, not an edit: heddle pairs it to the call by index and
-			// updates that card in place, keeping the arguments the call carried.
-			const ev = this.envelope(s, t, "tool.result", t.nextSeq++);
-			ev.tool = tool;
-			const glyph = ok ? "✓" : "✗";
-			await this.transport.send(this.config.roomId, root, `🔧 ${name} ${glyph}`, ev);
-			slot.resultSent = true;
+			if (done) {
+				const ok = status === "completed";
+				const raw = ok ? (state.output ?? "") : (state.error ?? "failed");
+				const { body, truncated } = truncate(raw);
+				const start = state.time?.start;
+				const end = state.time?.end;
+				const tool: Tool = {
+					name,
+					index: slot.index,
+					args: state.input,
+					preview: state.title ?? previewOf(state.input),
+					status: ok ? "ok" : "error",
+					duration_ms: start && end ? Math.max(0, end - start) : undefined,
+					mime: mimeFor(name, body),
+					body,
+					truncated,
+				};
+				// An edit of the call, not a second event: a tool is one card with a
+				// lifecycle, and the transcript renders one card per Matrix event. Sending
+				// a separate result leaves a card stuck on "running" beside it for ever.
+				// The seq is the call's, because heddle reads the chain resolved and a seq
+				// spent on a frame nobody sees would read as a missing event.
+				const ev = this.envelope(s, t, "tool.result", slot.seq);
+				ev.tool = tool;
+				const glyph = ok ? "✓" : "✗";
+				await this.transport.edit(
+					this.config.roomId,
+					slot.eventId,
+					`🔧 ${name}${tool.preview ? `: "${tool.preview}"` : ""} ${glyph}`,
+					ev,
+				);
+				slot.resultSent = true;
+			}
+		} finally {
+			slot.sending = false;
+			const queued = slot.pending;
+			slot.pending = null;
+			if (queued) await this.onToolPart(s, t, queued);
 		}
 	}
 
@@ -348,12 +391,19 @@ export class Bridge {
 				output_tokens: info.tokens?.output,
 				cost_usd: info.cost,
 			};
-			await this.transport.send(this.config.roomId, root, "", ev);
+			// heddle renders this from the structure, but the body is what every other
+			// Matrix client shows. An empty notice reads as a blank message in Element.
+			const parts = [
+				info.tokens?.input !== undefined ? `${info.tokens.input} in` : null,
+				info.tokens?.output !== undefined ? `${info.tokens.output} out` : null,
+				info.cost !== undefined ? `$${info.cost.toFixed(4)}` : null,
+			].filter(Boolean);
+			await this.transport.send(this.config.roomId, root, parts.join(" / "), ev);
 		}
 
 		const stop = this.envelope(s, t, "message.stop", t.nextSeq++);
 		stop.final = true;
-		await this.transport.send(this.config.roomId, root, "", stop);
+		await this.transport.send(this.config.roomId, root, "— end of turn —", stop);
 		t.stopped = true;
 	}
 

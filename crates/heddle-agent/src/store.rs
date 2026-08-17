@@ -279,9 +279,23 @@ impl AgentStore {
 
         // Replay guard. Exceptions: text deltas (Hermes sends cumulative text on the
         // edit chain, so the newest frame replaces), events filling a known gap (late,
-        // not duplicate), and the first event of a turn.
+        // not duplicate), the first event of a turn, and a result completing a tool call
+        // we are already holding.
+        //
+        // That last exception exists because a tool call and its result are one card with
+        // a lifecycle (SPEC §5.1), which means one Matrix event edited from `running` to
+        // its result -- and therefore one `seq`, since heddle reads the edit chain
+        // resolved and a `seq` spent on a frame nobody sees reads as a gap. Without this,
+        // the resolved edit is discarded as a replay, the tool stays `running` for ever,
+        // and `state()` reports `Working` on a session that finished.
         let fills_gap = turn.gaps.contains(&ev.seq);
-        if ev.seq <= turn.high_seq && ev.kind != Kind::MessageDelta && !fills_gap {
+        let completes_tool = ev.kind == Kind::ToolResult
+            && ev
+                .tool
+                .as_ref()
+                .is_some_and(|t| turn.tools.contains_key(&t.index));
+        if ev.seq <= turn.high_seq && ev.kind != Kind::MessageDelta && !fills_gap && !completes_tool
+        {
             return;
         }
         if ev.seq > turn.high_seq + 1 && turn.high_seq > 0 {
@@ -514,6 +528,76 @@ mod tests {
         // The args/preview from the call survive the result.
         assert_eq!(card.preview.as_deref(), Some("cargo test"));
         assert!(!t.has_running_tool());
+    }
+
+    #[test]
+    fn a_result_at_the_call_seq_completes_it_rather_than_reading_as_a_replay() {
+        // A tool call and its result are one card with a lifecycle, so an emitter sends
+        // one Matrix event and edits it -- which means one `seq`, because heddle reads
+        // the edit chain resolved and a `seq` spent on a frame nobody sees would read as
+        // a gap. The resolved edit therefore arrives at a `seq` already folded.
+        //
+        // Treating that as a replay left the tool running for ever, and `state()` reports
+        // `Working` while any tool is running, so the pane never came to rest.
+        let mut store = AgentStore::new();
+
+        let mut text = ev(1, Kind::MessageDelta);
+        text.text = Some("working on it".into());
+        store.apply(&text);
+
+        let mut call = ev(2, Kind::ToolCall);
+        call.tool = Some(tool(0, ToolStatus::Running));
+        store.apply(&call);
+
+        // Same seq as the call: this is that event's resolved edit, not a second event.
+        let mut result = ev(2, Kind::ToolResult);
+        result.tool = Some(Tool {
+            status: ToolStatus::Ok,
+            duration_ms: Some(812),
+            ..tool(0, ToolStatus::Ok)
+        });
+        store.apply(&result);
+
+        let mut stop = ev(3, Kind::MessageStop);
+        stop.final_ = Some(true);
+        store.apply(&stop);
+
+        let s = store.get("s1").expect("s");
+        let t = s.latest_turn().expect("t");
+        assert_eq!(t.tools().count(), 1, "still one card");
+        assert_eq!(t.tools().next().expect("card").status, ToolStatus::Ok);
+        assert!(!t.has_running_tool(), "the tool must not still be running");
+        assert!(
+            !s.has_gaps(),
+            "reusing the event's seq must not read as a gap"
+        );
+        assert_eq!(s.state(), AgentState::Done, "the session must come to rest");
+    }
+
+    #[test]
+    fn a_genuine_replay_is_still_ignored() {
+        // The exception above is narrow: it applies to a result completing a call we
+        // hold. An unrelated kind arriving at an old seq is still a duplicate.
+        let mut store = AgentStore::new();
+
+        let mut first = ev(1, Kind::Commentary);
+        first.text = Some("first".into());
+        store.apply(&first);
+
+        let mut second = ev(2, Kind::Commentary);
+        second.text = Some("second".into());
+        store.apply(&second);
+
+        let mut replay = ev(1, Kind::Commentary);
+        replay.text = Some("replayed".into());
+        store.apply(&replay);
+
+        let s = store.get("s1").expect("s");
+        let t = s.latest_turn().expect("t");
+        assert!(
+            !t.commentary.contains("replayed"),
+            "a duplicate must still be dropped"
+        );
     }
 
     #[test]
