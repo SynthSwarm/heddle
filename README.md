@@ -3,9 +3,8 @@
 **An agent-native Matrix client for the terminal.**
 
 Every existing Matrix TUI treats a room as *chat*. heddle treats it as an *agent
-session* — streaming output, collapsible tool cards, inline diffs and keypress
-approvals, laid out with the multi-pane, multi-workspace ergonomics of a terminal
-workspace manager.
+session* — streaming output, collapsible tool cards, inline diffs and durations, laid out
+with the multi-pane, multi-workspace ergonomics of a terminal workspace manager.
 
 > Status: **0.3.1 — beta.** Read, write, threads, mentions, encryption with interactive
 > verification and key backup, and BSP tiling with persistent layouts. Used daily
@@ -14,10 +13,18 @@ workspace manager.
 > into yet. v1 is when the shape has stopped moving.
 >
 > Agents are not patched to suit heddle. Where one emits the structured extension
-> heddle renders it losslessly; where one does not — which today is everywhere — heddle
-> recovers what it can from the tool chrome already printed and marks those panes `~`,
-> so the loss is visible rather than pretended away. A pane missing events outright is
-> marked `!`. That is the design, not a stopgap.
+> heddle renders it losslessly; where one does not, heddle recovers what it can from the
+> tool chrome already printed and marks those panes `~`, so the loss is visible rather
+> than pretended away. A pane missing events outright is marked `!`. That is the design,
+> not a stopgap.
+>
+> [`plugins/opencode`](plugins/opencode) is the first producer of the extension, so an
+> opencode session renders losslessly and unmarked. Everything else is still on the
+> recovery path.
+>
+> Two things are built and not yet reachable: keypress approvals and the model picker.
+> heddle renders and answers both, but nothing emits them yet — the chrome parser cannot
+> recover an approval, so until a producer sends one they are code without a caller.
 > See [`docs/PLAN.md`](docs/PLAN.md).
 
 ---
@@ -37,15 +44,17 @@ No result. No diff. No exit code. A client reading only that is permanently capp
 
 heddle addresses this from both ends. Where an agent will carry a namespaced content
 extension (`dev.heddle.agent.v1`) alongside the human-readable body, heddle renders the
-structure losslessly and other Matrix clients are unaffected. Where it will not — which
-today is everywhere — heddle recovers what it can from the tool chrome the agent already
-prints, and marks those panes `~` so the degradation is visible rather than pretended
-away. A pane whose transcript is missing events outright is marked `!`, which is the
+structure losslessly and other Matrix clients are unaffected. Where it will not, heddle
+recovers what it can from the tool chrome the agent already prints, and marks those panes
+`~` so the degradation is visible rather than pretended away. A pane whose transcript is
+missing events outright is marked `!`, which is the
 same principle applied to a worse failure.
 
 Agent support is a registry rather than a hardcoded format. An *adapter* declares which
-structured key an agent writes and which shapes of chrome it prints; Hermes is the first
-one, and adding another is a table and a name rather than a second parser.
+structured key an agent writes and which shapes of chrome it prints; two ship, `heddle`
+for the published schema — which is what `plugins/opencode` writes — and `hermes` for the
+legacy key plus chrome recovery. Adding another is a table and a name rather than a
+second parser.
 
 ## Concepts
 
@@ -193,6 +202,8 @@ crates/
   heddle-layout/   workspace model + BSP tiling facade
   heddle-render/   tool cards, diffs, markdown, transcript
   heddle-app/      binary: event loop, keymap, config
+plugins/
+  opencode/        opencode plugin: emits dev.heddle.agent.v1 into a Matrix thread
 ```
 
 All Matrix SDK I/O runs on a dedicated worker task. The render thread never holds a
@@ -223,9 +234,26 @@ default and says so loudly when set.
 
 ## Docs
 
-- [`docs/SPEC.md`](docs/SPEC.md) — design, wire format, security model
-- [`docs/PLAN.md`](docs/PLAN.md) — milestones and risk register
-- [`CHANGELOG.md`](CHANGELOG.md) — what shipped, and what is deliberately absent
+The documentation is the source of truth, and each file owns a different question. Where
+two disagree, the one that owns the question wins and the other is a bug.
+
+| Document | Owns | Ask it |
+|---|---|---|
+| [`docs/SPEC.md`](docs/SPEC.md) | design, the `dev.heddle.agent.v1` wire format, keymap, config keys, security model, and the decisions that should not be relitigated | *how is this supposed to work?* |
+| [`docs/PLAN.md`](docs/PLAN.md) | milestones, what is built, what is deliberately not, and the risk register | *does this exist yet?* |
+| [`CHANGELOG.md`](CHANGELOG.md) | what shipped in each release, and what is deliberately absent | *when did this change?* |
+| [`plugins/opencode/README.md`](plugins/opencode/README.md) | installing and configuring the plugin, and the emitter's obligations | *how do I get a lossless pane?* |
+| this file | what heddle is, and how to get it running | *should I try this?* |
+
+Two rules keep them honest, both learned by breaking them:
+
+- **A feature that cannot be reached is not ticked.** `PLAN.md` marks approvals and the
+  model picker `[~]` — built, and with nothing emitting the events that would reach them.
+  Ticking those is how a plan stops being worth reading.
+- **A claim with a date on it decays.** "No agent emits the extension" was true when
+  written and false the day `plugins/opencode` merged. Statements about the state of the
+  world belong in `PLAN.md` and `CHANGELOG.md`, which are expected to move, rather than
+  scattered through prose that nobody revisits.
 
 ## Licence
 
