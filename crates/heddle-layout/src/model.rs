@@ -173,6 +173,13 @@ pub struct Tab {
     /// Index into `panes`. Kept in range by every mutating method.
     focused: usize,
     pub is_encrypted: bool,
+    /// Invited but not joined. The timeline is unreadable until that is answered, so the
+    /// tab exists to be acted on rather than to be read.
+    ///
+    /// A plain `bool` rather than the transport's `Membership`, so this crate keeps its
+    /// independence from `heddle-matrix`; there are two states and no prospect of a
+    /// third, since left rooms are filtered out before they reach here.
+    pub is_invite: bool,
     pub unread: Unread,
 }
 
@@ -184,6 +191,7 @@ impl Tab {
             panes: Vec::new(),
             focused: 0,
             is_encrypted: false,
+            is_invite: false,
             unread: Unread::default(),
         }
     }
@@ -299,6 +307,38 @@ impl Workspace {
 
     pub fn tab_for_room_mut(&mut self, room_id: &str) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|t| t.room_id == room_id)
+    }
+
+    /// Drop every tab whose room is not in `keep`, returning the rooms dropped.
+    ///
+    /// Focus is pulled back into range rather than left dangling: `focused` is an index,
+    /// so removing a tab to its left silently moves every tab under it, and removing the
+    /// last one leaves the index past the end. Both render as the wrong room being shown
+    /// after leaving a different one.
+    pub fn retain_rooms<F>(&mut self, keep: F) -> Vec<String>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let focused_room = self.focused_tab().map(|t| t.room_id.clone());
+        let mut dropped = Vec::new();
+        self.tabs.retain(|tab| {
+            if keep(&tab.room_id) {
+                true
+            } else {
+                dropped.push(tab.room_id.clone());
+                false
+            }
+        });
+
+        if dropped.is_empty() {
+            return dropped;
+        }
+        // Follow the room that had focus if it survived; otherwise clamp, which lands on
+        // the neighbour that took its place.
+        self.focused = focused_room
+            .and_then(|room| self.tabs.iter().position(|t| t.room_id == room))
+            .unwrap_or_else(|| self.focused.min(self.tabs.len().saturating_sub(1)));
+        dropped
     }
 
     /// The workspace badge: the most urgent state among its tabs.
@@ -643,5 +683,46 @@ mod tests {
         assert_eq!(p.header(), "● !~thread 1");
         p.degraded = false;
         assert_eq!(p.header(), "● !thread 1");
+    }
+
+    #[test]
+    fn retaining_rooms_keeps_focus_on_the_room_that_had_it() {
+        let mut w = Workspace::new("!s:x", "space");
+        for id in ["!a:x", "!b:x", "!c:x"] {
+            w.tabs.push(Tab::new(id, id));
+        }
+        w.focus_tab(2);
+
+        // Removing a tab to the left of the focused one shifts every index under it.
+        // Following the room rather than the number is the difference between staying
+        // where you were and jumping to a neighbour.
+        let dropped = w.retain_rooms(|id| id != "!a:x");
+        assert_eq!(dropped, vec!["!a:x".to_owned()]);
+        assert_eq!(w.focused_tab().expect("tab").room_id, "!c:x");
+    }
+
+    #[test]
+    fn retaining_rooms_clamps_when_the_focused_room_is_the_one_removed() {
+        let mut w = Workspace::new("!s:x", "space");
+        for id in ["!a:x", "!b:x"] {
+            w.tabs.push(Tab::new(id, id));
+        }
+        w.focus_tab(1);
+
+        w.retain_rooms(|id| id != "!b:x");
+        assert_eq!(
+            w.focused_tab().expect("tab").room_id,
+            "!a:x",
+            "focus must come back into range rather than point past the end"
+        );
+    }
+
+    #[test]
+    fn retaining_everything_changes_nothing() {
+        let mut w = Workspace::new("!s:x", "space");
+        w.tabs.push(Tab::new("!a:x", "a"));
+        w.focus_tab(0);
+        assert!(w.retain_rooms(|_| true).is_empty());
+        assert_eq!(w.tabs.len(), 1);
     }
 }

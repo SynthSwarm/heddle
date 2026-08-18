@@ -19,6 +19,19 @@ pub enum SyncState {
     Terminated,
 }
 
+/// Whether we are in a room or have only been asked.
+///
+/// Left rooms are not represented: they are filtered out of the room list rather than
+/// carried as a third state, because a room you have left is not a tab. `Client::rooms`
+/// returns joined, invited *and* left, which is why that filtering has to be deliberate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Membership {
+    #[default]
+    Joined,
+    /// Invited but not joined. Readable only after accepting.
+    Invited,
+}
+
 /// A room as shown in the tab bar and switcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomSummary {
@@ -30,6 +43,7 @@ pub struct RoomSummary {
     pub parents: Vec<String>,
     pub is_direct: bool,
     pub is_encrypted: bool,
+    pub membership: Membership,
     pub notification_count: u64,
     pub highlight_count: u64,
 }
@@ -337,6 +351,22 @@ pub enum Command {
     MarkRead {
         view: View,
     },
+    /// Join a room, which is also how an invitation is accepted.
+    ///
+    /// One command rather than two: accepting an invite and joining a room the user
+    /// already knows the ID of are the same `/join` call, and giving them separate names
+    /// would suggest the server distinguishes them.
+    Join {
+        room_id: String,
+    },
+    /// Leave a room, which is also how an invitation is declined, and forget it.
+    ///
+    /// Forgetting matters: `Client::rooms` returns left rooms as well as joined and
+    /// invited ones, so a room that is left but remembered comes back as a tab on the
+    /// next room-list update. Leaving without forgetting looks like the leave failed.
+    Leave {
+        room_id: String,
+    },
     /// Ask this account's other devices to verify this one.
     StartVerification,
     /// Accept a verification another device asked for.
@@ -368,6 +398,8 @@ impl Command {
         match self {
             Command::OpenView(..) => "OpenView",
             Command::CloseView(..) => "CloseView",
+            Command::Join { .. } => "Join",
+            Command::Leave { .. } => "Leave",
             Command::Paginate { .. } => "Paginate",
             Command::SendMessage { .. } => "SendMessage",
             Command::SendReply { .. } => "SendReply",
@@ -396,6 +428,15 @@ impl Command {
 pub enum WorkerEvent {
     SyncState(SyncState),
     /// The full room list, re-sent whenever it changes.
+    ///
+    /// **A complete snapshot, never a delta.** Every joined and invited room the client
+    /// knows about, rebuilt by `collect_rooms` from scratch each time, which is what
+    /// makes a room's *absence* meaningful: the app removes tabs for rooms that are not
+    /// in the latest list, because that is how leaving a room becomes visible.
+    ///
+    /// Emitting a partial list here would silently close the user's tabs. If a delta
+    /// ever becomes worth the complexity, it needs its own variant rather than a
+    /// narrower `Rooms`.
     Rooms(Vec<RoomSummary>),
     /// A view's timeline, re-sent as a snapshot whenever it changes.
     Timeline {

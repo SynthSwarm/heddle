@@ -66,6 +66,8 @@ pub const COMMANDS: &[Command] = &[
     c("emoji into composer", "e", true, Action::EmojiIntoComposer),
     c("verify this device", "v", true, Action::StartVerification),
     c("recovery key", "R", true, Action::OpenRecovery),
+    c("accept invitation", "a", true, Action::JoinRoom),
+    c("leave room", "X", true, Action::LeaveRoom),
     c("keyboard help", "?", true, Action::ToggleHelp),
     c("redraw the screen", "^l", false, Action::Redraw),
     c("quit", "q", true, Action::Quit),

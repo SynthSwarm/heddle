@@ -409,6 +409,8 @@ chosen to avoid collision when nested inside a `ctrl+b` multiplexer.
 | `<prefix> w` / `<prefix> W` | next / previous workspace |
 | `<prefix> v` | verify this device against your others |
 | `<prefix> R` | unlock secret storage with your recovery key |
+| `<prefix> a` | accept the invitation for the focused tab |
+| `<prefix> X` | leave the focused room, or decline its invitation — asks first |
 | `<prefix> f` | fuzzy jump to any room, thread or agent — **not implemented**, see PLAN M6 |
 | `k` / `j` | select older / newer message |
 | `r` / `e` / `D` | reply / edit / delete the selection |
@@ -573,7 +575,7 @@ The Matrix SDK ones are the expensive ones:
 | ~~M5 (patching Hermes to emit structured events) is skipped~~ **Reversed.** heddle ships its own producer instead | The original decision was right about the method and wrong about the conclusion. Patching *somebody else's agent* is still not the plan — it put the point of the project behind a merge nobody here controls, which is why it never moved. But "the fallback parser is the product" turned out to be a rationalisation of having no producer: it recovers no results, no durations, no exit codes and no approvals, because none of those are on the wire. `plugins/opencode` is first-party, in-tree and lossless (§3.5). The fallback parser is what heddle uses for agents it does not control, which is most of them, and it is still not a stopgap — it is just no longer the ceiling. |
 | Wire key is `dev.heddle.agent.v1` | Renamed from `dev.hermes.agent.v1`, which is still read for compatibility. |
 | Secret redaction in `tool.args` is not heddle's job | The agents handle it. A client-side scrubber would be security theatre over data the agent already chose to send. |
-| No close-tab | Tabs are rooms. There is no way to open one, so closing is a trapdoor. **Contingent:** this reasoning expires the moment heddle can join a room, which is issue #14. Joining and leaving arrive together or the trapdoor argument inverts — a room you joined and cannot leave is the worse version. |
+| No close-tab | Tabs are rooms, and closing one would mean leaving. `<prefix> X` does exactly that, deliberately and with a confirmation, now that `<prefix> a` can get back in. What is still absent is a *close* that keeps membership: a tab you dismissed but are still in would go on collecting unread counts nobody sees. |
 | Every glyph is measured as it is painted | The hazard is *disagreement* between `unicode-width` and the terminal, not narrowness. Wide emoji measure two and paint two; text-presentation symbols and box drawing measure one and paint one. What is banned is a codepoint terminals promote to emoji presentation — `⚠` was the `Blocked` badge until it was not. The table is `heddle_render::glyphs::PRINTED`, and the doctor probes all of it. Unread badges are ASCII `(3)` / `(@3)` for the same reason. |
 | No real homeserver in docs or tests | `example.org` throughout. |
 | Mentions ride in `m.mentions`, not in the body text | It is what the push rules read since spec v1.7, and what an agent waiting to be called actually sees. |

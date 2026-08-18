@@ -61,6 +61,10 @@ pub enum Action {
     StartVerification,
     /// Unlock secret storage with a recovery key.
     OpenRecovery,
+    /// Join the focused room, which is how an invitation is accepted.
+    JoinRoom,
+    /// Leave the focused room, or decline its invitation. Asks first.
+    LeaveRoom,
     /// Confirm the highlighted item in whatever overlay is open.
     Accept,
     /// Abandon a reply, an edit, an armed redaction, or an overlay.
@@ -255,6 +259,8 @@ pub const BINDINGS: &[Binding] = &[
     b("e", "emoji into composer", Mode::Prefix),
     b("r", "react to selected", Mode::Prefix),
     b("w / W", "next / prev workspace", Mode::Prefix),
+    b("a", "accept the invitation", Mode::Prefix),
+    b("X", "leave the room (asks first)", Mode::Prefix),
     b("?", "this help", Mode::Prefix),
     b("q", "quit", Mode::Prefix),
 ];
@@ -316,6 +322,11 @@ fn map_prefix(key: KeyEvent) -> Action {
         KeyCode::Char('W') => Action::PrevWorkspace,
         KeyCode::Char('v') => Action::StartVerification,
         KeyCode::Char('R') => Action::OpenRecovery,
+        KeyCode::Char('a') => Action::JoinRoom,
+        // Capital, and it asks before acting. Leaving a room is not undoable from
+        // heddle: there is no directory search and no join-by-alias, so the way back in
+        // is an invitation from somebody else.
+        KeyCode::Char('X') => Action::LeaveRoom,
         KeyCode::Char('f') => Action::FuzzyJump,
         KeyCode::Char('?') | KeyCode::Char('/') => Action::ToggleHelp,
 
