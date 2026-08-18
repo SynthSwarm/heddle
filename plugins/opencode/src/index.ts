@@ -12,9 +12,16 @@ import { load } from "./config.js";
 import { connect, type Transport } from "./matrix.js";
 import { Bridge } from "./bridge.js";
 
-const log = (msg: string) => console.log(`[heddle] ${msg}`);
-
 export const HeddleOpencode: Plugin = async ({ client }): Promise<Hooks> => {
+	// Never `console.log`. Inside a plugin that is opencode's TUI, and a background
+	// bridge printing over the user's terminal is not a diagnostic, it is damage. The
+	// SDK's own logging is silenced in `connect` for the same reason.
+	const log = (msg: string) => {
+		void client?.app
+			?.log({ body: { service: "heddle", level: "info", message: msg } })
+			.catch(() => {});
+	};
+
 	const config = load();
 	if (!config || !config.enabled) {
 		// Not configured is the normal state for anyone who has installed the plugin and
@@ -55,6 +62,44 @@ export const HeddleOpencode: Plugin = async ({ client }): Promise<Hooks> => {
 	return {
 		event: async ({ event }) => {
 			try {
+				// The agent has stopped and is waiting on a human. This is the event
+				// heddle's whole approval UI was built for and which, until now, nothing
+				// produced.
+				//
+				// Two names, deliberately. `@opencode-ai/sdk` types the event as
+				// `permission.updated`, while `@opencode-ai/sdk/v2` and the plugin
+				// documentation call it `permission.asked`. Matching only the one the
+				// types expose would leave approvals silently never firing on a runtime
+				// that emits the other, which is the worst shape of bug: the feature
+				// looks present and does nothing.
+				const onPermission = async (props: unknown) => {
+					const permission = props as {
+						id?: string;
+						type?: string;
+						sessionID?: string;
+						messageID?: string;
+						title?: string;
+						metadata?: Record<string, unknown>;
+					};
+					if (!permission?.id || !permission.sessionID) return;
+					const b = await ensure();
+					await b?.onPermission({
+						id: permission.id,
+						type: permission.type ?? "tool",
+						sessionID: permission.sessionID,
+						messageID: permission.messageID,
+						title: permission.title ?? permission.type ?? "permission",
+						metadata: permission.metadata,
+					});
+				};
+
+				// Matched as a string, because `permission.asked` is not in the union the
+				// installed types declare.
+				if ((event.type as string) === "permission.asked") {
+					await onPermission((event as { properties?: unknown }).properties);
+					return;
+				}
+
 				switch (event.type) {
 					case "message.part.updated": {
 						const part = event.properties.part as unknown as {
@@ -102,20 +147,7 @@ export const HeddleOpencode: Plugin = async ({ client }): Promise<Hooks> => {
 					}
 
 					case "permission.updated": {
-						// The agent has stopped and is waiting on a human. This is the
-						// event heddle's whole approval UI was built for and which,
-						// until now, nothing produced.
-						const permission = event.properties as unknown as {
-							id: string;
-							type: string;
-							sessionID: string;
-							messageID?: string;
-							title: string;
-							metadata?: Record<string, unknown>;
-						};
-						if (!permission?.id) return;
-						const b = await ensure();
-						await b?.onPermission(permission);
+						await onPermission(event.properties);
 						return;
 					}
 
