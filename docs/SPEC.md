@@ -303,8 +303,15 @@ heddle/
 │  ├─ heddle-render/   tool cards, diffs, markdown, images, transcript widget
 │  ├─ heddle-layout/   Hypertile wrapper, workspace model, layout persistence
 │  └─ heddle-app/      binary: event loop, actions, keymap, config, commands
+├─ plugins/
+│  └─ opencode/        opencode plugin: emits §3.2 into a Matrix thread (TypeScript)
 └─ docs/
 ```
+
+`plugins/opencode` is the only part of the tree that is not Rust, and it is here rather
+than in its own repository so that the schema and its only producer change together: its
+fixtures are recordings of the emitter which `heddle-agent`'s test suite reads back, so
+the two halves cannot drift without a red build. See §3.5.
 
 `heddle-layout` funnels every call into `ratatui-hypertile` through one concrete type,
 `Tiling`. Hypertile is at `0.4` and maintained by one author; the facade keeps a fork or
@@ -563,10 +570,10 @@ The Matrix SDK ones are the expensive ones:
 
 | Decision | Reason |
 |---|---|
-| M5 (patching Hermes to emit structured events) is skipped | heddle should work with agents as they are. The fallback parser is the product, not a stopgap. |
+| ~~M5 (patching Hermes to emit structured events) is skipped~~ **Reversed.** heddle ships its own producer instead | The original decision was right about the method and wrong about the conclusion. Patching *somebody else's agent* is still not the plan — it put the point of the project behind a merge nobody here controls, which is why it never moved. But "the fallback parser is the product" turned out to be a rationalisation of having no producer: it recovers no results, no durations, no exit codes and no approvals, because none of those are on the wire. `plugins/opencode` is first-party, in-tree and lossless (§3.5). The fallback parser is what heddle uses for agents it does not control, which is most of them, and it is still not a stopgap — it is just no longer the ceiling. |
 | Wire key is `dev.heddle.agent.v1` | Renamed from `dev.hermes.agent.v1`, which is still read for compatibility. |
 | Secret redaction in `tool.args` is not heddle's job | The agents handle it. A client-side scrubber would be security theatre over data the agent already chose to send. |
-| No close-tab | Tabs are rooms. There is no way to open one, so closing is a trapdoor. |
+| No close-tab | Tabs are rooms. There is no way to open one, so closing is a trapdoor. **Contingent:** this reasoning expires the moment heddle can join a room, which is issue #14. Joining and leaving arrive together or the trapdoor argument inverts — a room you joined and cannot leave is the worse version. |
 | Every glyph is measured as it is painted | The hazard is *disagreement* between `unicode-width` and the terminal, not narrowness. Wide emoji measure two and paint two; text-presentation symbols and box drawing measure one and paint one. What is banned is a codepoint terminals promote to emoji presentation — `⚠` was the `Blocked` badge until it was not. The table is `heddle_render::glyphs::PRINTED`, and the doctor probes all of it. Unread badges are ASCII `(3)` / `(@3)` for the same reason. |
 | No real homeserver in docs or tests | `example.org` throughout. |
 | Mentions ride in `m.mentions`, not in the body text | It is what the push rules read since spec v1.7, and what an agent waiting to be called actually sees. |

@@ -9,8 +9,34 @@ format are possible in any 0.x release, and will be listed here.
 
 ## Unreleased
 
+### Added
+
+- **An opencode plugin, and with it the first lossless agent pane.** `plugins/opencode`
+  mirrors a live coding-agent session into a Matrix thread as `dev.heddle.agent.v1`:
+  streaming text, reasoning as commentary, tool calls carrying their arguments, results
+  carrying durations and MIME-typed bodies, and token usage. A pane fed by it renders
+  tool cards, diffs and durations from structure rather than recovering them from printed
+  text, so it carries no `~`.
+
+  Everything needed to render this shipped in 0.1; nothing had ever produced it. The
+  producer was scoped as a patch to Hermes, which put the point of the project behind a
+  change landing in somebody else's repository. This one is first-party and in-tree, and
+  the two halves are held together by conformance fixtures — recordings of the emitter
+  that `heddle-agent`'s tests read back, regenerated in CI so drift is a red build rather
+  than a `~` on somebody's screen.
+
+  Documented in `SPEC.md` §3.5, including the two rules that are easy to satisfy
+  incorrectly and were: one `seq` per Matrix event, and a tool being one event edited from
+  its call into its result.
+
 ### Fixed
 
+- A tool call and its result no longer render as two cards. The transcript draws one card
+  per Matrix event, so an emitter sending the result as a separate event left a card
+  wearing the arguments and stuck on `running` beside another wearing the outcome. A
+  result may now complete a call at a `seq` already folded, which the replay guard
+  previously discarded — and because `state()` reports `Working` while any tool is
+  running, a session that had finished never came to rest.
 - A homeserver written without a scheme is accepted. `login` recorded `--homeserver`
   exactly as typed, so `matrix.example.org` — which is what people type, and what
   homeserver documentation prints — produced a profile that no URL parser would accept.
@@ -19,6 +45,13 @@ format are possible in any 0.x release, and will be listed here.
   purpose is to say what is wrong. The scheme now defaults to `https` at login and again
   when a config is loaded, so hand-written and pre-existing files are repaired too. An
   explicit `http://` is left alone, for a homeserver on localhost.
+
+### Documentation
+
+- `PLAN.md` and `README.md` now describe what was built. Every item under M5 was unticked
+  while all of them shipped, and the README's opening sentence sold keypress approvals,
+  which are rendered and answered but which nothing emits. Both are corrected; the
+  unreachable ones are marked as such rather than ticked.
 
 ## 0.3.1 — 2026-08-17
 

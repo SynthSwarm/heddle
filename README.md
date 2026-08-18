@@ -234,9 +234,26 @@ default and says so loudly when set.
 
 ## Docs
 
-- [`docs/SPEC.md`](docs/SPEC.md) — design, wire format, security model
-- [`docs/PLAN.md`](docs/PLAN.md) — milestones and risk register
-- [`CHANGELOG.md`](CHANGELOG.md) — what shipped, and what is deliberately absent
+The documentation is the source of truth, and each file owns a different question. Where
+two disagree, the one that owns the question wins and the other is a bug.
+
+| Document | Owns | Ask it |
+|---|---|---|
+| [`docs/SPEC.md`](docs/SPEC.md) | design, the `dev.heddle.agent.v1` wire format, keymap, config keys, security model, and the decisions that should not be relitigated | *how is this supposed to work?* |
+| [`docs/PLAN.md`](docs/PLAN.md) | milestones, what is built, what is deliberately not, and the risk register | *does this exist yet?* |
+| [`CHANGELOG.md`](CHANGELOG.md) | what shipped in each release, and what is deliberately absent | *when did this change?* |
+| [`plugins/opencode/README.md`](plugins/opencode/README.md) | installing and configuring the plugin, and the emitter's obligations | *how do I get a lossless pane?* |
+| this file | what heddle is, and how to get it running | *should I try this?* |
+
+Two rules keep them honest, both learned by breaking them:
+
+- **A feature that cannot be reached is not ticked.** `PLAN.md` marks approvals and the
+  model picker `[~]` — built, and with nothing emitting the events that would reach them.
+  Ticking those is how a plan stops being worth reading.
+- **A claim with a date on it decays.** "No agent emits the extension" was true when
+  written and false the day `plugins/opencode` merged. Statements about the state of the
+  world belong in `PLAN.md` and `CHANGELOG.md`, which are expected to move, rather than
+  scattered through prose that nobody revisits.
 
 ## Licence
 
