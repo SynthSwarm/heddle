@@ -22,6 +22,7 @@ const check = process.argv.includes("--check");
 // ── a transport that records instead of sending ──────────────────────────────
 const recorded = [];
 let nextId = 0;
+let reactionHandler = () => {};
 const transport = {
 	userId: "@mason:matrix.example.org",
 	deviceId: "FIXTUREDEV",
@@ -35,6 +36,9 @@ const transport = {
 	},
 	async edit(_room, target, body, event) {
 		recorded.push({ op: "edit", eventId: target, body, event });
+	},
+	onReaction(handler) {
+		reactionHandler = handler;
 	},
 	async close() {},
 };
@@ -53,8 +57,12 @@ const config = {
 };
 
 let turnCounter = 0;
+const answered = [];
 const bridge = new Bridge(transport, config, () => {}, {
 	newTurnId: () => `01FIXTURETURN${String(++turnCounter).padStart(3, "0")}`,
+	respond: async (permission, response) => {
+		answered.push({ id: permission.id, response });
+	},
 });
 
 const SESSION = "ses_fixture";
@@ -159,6 +167,27 @@ await bridge.onPart(
 	}),
 );
 await settle();
+
+// An approval: the agent stops and waits for a human, who answers with a reaction.
+await bridge.onPermission({
+	id: "perm_fixture",
+	type: "bash",
+	sessionID: SESSION,
+	messageID: MESSAGE,
+	title: "rm -rf ./target",
+	metadata: { command: "rm -rf ./target", cwd: "/home/you/heddle" },
+});
+await settle();
+
+// The reaction heddle sends for `y`. Delivered through the transport's own callback, so
+// the path exercised here is the one a real reaction takes.
+const askEvent = recorded.findLast((r) => r.event.kind === "approval.request");
+reactionHandler({ targetId: askEvent.eventId, key: "✅", sender: "@you:matrix.example.org" });
+await settle();
+if (answered.length !== 1 || answered[0].response !== "once") {
+	console.error("the approval was not passed back to opencode:", answered);
+	process.exit(1);
+}
 
 // Close the turn: usage then message.stop.
 await bridge.onMessageComplete(SESSION, MESSAGE, {

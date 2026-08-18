@@ -94,6 +94,8 @@ fn the_fixtures_cover_what_the_emitter_can_send() {
         "commentary",
         "tool.call",
         "tool.result",
+        "approval.request",
+        "approval.resolved",
         "usage",
         "message.stop",
     ] {
@@ -200,4 +202,74 @@ fn the_resolved_view_produces_a_clean_session() {
     assert_eq!(usage.input_tokens, 18422);
     assert_eq!(usage.output_tokens, 970);
     assert_eq!(usage.cost_usd, Some(0.0412));
+}
+
+/// An unanswered approval must block the session.
+///
+/// This is the behaviour heddle's approval UI is built on and the one that had never run
+/// against a real event: `state()` returns `Blocked` while anything is pending, which is
+/// what raises the badge and what tells the user they are the bottleneck. Applying the
+/// request without its resolution is the state a user actually sits in.
+#[test]
+fn an_unanswered_approval_blocks_the_session() {
+    let dir = fixture_dir();
+    let m = manifest();
+    let frames = m["frames"].as_array().expect("frames");
+
+    let mut store = AgentStore::new();
+    let mut session_id = String::new();
+    let mut asked = false;
+
+    for frame in frames {
+        let kind = frame["kind"].as_str().expect("kind");
+        // Stop at the request: everything up to it is the turn as the user sees it when
+        // the agent stops and waits.
+        let file = frame["file"].as_str().expect("file");
+        let ev: AgentEvent = serde_json::from_str(&read(&dir.join(file))).expect("decode");
+        session_id.clone_from(&ev.session_id);
+        store.apply(&ev);
+        if kind == "approval.request" {
+            asked = true;
+            break;
+        }
+    }
+    assert!(asked, "no approval.request among the fixtures");
+
+    let session = store.get(&session_id).expect("session");
+    assert!(
+        !session.pending.is_empty(),
+        "the request did not land as a pending prompt, so nothing would ask the user"
+    );
+    assert_eq!(
+        session.state(),
+        AgentState::Blocked,
+        "an unanswered approval must outrank a running tool: the human is the bottleneck"
+    );
+}
+
+/// Answering it must unblock the session again.
+#[test]
+fn answering_the_approval_releases_the_session() {
+    let dir = fixture_dir();
+    let m = manifest();
+
+    let mut store = AgentStore::new();
+    let mut session_id = String::new();
+    for frame in m["frames"].as_array().expect("frames") {
+        let file = frame["file"].as_str().expect("file");
+        let ev: AgentEvent = serde_json::from_str(&read(&dir.join(file))).expect("decode");
+        session_id.clone_from(&ev.session_id);
+        store.apply(&ev);
+    }
+
+    let session = store.get(&session_id).expect("session");
+    assert!(
+        session.pending.is_empty(),
+        "the resolution did not clear the prompt, so the pane would ask for ever"
+    );
+    assert_ne!(
+        session.state(),
+        AgentState::Blocked,
+        "an answered approval must stop blocking"
+    );
 }

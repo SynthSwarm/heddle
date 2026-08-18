@@ -176,11 +176,14 @@ repository, which is why it never moved.
 - [x] Diff rendering for `mime: text/x-diff` (unified diffs; `similar` was dropped with `render_pair`, since nothing produces a before/after pair)
 - [x] JSON tree, folded plaintext, markdown result renderers
 - [x] Commentary blocks, dimmed and collapsible
-- [~] Approvals as `y`/`n` with countdown, emitting `m.reaction` — **built, never
-  exercised.** Nothing emits `approval.request`: not the opencode plugin, and not the
-  fallback parser, which recovers no approvals from chrome. The keypress-approval claim
-  in `README.md` is unreachable today.
-- [~] Model picker as a list — built, same absence of a producer
+- [x] Approvals as `y`/`n`, emitting `m.reaction`. `plugins/opencode` turns an opencode
+  permission request into `approval.request` and passes the answer back, so the path from
+  a blocked agent to a keypress and out again runs end to end. Two caveats: opencode
+  permissions carry no expiry, so no countdown is advertised — the schema's `expires_at`
+  is optional and heddle draws no timer without it; and opencode's third answer,
+  "always", has no `ApprovalChoice` and therefore no key, though the plugin advertises an
+  emoji for it so it can be given from another client.
+- [~] Model picker as a list — built, and still with nothing emitting `model.picker`
 - [x] Token usage in the status line
 - [x] Fallback parser for non-extension rooms, marked `~`
 

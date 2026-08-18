@@ -62,16 +62,28 @@
 			"seq": 5
 		},
 		{
-			"file": "10-usage.json",
+			"file": "10-approval-request.json",
 			"op": "send",
-			"kind": "usage",
+			"kind": "approval.request",
 			"seq": 6
 		},
 		{
-			"file": "11-message-stop.json",
+			"file": "11-approval-resolved.json",
+			"op": "edit",
+			"kind": "approval.resolved",
+			"seq": 6
+		},
+		{
+			"file": "12-usage.json",
+			"op": "send",
+			"kind": "usage",
+			"seq": 7
+		},
+		{
+			"file": "13-message-stop.json",
 			"op": "send",
 			"kind": "message.stop",
-			"seq": 7
+			"seq": 8
 		}
 	],
 	"resolved": [
@@ -96,12 +108,16 @@
 			"seq": 5
 		},
 		{
-			"kind": "usage",
+			"kind": "approval.resolved",
 			"seq": 6
 		},
 		{
-			"kind": "message.stop",
+			"kind": "usage",
 			"seq": 7
+		},
+		{
+			"kind": "message.stop",
+			"seq": 8
 		}
 	]
 }

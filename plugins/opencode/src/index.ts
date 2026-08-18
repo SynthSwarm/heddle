@@ -14,7 +14,7 @@ import { Bridge } from "./bridge.js";
 
 const log = (msg: string) => console.log(`[heddle] ${msg}`);
 
-export const HeddleOpencode: Plugin = async (): Promise<Hooks> => {
+export const HeddleOpencode: Plugin = async ({ client }): Promise<Hooks> => {
 	const config = load();
 	if (!config || !config.enabled) {
 		// Not configured is the normal state for anyone who has installed the plugin and
@@ -33,7 +33,15 @@ export const HeddleOpencode: Plugin = async (): Promise<Hooks> => {
 		if (!starting) {
 			starting = (async () => {
 				transport = await connect(config);
-				bridge = new Bridge(transport, config, log);
+				bridge = new Bridge(transport, config, log, {
+					// The one place the bridge talks back to opencode.
+					respond: async (permission, response) => {
+						await client.postSessionIdPermissionsPermissionId({
+							path: { id: permission.sessionID, permissionID: permission.id },
+							body: { response },
+						});
+					},
+				});
 				log(`bridged to ${config.roomId} as ${transport.userId} (${transport.deviceId})`);
 			})().catch((e) => {
 				log(`bridge unavailable: ${(e as Error).message}`);
@@ -90,6 +98,32 @@ export const HeddleOpencode: Plugin = async (): Promise<Hooks> => {
 					case "session.idle": {
 						const b = await ensure();
 						await b?.flushAll();
+						return;
+					}
+
+					case "permission.updated": {
+						// The agent has stopped and is waiting on a human. This is the
+						// event heddle's whole approval UI was built for and which,
+						// until now, nothing produced.
+						const permission = event.properties as unknown as {
+							id: string;
+							type: string;
+							sessionID: string;
+							messageID?: string;
+							title: string;
+							metadata?: Record<string, unknown>;
+						};
+						if (!permission?.id) return;
+						const b = await ensure();
+						await b?.onPermission(permission);
+						return;
+					}
+
+					case "permission.replied": {
+						const props = event.properties as unknown as { permissionID?: string };
+						if (!props?.permissionID) return;
+						const b = await ensure();
+						await b?.onPermissionReplied(props.permissionID);
 						return;
 					}
 

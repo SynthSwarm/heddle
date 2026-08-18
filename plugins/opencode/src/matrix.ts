@@ -23,6 +23,15 @@ import path from "node:path";
 import { CONTENT_KEY, type AgentEvent } from "./protocol.js";
 import type { Config } from "./config.js";
 
+export interface Reaction {
+	/** The event being reacted to. */
+	targetId: string;
+	/** The emoji. */
+	key: string;
+	/** Who reacted. */
+	sender: string;
+}
+
 export interface Transport {
 	/** Send a new event, returning its ID so later edits can target it. */
 	send(roomId: string, threadRoot: string | null, body: string, event: AgentEvent): Promise<string>;
@@ -30,6 +39,8 @@ export interface Transport {
 	edit(roomId: string, target: string, body: string, event: AgentEvent): Promise<void>;
 	/** Open a new thread and return its root event ID. */
 	openThread(roomId: string, title: string): Promise<string>;
+	/** Watch for reactions from anyone other than us. */
+	onReaction(handler: (reaction: Reaction) => void): void;
 	close(): Promise<void>;
 	readonly userId: string;
 	readonly deviceId: string;
@@ -262,5 +273,33 @@ class MatrixTransport implements Transport {
 
 	async close(): Promise<void> {
 		this.client.stopClient();
+	}
+
+	/**
+	 * Watch for reactions.
+	 *
+	 * Our own are filtered out, or resolving an approval from here would immediately look
+	 * like somebody answering it. Encrypted rooms need the decryption to have happened
+	 * first, hence the `Event.Decrypted` path as well as the live timeline.
+	 */
+	onReaction(handler: (reaction: Reaction) => void): void {
+		const emit = (event: sdk.MatrixEvent) => {
+			if (event.getType() !== "m.reaction") return;
+			if (event.getSender() === this.userId) return;
+			const relates = event.getContent()["m.relates_to"];
+			if (!relates?.event_id || !relates?.key) return;
+			handler({
+				targetId: relates.event_id,
+				key: relates.key,
+				sender: event.getSender() ?? "",
+			});
+		};
+
+		this.client.on(sdk.RoomEvent.Timeline, (event: sdk.MatrixEvent, _room, toStart) => {
+			// Pagination replays history; only live events are answers to a live prompt.
+			if (toStart) return;
+			emit(event);
+		});
+		this.client.on(sdk.MatrixEventEvent.Decrypted, (event: sdk.MatrixEvent) => emit(event));
 	}
 }

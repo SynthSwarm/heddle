@@ -17,11 +17,33 @@ the producer side of the schema.
 | reasoning | `commentary` |
 | tool part, running | `tool.call` — name, arguments, preview |
 | tool part, finished | `tool.result` — status, `duration_ms`, MIME-typed body |
+| permission request | `approval.request` — answered with a reaction, passed back to opencode |
 | message completed | `usage` (tokens, cost) then `message.stop` |
 
 Tool results are MIME-typed so heddle picks a renderer: an `edit` whose output looks like
 a diff is sent as `text/x-diff` and gets a gutter with add/delete counts; JSON is sent as
 `application/json` and gets a collapsible tree.
+
+### Approvals
+
+When a tool needs permission, opencode stops and waits. The plugin turns that into an
+`approval.request` in the pane, heddle prompts, and `y`/`n` sends a reaction that the
+plugin maps back to opencode's permission reply — so the agent is unblocked from the
+keyboard rather than from the machine it is running on.
+
+| Reaction | opencode reply |
+|---|---|
+| ✅ | `once` |
+| ❌ | `reject` |
+| ♾️ | `always` |
+
+`always` has no key in heddle: its `ApprovalChoice` is approve, deny or timeout. The
+emoji is advertised anyway, so the answer can be given from Element, which is where the
+repetitive-tool case tends to bite.
+
+No countdown is shown, because opencode permissions do not expire. The schema's
+`expires_at` is optional and heddle draws no timer without it; inventing a deadline would
+put a clock on screen that means nothing.
 
 ## Install
 

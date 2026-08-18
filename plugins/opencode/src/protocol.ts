@@ -61,6 +61,39 @@ export interface Notice {
 	extra?: Record<string, string>;
 }
 
+/**
+ * A request for a human decision, and its outcome.
+ *
+ * `reactions` maps the emoji a client may send to the choice it means. heddle reads this
+ * to decide what to send for `y`/`n`, falling back to ✅/❌ when it is absent, so the map
+ * is the contract for anything answering from another Matrix client too.
+ */
+export interface Approval {
+	id: string;
+	kind: string;
+	command?: string;
+	cwd?: string;
+	/** Unix seconds. Absent means no timeout, which is opencode's behaviour. */
+	expires_at?: number;
+	reactions?: Record<string, string>;
+	choice?: "approve" | "deny" | "timeout";
+	/** Matrix user who resolved it. */
+	by?: string;
+}
+
+/**
+ * Emoji offered for an approval, and what each means.
+ *
+ * `always` has no key in heddle -- its `ApprovalChoice` is approve, deny or timeout --
+ * but advertising it costs nothing and lets somebody answer from Element, where the
+ * repetitive-tool case that makes "always" worth having actually bites.
+ */
+export const APPROVAL_REACTIONS: Record<string, string> = {
+	"✅": "approve",
+	"❌": "deny",
+	"♾️": "always",
+};
+
 export interface AgentEvent {
 	v: number;
 	/** Stable for the lifetime of a pane. One opencode session maps to one thread. */
@@ -76,6 +109,7 @@ export interface AgentEvent {
 	final?: boolean;
 	tool?: Tool;
 	notice?: Notice;
+	approval?: Approval;
 	usage?: Usage;
 }
 
