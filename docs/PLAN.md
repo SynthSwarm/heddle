@@ -3,10 +3,11 @@
 Companion to [`SPEC.md`](./SPEC.md). Milestones are sequenced so that each one ends at a
 state that is independently useful, and so that the riskiest unknowns are retired first.
 
-**0.3.0 released on 2026-08-16.** M0–M4 and M6's release work are done; M5 was
-deliberately skipped, for the reason recorded in SPEC §10.2. What remains below is the
-convenience work, and [`CHANGELOG.md`](../CHANGELOG.md) is the record of what actually
-went out.
+**0.3.0 released on 2026-08-16.** M0–M4 and M6's release work are done. M5's consumption
+half was built early and sat unexercised for want of anything emitting the schema;
+`plugins/opencode` supplies that, so M5 is delivered apart from approvals, which are
+built and have no producer. [`CHANGELOG.md`](../CHANGELOG.md) is the record of what
+actually went out.
 
 This is not v1 and does not claim to be. The milestones below describe what v1 means;
 a released 0.x means the thing runs, not that its shape has settled.
@@ -141,7 +142,7 @@ end to end until Hermes is emitting the events in M5; only the unread half is li
 
 ---
 
-## M5 — Agent-native
+## M5 — Agent-native ◐ delivered by a different route
 
 **Goal:** the actual point of the project.
 
@@ -150,32 +151,42 @@ already ships two — `heddle` for the published schema and `hermes` for the leg
 plus chrome recovery — so a second agent is a chrome table and a name. What follows is
 what it takes to get one agent onto the *lossless* path.
 
-### 5a — Hermes patch
+The consumption half was built during M1–M4, because the agent layer is pure functions
+and could be written without a homeserver. It sat unexercised for want of a producer,
+which is what made M5 look skipped. `plugins/opencode` is that producer, so 5b is now
+proven end to end rather than only unit-tested.
 
-Work in a fork of `hermes-agent`, not the installed checkout.
+### 5a — a producer for §3.2
 
-- [ ] `MATRIX_AGENT_EVENTS` flag, default off
-- [ ] `format_tool_event` Matrix override returns `(human, structured)`
-- [ ] `_build_text_message_content` attaches `dev.heddle.agent.v1`
-- [ ] `edit_message` mirrors the key into `m.new_content`
-- [ ] Round-trip tests extending `tests/gateway/test_matrix*.py`
-- [ ] Propose upstream
+Originally scoped as a patch to Hermes, in a fork of `hermes-agent`. That put the
+project's whole reason for existing behind a change landing in somebody else's
+repository, which is why it never moved.
+
+- [x] `plugins/opencode` — an opencode plugin emitting `dev.heddle.agent.v1`, first-party
+  and in-tree, with conformance fixtures read back by `heddle-agent`'s test suite
+- [ ] Hermes patch, if and when Hermes is worth the effort. No longer on the critical
+  path: heddle has a producer it controls, and the fallback parser still covers Hermes.
 
 ### 5b — heddle consumption
 
-- [ ] `heddle-agent`: serde codec for the envelope, version gating, gap detection
-- [ ] `AgentStore`: turns, tool calls, approvals keyed by `session_id`/`turn_id`/`seq`
-- [ ] Derived agent state machine and badge roll-up
-- [ ] Tool cards: collapse/expand, status glyphs, durations
-- [ ] Diff rendering for `mime: text/x-diff` (unified diffs; `similar` was dropped with `render_pair`, since nothing produces a before/after pair)
-- [ ] JSON tree, folded plaintext, markdown result renderers
-- [ ] Commentary blocks, dimmed and collapsible
-- [ ] Approvals as `y`/`n` with countdown, emitting `m.reaction`
-- [ ] Model picker as a list
-- [ ] Token usage in the status line
-- [ ] Fallback parser for non-extension rooms, marked `~`
+- [x] `heddle-agent`: serde codec for the envelope, version gating, gap detection
+- [x] `AgentStore`: turns, tool calls, approvals keyed by `session_id`/`turn_id`/`seq`
+- [x] Derived agent state machine and badge roll-up
+- [x] Tool cards: collapse/expand, status glyphs, durations
+- [x] Diff rendering for `mime: text/x-diff` (unified diffs; `similar` was dropped with `render_pair`, since nothing produces a before/after pair)
+- [x] JSON tree, folded plaintext, markdown result renderers
+- [x] Commentary blocks, dimmed and collapsible
+- [~] Approvals as `y`/`n` with countdown, emitting `m.reaction` — **built, never
+  exercised.** Nothing emits `approval.request`: not the opencode plugin, and not the
+  fallback parser, which recovers no approvals from chrome. The keypress-approval claim
+  in `README.md` is unreachable today.
+- [~] Model picker as a list — built, same absence of a producer
+- [x] Token usage in the status line
+- [x] Fallback parser for non-extension rooms, marked `~`
 
-**Exit:** driving Hermes from heddle feels like driving it locally.
+**Exit:** driving an agent from heddle feels like driving it locally. Met for streaming,
+tool cards, diffs and usage; **not met for approvals**, which is the half that makes a
+pane interactive rather than a log.
 
 ---
 
@@ -212,6 +223,14 @@ Chat-client parity, moved down from M2 because the agent path does not depend on
 **These are v1 blockers if the agent framing is ever dropped.** They were deferred on
 the strength of M5 making heddle something other than a general chat client. Ship
 without both M5 and these, and what remains is a Matrix TUI that cannot join a room.
+
+M5 has since arrived, so that bet has been settled — but the room-membership half has
+stopped being a matter of framing and become a hole anyone hits. The room list is
+unfiltered, so an invitation appears as a tab; there is no command behind it. The worker
+accepts twenty-one commands and none of them is `Join`, `Leave` or `Accept`, so the
+sequence "an agent opens a room and invites you" ends in another client. That was hit
+for real while bringing up `plugins/opencode`: the spike room had to be joined with
+`curl` and accepted from Element.
 
 ---
 
