@@ -92,6 +92,7 @@ pub fn draw(frame: &mut Frame, app: &App, panes: &[Placement]) -> Geometry {
         Some(Modal::Help) => draw_help(frame, app, frame.area()),
         Some(Modal::Verification(_)) => draw_verification(frame, app, frame.area()),
         Some(Modal::Recovery(_)) => draw_recovery(frame, app, frame.area()),
+        Some(Modal::Confirm(_)) => draw_confirm(frame, app, frame.area()),
         None => {}
     }
 
@@ -764,6 +765,50 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// The yes/no confirmation. See [`crate::app::Modal::Confirm`].
+///
+/// Deliberately plain and deliberately in the way: it covers the middle of the screen
+/// rather than sitting in the status line, because the whole reason it exists is that
+/// the action underneath it cannot be undone from heddle.
+fn draw_confirm(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(Modal::Confirm(confirm)) = &app.modal else {
+        return;
+    };
+
+    let prompt_width = UnicodeWidthStr::width(confirm.prompt.as_str());
+    let width = (prompt_width.max(24) + 4).min(area.width as usize) as u16;
+    let height = 5u16.min(area.height);
+    if width < 12 || height < 5 {
+        return;
+    }
+
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    let lines = vec![
+        Line::from(Span::raw("")),
+        Line::from(Span::raw(confirm.prompt.clone())),
+        Line::from(vec![
+            Span::styled("  y", app.theme.accent_style()),
+            Span::styled(" yes    ", app.theme.dim_style()),
+            Span::styled("n", app.theme.accent_style()),
+            Span::styled("/esc no", app.theme.dim_style()),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(app.theme.border_style(true))
+        .title(Span::styled(" confirm ", app.theme.accent_style()));
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 /// Re-express anchors in the units the scroll offset counts.
 ///
 /// The renderer numbers each anchor by its line in the unwrapped transcript, because it
@@ -937,6 +982,13 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect, bars: &mut BarHits) {
             }
 
             let mut label = tab.title.clone();
+            // Before the name, not after: an invitation is what the tab *is*, not a
+            // property of a room you are in. ASCII for the same reason the unread badges
+            // are -- see SPEC §10.2 on glyphs the terminal and `unicode-width` disagree
+            // about, and `heddle_render::glyphs::PRINTED` for what is allowed.
+            if tab.is_invite {
+                label.insert_str(0, "invite: ");
+            }
             if tab.is_encrypted {
                 label.push_str(" 🔒");
             }
@@ -1328,6 +1380,7 @@ mod tests {
             parents: Vec::new(),
             is_direct: false,
             is_encrypted: false,
+            membership: heddle_matrix::Membership::Joined,
             notification_count: 0,
             highlight_count: 0,
         }

@@ -25,7 +25,7 @@ use matrix_sdk::{
         },
         EventId, RoomId,
     },
-    Client, Room,
+    Client, Room, RoomState,
 };
 use matrix_sdk_ui::{
     sync_service::{State as SyncServiceState, SyncService},
@@ -404,6 +404,16 @@ impl Worker {
         })));
     }
 
+    /// Recollect the room list and publish it.
+    ///
+    /// The room-list stream publishes on its own schedule, which is the right default and
+    /// the wrong latency for a room the user has just joined or left: the tab bar is what
+    /// they acted on, and it not changing reads as the keypress having missed.
+    async fn publish_rooms(&self) {
+        let rooms = collect_rooms(&self.client).await;
+        let _ = self.events.send(WorkerEvent::Rooms(rooms)).await;
+    }
+
     async fn handle(&mut self, command: Command) -> anyhow::Result<()> {
         match command {
             Command::Shutdown => {}
@@ -572,6 +582,31 @@ impl Worker {
                         tracing::debug!(view = ?view, error = %e, "read receipt refused");
                     }
                 }
+            }
+
+            Command::Join { room_id } => {
+                let id = RoomId::parse(&room_id)?;
+                self.client.join_room_by_id(&id).await?;
+                // The room list stream will catch up on its own, but not necessarily
+                // before the user looks: the tab is the thing they just acted on, and it
+                // saying "invited" a second later reads as the keypress having missed.
+                self.publish_rooms().await;
+            }
+
+            Command::Leave { room_id } => {
+                let id = RoomId::parse(&room_id)?;
+                let room = self
+                    .client
+                    .get_room(&id)
+                    .ok_or_else(|| anyhow::anyhow!("no such room: {room_id}"))?;
+                room.leave().await?;
+                // Forget as well, or the room comes back: it is still known to the
+                // client in the `Left` state, and any future widening of the room-list
+                // filter would surface it again.
+                if let Err(e) = room.forget().await {
+                    tracing::debug!(room = %room_id, error = %e, "left the room but could not forget it");
+                }
+                self.publish_rooms().await;
             }
 
             Command::StartVerification => self.start_verification().await?,
@@ -1223,6 +1258,14 @@ async fn collect_rooms(client: &Client) -> Vec<RoomSummary> {
 
     let mut out = Vec::new();
     for room in client.rooms() {
+        // `Client::rooms` returns joined, invited *and left* rooms, so taking it whole
+        // put rooms the user had walked out of back in the tab bar. Anything that is not
+        // one of the two states a tab can represent is skipped here.
+        let membership = match room.state() {
+            RoomState::Joined => Membership::Joined,
+            RoomState::Invited => Membership::Invited,
+            _ => continue,
+        };
         let room_id = room.room_id().to_string();
         let display_name = room
             .cached_display_name()
@@ -1239,6 +1282,7 @@ async fn collect_rooms(client: &Client) -> Vec<RoomSummary> {
                 .latest_encryption_state()
                 .await
                 .is_ok_and(|s| s.is_encrypted()),
+            membership,
             notification_count: room.num_unread_notifications(),
             highlight_count: room.num_unread_mentions(),
         });

@@ -3,8 +3,9 @@
 **An agent-native Matrix client for the terminal.**
 
 Every existing Matrix TUI treats a room as *chat*. heddle treats it as an *agent
-session* — streaming output, collapsible tool cards, inline diffs and durations, laid out
-with the multi-pane, multi-workspace ergonomics of a terminal workspace manager.
+session* — streaming output, collapsible tool cards, inline diffs and keypress
+approvals, laid out with the multi-pane, multi-workspace ergonomics of a terminal
+workspace manager.
 
 > Status: **0.3.1 — beta.** Read, write, threads, mentions, encryption with interactive
 > verification and key backup, and BSP tiling with persistent layouts. Used daily
@@ -22,9 +23,9 @@ with the multi-pane, multi-workspace ergonomics of a terminal workspace manager.
 > opencode session renders losslessly and unmarked. Everything else is still on the
 > recovery path.
 >
-> Two things are built and not yet reachable: keypress approvals and the model picker.
-> heddle renders and answers both, but nothing emits them yet — the chrome parser cannot
-> recover an approval, so until a producer sends one they are code without a caller.
+> Keypress approvals work through that plugin: an opencode permission request becomes a
+> prompt in the pane, `y`/`n` answers it, and the answer goes back to the agent. The
+> model picker is still built and unreachable — nothing emits `model.picker` yet.
 > See [`docs/PLAN.md`](docs/PLAN.md).
 
 ---

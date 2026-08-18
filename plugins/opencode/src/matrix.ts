@@ -17,11 +17,21 @@
  */
 
 import * as sdk from "matrix-js-sdk";
+import type { Logger as SdkLogger } from "matrix-js-sdk/lib/logger.js";
 import type { MatrixClient, Room } from "matrix-js-sdk";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { CONTENT_KEY, type AgentEvent } from "./protocol.js";
 import type { Config } from "./config.js";
+
+export interface Reaction {
+	/** The event being reacted to. */
+	targetId: string;
+	/** The emoji. */
+	key: string;
+	/** Who reacted. */
+	sender: string;
+}
 
 export interface Transport {
 	/** Send a new event, returning its ID so later edits can target it. */
@@ -30,6 +40,8 @@ export interface Transport {
 	edit(roomId: string, target: string, body: string, event: AgentEvent): Promise<void>;
 	/** Open a new thread and return its root event ID. */
 	openThread(roomId: string, title: string): Promise<string>;
+	/** Watch for reactions from anyone other than us. */
+	onReaction(handler: (reaction: Reaction) => void): void;
 	close(): Promise<void>;
 	readonly userId: string;
 	readonly deviceId: string;
@@ -73,32 +85,244 @@ function databasePrefix(storeDir: string): string {
 	return `${path.join(storeDir, "store")}/`;
 }
 
-export async function connect(config: Config): Promise<Transport> {
-	await installIndexedDb(config.storePath);
+/**
+ * A logger that goes nowhere.
+ *
+ * matrix-js-sdk logs to `console` by default, and inside an opencode plugin that console
+ * is the TUI: a single connection attempt printed hundreds of rust-crypto tracing lines
+ * straight over the user's terminal. A bridge is a background concern and has no business
+ * writing to the screen at all, so its logging is turned off rather than turned down.
+ *
+ * Set `HEDDLE_MATRIX_DEBUG=1` to get it back on stderr when something needs diagnosing.
+ */
+function quietLogger(): SdkLogger {
+    const debug = process.env.HEDDLE_MATRIX_DEBUG === "1";
+    const write =
+        debug
+            ? (level: string, args: unknown[]) => process.stderr.write(`[matrix:${level}] ${args.join(" ")}\n`)
+            : () => {};
+    const logger = {
+        trace: (...a: unknown[]) => write("trace", a),
+        debug: (...a: unknown[]) => write("debug", a),
+        info: (...a: unknown[]) => write("info", a),
+        warn: (...a: unknown[]) => write("warn", a),
+        error: (...a: unknown[]) => write("error", a),
+        getChild: () => logger,
+    };
+    return logger as unknown as SdkLogger;
+}
 
-	const whoami = await fetch(`${config.homeserver}/_matrix/client/v3/account/whoami`, {
-		headers: { Authorization: `Bearer ${config.accessToken}` },
-	});
-	if (!whoami.ok) {
-		throw new Error(`Matrix whoami failed (HTTP ${whoami.status}): check MATRIX_ACCESS_TOKEN`);
+/**
+ * The session this bridge owns, kept beside its crypto store.
+ *
+ * The two belong together: a crypto store is meaningless without the device whose keys
+ * it holds. Keeping the token here rather than in the environment also means a fresh
+ * store is self-healing — it logs in, gets its own device, and stops fighting over one
+ * that already has keys on the server.
+ */
+interface SavedSession {
+	userId: string;
+	deviceId: string;
+	accessToken: string;
+}
+
+async function loadSession(dir: string): Promise<SavedSession | null> {
+	try {
+		const raw = await fs.readFile(path.join(dir, "session.json"), "utf8");
+		const parsed = JSON.parse(raw) as SavedSession;
+		return parsed.accessToken && parsed.deviceId && parsed.userId ? parsed : null;
+	} catch {
+		return null;
 	}
-	const me = (await whoami.json()) as { user_id: string; device_id?: string };
+}
 
-	// A device-less token comes from Synapse's admin login API. E2EE is per-device, so
-	// this is the wrong kind of credential rather than a setting to enable later, and
-	// failing here beats failing later as "unable to decrypt" on somebody else's screen.
-	if (!me.device_id) {
+async function saveSession(dir: string, session: SavedSession): Promise<void> {
+	const file = path.join(dir, "session.json");
+	await fs.writeFile(file, `${JSON.stringify(session, null, 1)}\n`, { mode: 0o600 });
+	// Written with 0600 above, but an existing file keeps its old mode.
+	await fs.chmod(file, 0o600).catch(() => {});
+}
+
+/**
+ * Log in to get a device of our own.
+ *
+ * Used when the crypto store is new and the configured token belongs to a device the
+ * server already holds keys for. Uploading a second set of keys under that device ID is
+ * exactly the silent-undecryptable failure the identity check exists to prevent, so the
+ * bridge takes its own device instead of colliding with one it does not own.
+ */
+async function login(config: Config): Promise<SavedSession> {
+	const res = await fetch(`${config.homeserver}/_matrix/client/v3/login`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			type: "m.login.password",
+			identifier: { type: "m.id.user", user: config.userName ?? "" },
+			password: config.password,
+			initial_device_display_name: "heddle-opencode",
+		}),
+	});
+	if (!res.ok) {
 		throw new Error(
-			"Matrix access token is not device-scoped (no device_id). E2EE needs a token from " +
-				"a normal login, not one minted by the admin API.",
+			`login failed (HTTP ${res.status}); the bridge needs its own device and could not create one`,
 		);
+	}
+	const body = (await res.json()) as {
+		user_id: string;
+		device_id: string;
+		access_token: string;
+	};
+	return {
+		userId: body.user_id,
+		deviceId: body.device_id,
+		accessToken: body.access_token,
+	};
+}
+
+/**
+ * Does the server already hold device keys for this device?
+ *
+ * A fresh crypto store will mint a new Olm account, so adopting a device the server has
+ * keys for means uploading a second identity under the same device ID — after which
+ * nobody can decrypt what we send. Detecting it up front lets the bridge take its own
+ * device instead of failing.
+ */
+async function deviceKeysDiffer(config: Config, session: SavedSession): Promise<boolean> {
+	const res = await fetch(`${config.homeserver}/_matrix/client/v3/keys/query`, {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${session.accessToken}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ device_keys: { [session.userId]: [session.deviceId] } }),
+	});
+	if (!res.ok) return false;
+	const body = (await res.json()) as {
+		device_keys?: Record<string, Record<string, { keys?: Record<string, string> }>>;
+	};
+	return Boolean(body.device_keys?.[session.userId]?.[session.deviceId]?.keys);
+}
+
+/**
+ * Silence the SDK's logging at its source.
+ *
+ * matrix-js-sdk logs through `loglevel`, and its `methodFactory` looks the console
+ * methods up *at log time* — deliberately, so that hijacking `console` later still
+ * works. That is exactly why patching `console` around a call did not hold: the send
+ * queue reports "pendingEvent status to not_sent" from a timer, long after the await it
+ * was wrapped in had returned, and found the real console waiting.
+ *
+ * `setLevel` rebinds each logger's methods, so it silences the children the SDK created
+ * at import time as well as the root, and `setDefaultLevel` covers any created later.
+ */
+async function silenceSdkLogging(): Promise<void> {
+	if (process.env.HEDDLE_MATRIX_DEBUG === "1") return;
+	const loglevel = (await import("loglevel")).default;
+	const silent = "silent" as const;
+	loglevel.setDefaultLevel(silent);
+	loglevel.setLevel(silent);
+	for (const child of Object.values(loglevel.getLoggers())) {
+		child.setLevel(silent);
+	}
+}
+
+/**
+ * Run `body` with console output suppressed.
+ *
+ * Narrower than it looks, and only for `node-indexeddb`: it writes progress straight to
+ * `console.log` — "oldVersion 11 newVersion 12", one line per database open — with no
+ * flag to turn it off, and it is not a loglevel user, so [`silenceSdkLogging`] does not
+ * reach it. All of its output happens inside the calls wrapped here, unlike the SDK's,
+ * which is why suppression works for this one and not for that one.
+ */
+async function withoutConsoleNoise<T>(body: () => Promise<T>): Promise<T> {
+	if (process.env.HEDDLE_MATRIX_DEBUG === "1") return body();
+	const saved = {
+		log: console.log,
+		info: console.info,
+		debug: console.debug,
+		warn: console.warn,
+	};
+	const sink = () => {};
+	console.log = sink;
+	console.info = sink;
+	console.debug = sink;
+	console.warn = sink;
+	try {
+		return await body();
+	} finally {
+		console.log = saved.log;
+		console.info = saved.info;
+		console.debug = saved.debug;
+		console.warn = saved.warn;
+	}
+}
+
+export async function connect(config: Config): Promise<Transport> {
+	return withoutConsoleNoise(() => connectInner(config));
+}
+
+async function connectInner(config: Config): Promise<Transport> {
+    // Before anything else: the global logger is what the crypto layer and the WASM
+    // tracing bridge reach for, and they are the loudest part of the SDK by far. It is
+    // not re-exported from the package root, hence the deep import.
+    const quiet = quietLogger();
+    await silenceSdkLogging();
+
+    await installIndexedDb(config.storePath);
+
+	// Prefer a session this bridge owns. Falling back to the configured token is what
+	// the first version did throughout, and it works right up until the crypto store is
+	// new while the server already holds keys for that token's device — which is a fresh
+	// checkout, a moved store, or a second machine.
+	let session = await loadSession(config.storePath);
+
+	if (!session) {
+		const whoami = await fetch(`${config.homeserver}/_matrix/client/v3/account/whoami`, {
+			headers: { Authorization: `Bearer ${config.accessToken}` },
+		});
+		if (!whoami.ok) {
+			throw new Error(`Matrix whoami failed (HTTP ${whoami.status}): check MATRIX_ACCESS_TOKEN`);
+		}
+		const me = (await whoami.json()) as { user_id: string; device_id?: string };
+
+		// A device-less token comes from Synapse's admin login API. E2EE is per-device,
+		// so this is the wrong kind of credential rather than a setting to enable later,
+		// and failing here beats failing later as "unable to decrypt" elsewhere.
+		if (!me.device_id) {
+			if (!config.password) {
+				throw new Error(
+					"Matrix access token is not device-scoped (no device_id), and no MATRIX_PASSWORD " +
+						"is set to log in with. E2EE needs a device.",
+				);
+			}
+			session = await login(config);
+			await saveSession(config.storePath, session);
+		} else {
+			const candidate = {
+				userId: me.user_id,
+				deviceId: me.device_id,
+				accessToken: config.accessToken,
+			};
+			// Would adopting this device mean overwriting keys the server already has?
+			// If so, take a device of our own rather than corrupting one in use.
+			const conflict = await deviceKeysDiffer(config, candidate);
+			if (conflict && config.password) {
+				session = await login(config);
+				await saveSession(config.storePath, session);
+			} else {
+				session = candidate;
+				await saveSession(config.storePath, session);
+			}
+		}
 	}
 
 	const client = sdk.createClient({
 		baseUrl: config.homeserver,
-		accessToken: config.accessToken,
-		userId: me.user_id,
-		deviceId: me.device_id,
+		accessToken: session.accessToken,
+		userId: session.userId,
+		deviceId: session.deviceId,
+		logger: quiet,
 	});
 
 	await client.initRustCrypto({
@@ -109,12 +333,12 @@ export async function connect(config: Config): Promise<Transport> {
 	// The store is now load-bearing for a security property, so check rather than trust:
 	// if the keys this process holds are not the keys the server has for this device,
 	// every message sent will be undecryptable to everyone else. Better to refuse.
-	await assertStableIdentity(client, config, me.user_id, me.device_id);
+	await assertStableIdentity(client, config, session.userId, session.deviceId);
 
 	await client.startClient({ initialSyncLimit: 20 });
 	await waitForSync(client);
 
-	return new MatrixTransport(client, me.user_id, me.device_id);
+	return new MatrixTransport(client, session.userId, session.deviceId);
 }
 
 /** Compare the device keys we hold against the ones the server has for this device. */
@@ -213,11 +437,15 @@ class MatrixTransport implements Transport {
 
 	async openThread(roomId: string, title: string): Promise<string> {
 		await this.room(roomId);
-		const res = await this.client.sendEvent(roomId, "m.room.message" as never, {
-			msgtype: "m.text",
-			body: title,
-		} as never);
-		return res.event_id;
+		// Sending logs through a child logger the SDK created at import time, which the
+		// quiet logger installed later does not reach, so it lands on stdout -- the TUI.
+		return withoutConsoleNoise(async () => {
+			const res = await this.client.sendEvent(roomId, "m.room.message" as never, {
+				msgtype: "m.text",
+				body: title,
+			} as never);
+			return res.event_id;
+		});
 	}
 
 	async send(
@@ -233,8 +461,10 @@ class MatrixTransport implements Transport {
 			...this.relatesToThread(threadRoot, null),
 			[CONTENT_KEY]: event,
 		};
-		const res = await this.client.sendEvent(roomId, "m.room.message" as never, content as never);
-		return res.event_id;
+		return withoutConsoleNoise(async () => {
+			const res = await this.client.sendEvent(roomId, "m.room.message" as never, content as never);
+			return res.event_id;
+		});
 	}
 
 	/**
@@ -257,10 +487,40 @@ class MatrixTransport implements Transport {
 			"m.relates_to": { rel_type: "m.replace", event_id: target },
 			[CONTENT_KEY]: event,
 		};
-		await this.client.sendEvent(roomId, "m.room.message" as never, content as never);
+		await withoutConsoleNoise(async () => {
+			await this.client.sendEvent(roomId, "m.room.message" as never, content as never);
+		});
 	}
 
 	async close(): Promise<void> {
 		this.client.stopClient();
+	}
+
+	/**
+	 * Watch for reactions.
+	 *
+	 * Our own are filtered out, or resolving an approval from here would immediately look
+	 * like somebody answering it. Encrypted rooms need the decryption to have happened
+	 * first, hence the `Event.Decrypted` path as well as the live timeline.
+	 */
+	onReaction(handler: (reaction: Reaction) => void): void {
+		const emit = (event: sdk.MatrixEvent) => {
+			if (event.getType() !== "m.reaction") return;
+			if (event.getSender() === this.userId) return;
+			const relates = event.getContent()["m.relates_to"];
+			if (!relates?.event_id || !relates?.key) return;
+			handler({
+				targetId: relates.event_id,
+				key: relates.key,
+				sender: event.getSender() ?? "",
+			});
+		};
+
+		this.client.on(sdk.RoomEvent.Timeline, (event: sdk.MatrixEvent, _room, toStart) => {
+			// Pagination replays history; only live events are answers to a live prompt.
+			if (toStart) return;
+			emit(event);
+		});
+		this.client.on(sdk.MatrixEventEvent.Decrypted, (event: sdk.MatrixEvent) => emit(event));
 	}
 }

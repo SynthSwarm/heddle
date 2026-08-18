@@ -10,6 +10,9 @@
 export interface Config {
 	homeserver: string;
 	accessToken: string;
+	/** Used only to create a device of the bridge's own when the store is new. */
+	password?: string;
+	userName?: string;
 	roomId: string;
 	storePath: string;
 	agentName: string;
@@ -61,6 +64,8 @@ export function load(): Config | null {
 	return {
 		homeserver: homeserver!.replace(/\/+$/, ""),
 		accessToken: accessToken!,
+		password: process.env.MATRIX_PASSWORD,
+		userName: process.env.MATRIX_USER_NAME,
 		roomId: roomId!,
 		storePath: process.env.HEDDLE_MATRIX_STORE ?? `${process.env.HOME}/.local/state/heddle-opencode/`,
 		agentName: process.env.HEDDLE_AGENT_NAME ?? "opencode",

@@ -13,8 +13,8 @@ use heddle_layout::{
     ORPHAN_WORKSPACE,
 };
 use heddle_matrix::{
-    Command, Entry, EntryKind, MemberSummary, RecoveryState, RoomSummary, Shield, SyncState,
-    ThreadSummary, Verification, View, WorkerEvent,
+    Command, Entry, EntryKind, MemberSummary, Membership, RecoveryState, RoomSummary, Shield,
+    SyncState, ThreadSummary, Verification, View, WorkerEvent,
 };
 use heddle_render::{Options, Overrides, Theme};
 use ratatui::layout::Rect;
@@ -166,8 +166,26 @@ pub enum Modal {
     /// The command palette. A search box too.
     Palette(Palette),
     Threads(ThreadPicker),
+    /// A yes/no question about something that cannot be undone from heddle.
+    ///
+    /// Only leaving a room uses this. It exists because the way back into a room is an
+    /// invitation from somebody else — heddle has no directory search and no
+    /// join-by-alias — so a mistyped `X` is not a mistake the user can correct here.
+    Confirm(Confirm),
     /// The `<prefix> ?` key overlay.
     Help,
+}
+
+/// A pending yes/no question. See [`Modal::Confirm`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirm {
+    pub prompt: String,
+    pub action: ConfirmAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmAction {
+    LeaveRoom { room_id: String },
 }
 
 /// The recovery panel.
@@ -1136,11 +1154,13 @@ impl App {
                 Some(tab) => {
                     tab.title.clone_from(&room.display_name);
                     tab.is_encrypted = room.is_encrypted;
+                    tab.is_invite = room.membership == Membership::Invited;
                     tab.unread = Unread::new(room.notification_count, room.highlight_count);
                 }
                 None => {
                     let mut tab = Tab::new(&room.room_id, &room.display_name);
                     tab.is_encrypted = room.is_encrypted;
+                    tab.is_invite = room.membership == Membership::Invited;
                     tab.unread = Unread::new(room.notification_count, room.highlight_count);
 
                     // No saved entry, an unreadable one, or one that disagrees with
@@ -1166,6 +1186,22 @@ impl App {
                     workspace.tabs.push(tab);
                     self.layout_dirty = true;
                 }
+            }
+        }
+
+        // Rooms that have gone. `WorkerEvent::Rooms` is a full snapshot rather than a
+        // delta -- `collect_rooms` rebuilds it from the whole client each time -- so a
+        // room absent from it has been left, and its tab has to go with it. Without this
+        // the tab survives, pointing at a room the server will no longer serve.
+        let live: HashSet<&str> = rooms
+            .iter()
+            .filter(|r| !r.is_space)
+            .map(|r| r.room_id.as_str())
+            .collect();
+        for workspace in &mut self.workspaces.items {
+            for room_id in workspace.retain_rooms(|id| live.contains(id)) {
+                self.tilings.remove(&room_id);
+                self.layout_dirty = true;
             }
         }
 
@@ -1444,6 +1480,30 @@ impl App {
                 Action::Cancel | Action::ToggleHelp => self.close_modal(),
                 _ => {}
             },
+            Some(Modal::Confirm(confirm)) => {
+                // `y`/`n` rather than Accept/Cancel alone: the approval prompt already
+                // teaches those two keys for an irreversible yes/no, and a confirmation
+                // that answered to Enter would be taken by a stray return.
+                let decided = match action {
+                    Action::Approve => Some(true),
+                    Action::Deny | Action::Cancel => Some(false),
+                    _ => None,
+                };
+                match decided {
+                    Some(true) => {
+                        let action = confirm.action.clone();
+                        self.close_modal();
+                        match action {
+                            ConfirmAction::LeaveRoom { room_id } => {
+                                self.status = Some("leaving…".into());
+                                self.queue(Command::Leave { room_id });
+                            }
+                        }
+                    }
+                    Some(false) => self.close_modal(),
+                    None => {}
+                }
+            }
             None => {}
         }
     }
@@ -1671,6 +1731,34 @@ impl App {
                 // there are enough Spaces for this to earn its keep.
                 self.status = Some("fuzzy jump is not implemented yet".into());
             }
+            Action::JoinRoom => {
+                match self.workspaces.focused().and_then(|w| w.focused_tab()) {
+                    Some(tab) if tab.is_invite => {
+                        let room_id = tab.room_id.clone();
+                        self.status = Some("accepting the invitation…".into());
+                        self.queue(Command::Join { room_id });
+                    }
+                    // Joining a room already joined is not an error worth a message about
+                    // failure, but silence would read as the key not being bound.
+                    Some(_) => self.status = Some("you are already in this room".into()),
+                    None => self.status = Some("no room focused".into()),
+                }
+            }
+
+            Action::LeaveRoom => match self.workspaces.focused().and_then(|w| w.focused_tab()) {
+                Some(tab) => {
+                    let verb = if tab.is_invite { "Decline" } else { "Leave" };
+                    let prompt =
+                        format!("{verb} {}? This cannot be undone from heddle.", tab.title);
+                    let room_id = tab.room_id.clone();
+                    self.open_modal(Modal::Confirm(Confirm {
+                        prompt,
+                        action: ConfirmAction::LeaveRoom { room_id },
+                    }));
+                }
+                None => self.status = Some("no room focused".into()),
+            },
+
             Action::CommandPalette => {
                 self.open_modal(Modal::Palette(Palette::new()));
                 // A search box, so keys must arrive as characters.
@@ -2592,6 +2680,7 @@ mod tests {
             parents: Vec::new(),
             is_direct: false,
             is_encrypted: false,
+            membership: Membership::Joined,
             notification_count: 0,
             highlight_count: 0,
         }]));
@@ -2622,6 +2711,7 @@ mod tests {
             parents: Vec::new(),
             is_direct: false,
             is_encrypted: false,
+            membership: Membership::Joined,
             notification_count: 0,
             highlight_count: 0,
         }]));
@@ -2856,6 +2946,7 @@ mod tests {
             parents: Vec::new(),
             is_direct: false,
             is_encrypted: false,
+            membership: Membership::Joined,
             notification_count: 0,
             highlight_count: 0,
         }]));
@@ -2874,6 +2965,7 @@ mod tests {
             parents: Vec::new(),
             is_direct: false,
             is_encrypted: true,
+            membership: Membership::Joined,
             notification_count: 3,
             highlight_count: 1,
         };
@@ -3541,6 +3633,15 @@ mod tests {
 
     // ------------------------------------------------------------ layout persistence
 
+    /// Focus the tab for `room_id`, wherever it landed.
+    fn focus_room(app: &mut App, room_id: &str) {
+        for workspace in &mut app.workspaces.items {
+            if let Some(index) = workspace.tabs.iter().position(|t| t.room_id == room_id) {
+                workspace.focus_tab(index);
+            }
+        }
+    }
+
     fn summary(room_id: &str, name: &str) -> RoomSummary {
         RoomSummary {
             room_id: room_id.into(),
@@ -3549,9 +3650,104 @@ mod tests {
             parents: Vec::new(),
             is_direct: false,
             is_encrypted: false,
+            membership: Membership::Joined,
             notification_count: 0,
             highlight_count: 0,
         }
+    }
+
+    #[test]
+    fn an_invitation_is_marked_on_its_tab() {
+        let mut app = app();
+        let mut invited = summary("!invite:x", "#somewhere");
+        invited.membership = Membership::Invited;
+        app.apply_worker_event(WorkerEvent::Rooms(vec![invited]));
+
+        let tab = app
+            .workspaces
+            .focused()
+            .expect("workspace")
+            .tab_for_room("!invite:x")
+            .expect("tab");
+        assert!(tab.is_invite, "an invitation must be distinguishable");
+    }
+
+    #[test]
+    fn accepting_an_invitation_joins_it() {
+        let mut app = app();
+        let mut invited = summary("!invite:x", "#somewhere");
+        invited.membership = Membership::Invited;
+        app.apply_worker_event(WorkerEvent::Rooms(vec![invited]));
+        focus_room(&mut app, "!invite:x");
+        let _ = app.take_commands();
+
+        app.apply_action(Action::JoinRoom);
+        assert!(
+            matches!(app.take_commands().as_slice(), [Command::Join { room_id }] if room_id == "!invite:x")
+        );
+    }
+
+    #[test]
+    fn joining_a_room_you_are_in_says_so_rather_than_asking_the_server() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Rooms(vec![summary("!r2:x", "#joined")]));
+        focus_room(&mut app, "!r2:x");
+        let _ = app.take_commands();
+
+        app.apply_action(Action::JoinRoom);
+        assert!(app.take_commands().is_empty(), "no request to make");
+        assert!(app
+            .status
+            .as_deref()
+            .unwrap_or_default()
+            .contains("already"));
+    }
+
+    #[test]
+    fn leaving_asks_before_it_acts() {
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Rooms(vec![summary("!r2:x", "#joined")]));
+        focus_room(&mut app, "!r2:x");
+        let _ = app.take_commands();
+
+        // The way back into a room is an invitation from somebody else, so the keypress
+        // alone must not be enough.
+        app.apply_action(Action::LeaveRoom);
+        assert!(
+            app.take_commands().is_empty(),
+            "nothing sent before consent"
+        );
+        assert!(matches!(app.modal, Some(Modal::Confirm(_))));
+
+        app.apply_action(Action::Deny);
+        assert!(app.modal.is_none(), "declining closes the prompt");
+        assert!(app.take_commands().is_empty(), "declining sends nothing");
+
+        app.apply_action(Action::LeaveRoom);
+        app.apply_action(Action::Approve);
+        assert!(
+            matches!(app.take_commands().as_slice(), [Command::Leave { room_id }] if room_id == "!r2:x")
+        );
+    }
+
+    #[test]
+    fn a_room_that_has_gone_takes_its_tab_with_it() {
+        // `WorkerEvent::Rooms` is a full snapshot, so a room missing from it has been
+        // left. Before leaving existed nothing could exercise this, and the tab survived
+        // pointing at a room the server would no longer serve.
+        let mut app = app();
+        app.apply_worker_event(WorkerEvent::Rooms(vec![
+            summary("!keep:x", "#keep"),
+            summary("!gone:x", "#gone"),
+        ]));
+        assert_eq!(app.workspaces.focused().expect("w").tabs.len(), 2);
+
+        app.apply_worker_event(WorkerEvent::Rooms(vec![summary("!keep:x", "#keep")]));
+
+        let workspace = app.workspaces.focused().expect("w");
+        assert_eq!(workspace.tabs.len(), 1);
+        assert_eq!(workspace.focused_tab().expect("tab").room_id, "!keep:x");
+        assert!(!app.tilings.contains_key("!gone:x"), "its tiling went too");
     }
 
     /// An app whose room has been split into a room pane and a thread pane.
@@ -3678,7 +3874,14 @@ mod tests {
         fresh.apply_action(Action::NextTab);
         let chosen = fresh.focused_view();
 
-        fresh.apply_worker_event(WorkerEvent::Rooms(vec![summary("!b:x", "smith")]));
+        // The later list carries both rooms, because `WorkerEvent::Rooms` is a complete
+        // snapshot rather than a delta: the client accumulates rooms as it syncs and
+        // re-sends everything it knows. A batch that dropped `!a:x` would mean it had
+        // been left, and its tab would rightly go with it.
+        fresh.apply_worker_event(WorkerEvent::Rooms(vec![
+            summary("!a:x", "Commons"),
+            summary("!b:x", "smith"),
+        ]));
         assert_eq!(
             fresh.focused_view(),
             chosen,
@@ -3742,6 +3945,7 @@ mod tests {
                 parents: Vec::new(),
                 is_direct: false,
                 is_encrypted: false,
+                membership: Membership::Joined,
                 notification_count: 0,
                 highlight_count: 0,
             },
@@ -3752,6 +3956,7 @@ mod tests {
                 parents: Vec::new(),
                 is_direct: false,
                 is_encrypted: true,
+                membership: Membership::Joined,
                 notification_count: 0,
                 highlight_count: 0,
             },
@@ -3992,6 +4197,7 @@ mod tests {
                 parents: Vec::new(),
                 is_direct: false,
                 is_encrypted: false,
+                membership: Membership::Joined,
                 notification_count: 0,
                 highlight_count: 0,
             },
@@ -4002,6 +4208,7 @@ mod tests {
                 parents: vec!["!space:x".into()],
                 is_direct: false,
                 is_encrypted: false,
+                membership: Membership::Joined,
                 notification_count: 0,
                 highlight_count: 0,
             },
@@ -4041,6 +4248,7 @@ mod tests {
                 parents: Vec::new(),
                 is_direct: false,
                 is_encrypted: false,
+                membership: Membership::Joined,
                 notification_count: 0,
                 highlight_count: 0,
             },
@@ -4051,6 +4259,7 @@ mod tests {
                 parents: vec!["!space:x".into()],
                 is_direct: false,
                 is_encrypted: false,
+                membership: Membership::Joined,
                 notification_count: 0,
                 highlight_count: 0,
             },
@@ -4061,6 +4270,7 @@ mod tests {
                 parents: Vec::new(),
                 is_direct: false,
                 is_encrypted: false,
+                membership: Membership::Joined,
                 notification_count: 0,
                 highlight_count: 0,
             },
@@ -5198,6 +5408,7 @@ mod tests {
             parents: Vec::new(),
             is_direct: false,
             is_encrypted: false,
+            membership: Membership::Joined,
             notification_count: 0,
             highlight_count: 0,
         }]));

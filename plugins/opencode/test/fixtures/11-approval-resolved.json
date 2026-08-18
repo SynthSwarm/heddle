@@ -1,0 +1,13 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 6,
+	"kind": "approval.resolved",
+	"approval": {
+		"id": "perm_fixture",
+		"kind": "bash",
+		"choice": "approve",
+		"by": "@you:matrix.example.org"
+	}
+}

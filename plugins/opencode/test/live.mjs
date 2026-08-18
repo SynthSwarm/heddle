@@ -22,7 +22,12 @@ const log = (m) => console.log(`[heddle] ${m}`);
 const transport = await connect(config);
 log(`connected as ${transport.userId} (${transport.deviceId})`);
 
-const bridge = new Bridge(transport, config, log);
+// A tiny indirection so the live script can install its own responder after
+// construction, which is when it knows what to print.
+const bridgeRespond = { handler: async () => {} };
+const bridge = new Bridge(transport, config, log, {
+	respond: (permission, response) => bridgeRespond.handler(permission, response),
+});
 
 const SESSION = `live-${Date.now().toString(36)}`;
 const MESSAGE = `msg-${Date.now().toString(36)}`;
@@ -114,6 +119,26 @@ await bridge.onPart(
 		},
 	}),
 );
+
+console.log("asking for approval — answer it in heddle with y or n");
+let answered = null;
+bridgeRespond.handler = async (permission, response) => {
+	answered = { title: permission.title, response };
+	console.log(`  opencode was told: ${response}`);
+};
+await bridge.onPermission({
+	id: `perm-${Date.now().toString(36)}`,
+	type: "bash",
+	sessionID: SESSION,
+	messageID: MESSAGE,
+	title: "rm -rf ./target",
+	metadata: { command: "rm -rf ./target", cwd: process.cwd() },
+});
+
+// Wait for a human. This is the point of the exercise.
+const deadline = Date.now() + 120_000;
+while (!answered && Date.now() < deadline) await wait(1000);
+if (!answered) console.log("  nobody answered within two minutes");
 
 console.log("completing the turn (usage + message.stop)");
 await bridge.onMessageComplete(SESSION, MESSAGE, {

@@ -1,0 +1,18 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 6,
+	"kind": "approval.request",
+	"approval": {
+		"id": "perm_fixture",
+		"kind": "bash",
+		"command": "rm -rf ./target",
+		"cwd": "/home/you/heddle",
+		"reactions": {
+			"✅": "approve",
+			"❌": "deny",
+			"♾️": "always"
+		}
+	}
+}

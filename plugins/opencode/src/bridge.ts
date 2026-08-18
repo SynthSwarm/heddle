@@ -24,6 +24,7 @@
 import type { Transport } from "./matrix.js";
 import type { Config } from "./config.js";
 import {
+	APPROVAL_REACTIONS,
 	SCHEMA_VERSION,
 	type AgentEvent,
 	type Kind,
@@ -32,6 +33,19 @@ import {
 	previewOf,
 	truncate,
 } from "./protocol.js";
+
+/** How opencode is told what the human decided. */
+export type PermissionResponse = "once" | "always" | "reject";
+
+/** A permission request as opencode reports it. */
+export interface Permission {
+	id: string;
+	type: string;
+	sessionID: string;
+	messageID?: string;
+	title: string;
+	metadata?: Record<string, unknown>;
+}
 
 const B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -113,11 +127,31 @@ export interface BridgeOptions {
 	 * wolf on every run.
 	 */
 	newTurnId?: () => string;
+	/**
+	 * Tell opencode what the human decided.
+	 *
+	 * Injected rather than reached for, so the approval path can be exercised without an
+	 * opencode server: this is the one part of the bridge that talks back.
+	 */
+	respond?: (permission: Permission, response: PermissionResponse) => Promise<void>;
+}
+
+/** An approval waiting on a human, keyed by the Matrix event carrying it. */
+interface PendingApproval {
+	permission: Permission;
+	session: SessionState;
+	turn: Turn;
+	eventId: string;
+	seq: number;
+	body: string;
 }
 
 export class Bridge {
 	private readonly sessions = new Map<string, SessionState>();
 	private readonly newTurnId: () => string;
+	private readonly respond: (p: Permission, r: PermissionResponse) => Promise<void>;
+	/** Approvals awaiting an answer, keyed by the Matrix event that asked. */
+	private readonly pending = new Map<string, PendingApproval>();
 
 	constructor(
 		private readonly transport: Transport,
@@ -126,6 +160,10 @@ export class Bridge {
 		options: BridgeOptions = {},
 	) {
 		this.newTurnId = options.newTurnId ?? ulid;
+		this.respond = options.respond ?? (async () => {});
+		this.transport.onReaction((reaction) => {
+			void this.onReaction(reaction.targetId, reaction.key, reaction.sender);
+		});
 	}
 
 	private session(sessionID: string): SessionState {
@@ -335,6 +373,109 @@ export class Bridge {
 		}
 	}
 
+	// ── approvals ───────────────────────────────────────────────────────────────
+
+	/**
+	 * A tool wants permission. Ask, in the pane the work is happening in.
+	 *
+	 * The turn is the one the permission belongs to, so the prompt lands in the thread
+	 * the user is already watching rather than opening a pane of its own.
+	 */
+	async onPermission(permission: Permission): Promise<void> {
+		if ([...this.pending.values()].some((p) => p.permission.id === permission.id)) return;
+
+		const s = this.session(permission.sessionID);
+		const t = this.turn(s, permission.messageID ?? `permission-${permission.id}`);
+		const root = await this.thread(s, this.titleFor(s));
+
+		const command =
+			typeof permission.metadata?.command === "string"
+				? (permission.metadata.command as string)
+				: undefined;
+		const cwd =
+			typeof permission.metadata?.cwd === "string" ? (permission.metadata.cwd as string) : undefined;
+
+		const seq = t.nextSeq++;
+		const ev = this.envelope(s, t, "approval.request", seq);
+		ev.approval = {
+			id: permission.id,
+			kind: permission.type,
+			command: command ?? permission.title,
+			cwd,
+			// opencode permissions do not expire, so no countdown is advertised. Sending
+			// an invented deadline would put a timer on screen that means nothing.
+			reactions: APPROVAL_REACTIONS,
+		};
+		const body = `⚠ ${permission.title} — approve?`;
+		const eventId = await this.transport.send(this.config.roomId, root, body, ev);
+		this.pending.set(eventId, { permission, session: s, turn: t, eventId, seq, body });
+		this.log(`approval requested: ${permission.title}`);
+	}
+
+	/** opencode resolved it elsewhere -- in the TUI, or by another client. */
+	async onPermissionReplied(permissionId: string): Promise<void> {
+		const entry = [...this.pending.entries()].find(([, p]) => p.permission.id === permissionId);
+		if (!entry) return;
+		const [eventId, pending] = entry;
+		this.pending.delete(eventId);
+		await this.resolve(pending, "approve", undefined, "answered elsewhere");
+	}
+
+	/**
+	 * Somebody reacted. If it answers a live approval, that is the decision.
+	 *
+	 * Unknown emoji are ignored rather than treated as a denial: a thumbs-up on an
+	 * approval prompt is a comment, and guessing what it meant would run a command.
+	 */
+	private async onReaction(targetId: string, key: string, sender: string): Promise<void> {
+		const pending = this.pending.get(targetId);
+		if (!pending) return;
+
+		const choice = APPROVAL_REACTIONS[key] ?? APPROVAL_REACTIONS[key.replace(/\uFE0F/g, "")];
+		if (!choice) return;
+
+		const response: PermissionResponse =
+			choice === "approve" ? "once" : choice === "always" ? "always" : "reject";
+
+		this.pending.delete(targetId);
+		try {
+			await this.respond(pending.permission, response);
+		} catch (e) {
+			this.log(`could not pass the answer to opencode: ${(e as Error).message}`);
+			// Put it back: the tool is still blocked, and a prompt that silently stops
+			// accepting answers is worse than one answered twice.
+			this.pending.set(targetId, pending);
+			return;
+		}
+		await this.resolve(pending, choice === "deny" ? "deny" : "approve", sender, response);
+	}
+
+	/** Edit the request into its outcome, so the card stops asking. */
+	private async resolve(
+		pending: PendingApproval,
+		choice: "approve" | "deny",
+		by: string | undefined,
+		detail: string,
+	): Promise<void> {
+		const { session: s, turn: t } = pending;
+		// Same seq as the request, because this is that event's resolved edit rather than
+		// a second event -- the same rule tool results follow.
+		const ev = this.envelope(s, t, "approval.resolved", pending.seq);
+		ev.approval = {
+			id: pending.permission.id,
+			kind: pending.permission.type,
+			choice,
+			by,
+		};
+		const glyph = choice === "approve" ? "✓" : "✗";
+		await this.transport.edit(
+			this.config.roomId,
+			pending.eventId,
+			`${glyph} ${pending.permission.title} — ${detail}`,
+			ev,
+		);
+	}
+
 	// ── lifecycle ───────────────────────────────────────────────────────────────
 
 	private titles = new Map<string, string>();
@@ -405,7 +546,11 @@ export class Bridge {
 			ev.usage = {
 				input_tokens: info.tokens?.input,
 				output_tokens: info.tokens?.output,
-				cost_usd: info.cost,
+				// Integer millionths; see Usage.cost_micro_usd for why this cannot be a
+				// float. Rounded rather than truncated so a sub-millionth cost is not
+				// silently reported as free.
+				cost_micro_usd:
+					info.cost === undefined ? undefined : Math.round(info.cost * 1_000_000),
 			};
 			// heddle renders this from the structure, but the body is what every other
 			// Matrix client shows. An empty notice reads as a blank message in Element.
