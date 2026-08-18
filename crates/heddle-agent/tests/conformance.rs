@@ -201,7 +201,10 @@ fn the_resolved_view_produces_a_clean_session() {
     let usage = turn.usage.as_ref().expect("usage");
     assert_eq!(usage.input_tokens, 18422);
     assert_eq!(usage.output_tokens, 970);
-    assert_eq!(usage.cost_usd, Some(0.0412));
+    // Cost rides as an integer number of millionths: Matrix canonical JSON has no
+    // floats, and Synapse rejects an event carrying one.
+    assert_eq!(usage.cost_micro_usd, Some(41_200));
+    assert_eq!(usage.cost(), Some(0.0412));
 }
 
 /// An unanswered approval must block the session.

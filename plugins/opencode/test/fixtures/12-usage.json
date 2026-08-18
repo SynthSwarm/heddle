@@ -7,6 +7,6 @@
 	"usage": {
 		"input_tokens": 18422,
 		"output_tokens": 970,
-		"cost_usd": 0.0412
+		"cost_micro_usd": 41200
 	}
 }

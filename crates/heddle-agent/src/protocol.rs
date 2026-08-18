@@ -278,8 +278,27 @@ pub struct Usage {
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    /// Cost in millionths of a dollar.
+    ///
+    /// An integer because Matrix's canonical JSON has no floats, and Synapse enforces
+    /// it: an event carrying `0.0412` is rejected outright with `M_BAD_JSON`, "Bad JSON
+    /// value: float". That went unnoticed for as long as it did because an encrypted
+    /// room hides the content from the server, so the same event that a homeserver
+    /// accepts in one room is refused in the next.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_micro_usd: Option<u64>,
+    /// Deprecated: cost as a float. Read for compatibility, never written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+}
+
+impl Usage {
+    /// Cost in dollars, from whichever field carried it.
+    pub fn cost(&self) -> Option<f64> {
+        self.cost_micro_usd
+            .map(|micro| micro as f64 / 1_000_000.0)
+            .or(self.cost_usd)
+    }
 }
 
 /// Why an event could not be decoded.

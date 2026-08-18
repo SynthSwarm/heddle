@@ -52,7 +52,15 @@ export interface Tool {
 export interface Usage {
 	input_tokens?: number;
 	output_tokens?: number;
-	cost_usd?: number;
+	/**
+	 * Cost in millionths of a dollar, as an integer.
+	 *
+	 * Matrix's canonical JSON has no floating point, and Synapse enforces it: sending
+	 * `cost_usd: 0.0412` is rejected with `M_BAD_JSON`, "Bad JSON value: float". It is
+	 * an easy one to miss, because an encrypted room hides the content from the server
+	 * and accepts the very same event.
+	 */
+	cost_micro_usd?: number;
 }
 
 export interface Notice {

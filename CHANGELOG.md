@@ -31,6 +31,11 @@ format are possible in any 0.x release, and will be listed here.
 
 ### Fixed
 
+- Token cost rides as an integer. `usage.cost_usd` was a float, and Matrix's canonical
+  JSON has none: Synapse refuses an event carrying one with `M_BAD_JSON`, "Bad JSON
+  value: float". It survived this long because an encrypted room hides the content from
+  the server, so the identical event that one room accepted the next rejected. Cost is
+  now `cost_micro_usd`, millionths of a dollar; the old field is still read.
 - A tool call and its result no longer render as two cards. The transcript draws one card
   per Matrix event, so an emitter sending the result as a separate event left a card
   wearing the arguments and stuck on `running` beside another wearing the outcome. A

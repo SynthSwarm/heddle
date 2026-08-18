@@ -176,7 +176,7 @@ accepted on read, since the Hermes patch in §3.3 was specified against it.
 | `approval.request` | `approval` | `{ id, kind: "exec", command, cwd, expires_at, reactions }` |
 | `approval.resolved` | `approval` | `{ id, choice: "approve"\|"deny"\|"timeout", by }` |
 | `model.picker` | `picker` | `{ id, options: [{key, label}], expires_at }` |
-| `usage` | `usage` | `{ input_tokens, output_tokens, cost_usd }` |
+| `usage` | `usage` | `{ input_tokens, output_tokens, cost_micro_usd }`. Cost is an **integer** number of millionths of a dollar: Matrix canonical JSON has no floating point and Synapse rejects an event carrying one with `M_BAD_JSON`. `cost_usd` is still read for compatibility and never written. |
 
 `tool.result.mime` drives rendering:
 

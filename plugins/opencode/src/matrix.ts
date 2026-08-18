@@ -204,13 +204,36 @@ async function deviceKeysDiffer(config: Config, session: SavedSession): Promise<
 }
 
 /**
+ * Silence the SDK's logging at its source.
+ *
+ * matrix-js-sdk logs through `loglevel`, and its `methodFactory` looks the console
+ * methods up *at log time* — deliberately, so that hijacking `console` later still
+ * works. That is exactly why patching `console` around a call did not hold: the send
+ * queue reports "pendingEvent status to not_sent" from a timer, long after the await it
+ * was wrapped in had returned, and found the real console waiting.
+ *
+ * `setLevel` rebinds each logger's methods, so it silences the children the SDK created
+ * at import time as well as the root, and `setDefaultLevel` covers any created later.
+ */
+async function silenceSdkLogging(): Promise<void> {
+	if (process.env.HEDDLE_MATRIX_DEBUG === "1") return;
+	const loglevel = (await import("loglevel")).default;
+	const silent = "silent" as const;
+	loglevel.setDefaultLevel(silent);
+	loglevel.setLevel(silent);
+	for (const child of Object.values(loglevel.getLoggers())) {
+		child.setLevel(silent);
+	}
+}
+
+/**
  * Run `body` with console output suppressed.
  *
- * `node-indexeddb` writes progress straight to `console.log` — "oldVersion 11 newVersion
- * 12", one line per database open — with no flag to turn it off. Inside an opencode
- * plugin that console is the user's TUI. Patching a global is unpleasant, so it is done
- * for the narrowest window that works, always restored, and skipped entirely when
- * HEDDLE_MATRIX_DEBUG is set.
+ * Narrower than it looks, and only for `node-indexeddb`: it writes progress straight to
+ * `console.log` — "oldVersion 11 newVersion 12", one line per database open — with no
+ * flag to turn it off, and it is not a loglevel user, so [`silenceSdkLogging`] does not
+ * reach it. All of its output happens inside the calls wrapped here, unlike the SDK's,
+ * which is why suppression works for this one and not for that one.
  */
 async function withoutConsoleNoise<T>(body: () => Promise<T>): Promise<T> {
 	if (process.env.HEDDLE_MATRIX_DEBUG === "1") return body();
@@ -244,11 +267,7 @@ async function connectInner(config: Config): Promise<Transport> {
     // tracing bridge reach for, and they are the loudest part of the SDK by far. It is
     // not re-exported from the package root, hence the deep import.
     const quiet = quietLogger();
-    const { logger: globalLogger } = await import("matrix-js-sdk/lib/logger.js");
-    const quietRecord = quiet as unknown as Record<string, unknown>;
-    for (const key of ["trace", "debug", "info", "warn", "error"] as const) {
-        (globalLogger as unknown as Record<string, unknown>)[key] = quietRecord[key];
-    }
+    await silenceSdkLogging();
 
     await installIndexedDb(config.storePath);
 

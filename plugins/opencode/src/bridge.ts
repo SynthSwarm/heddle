@@ -546,7 +546,11 @@ export class Bridge {
 			ev.usage = {
 				input_tokens: info.tokens?.input,
 				output_tokens: info.tokens?.output,
-				cost_usd: info.cost,
+				// Integer millionths; see Usage.cost_micro_usd for why this cannot be a
+				// float. Rounded rather than truncated so a sub-millionth cost is not
+				// silently reported as free.
+				cost_micro_usd:
+					info.cost === undefined ? undefined : Math.round(info.cost * 1_000_000),
 			};
 			// heddle renders this from the structure, but the body is what every other
 			// Matrix client shows. An empty notice reads as a blank message in Element.
