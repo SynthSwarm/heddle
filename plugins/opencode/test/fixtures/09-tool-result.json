@@ -1,0 +1,20 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 5,
+	"kind": "tool.result",
+	"tool": {
+		"name": "webfetch",
+		"index": 2,
+		"args": {
+			"url": "https://example.org/versions"
+		},
+		"preview": "https://example.org/versions",
+		"status": "ok",
+		"duration_ms": 310,
+		"mime": "application/json",
+		"body": "{\"versions\":[\"v1.11\",\"v1.12\"],\"unstable\":{\"org.matrix.simplified_msc3575\":true}}",
+		"truncated": false
+	}
+}

@@ -11,3 +11,25 @@
 # HEDDLE_CAPTURE output. Decrypted message bodies in the clear: never committed, and
 # better written outside the repository altogether.
 *.jsonl
+
+# Credentials for the agent's Matrix account, read by the opencode plugin from the
+# environment. Untracked by luck until now: the file already existed while `git add -A`
+# was being run against this repository, and the only reason it was not published is
+# that it happened to be created afterwards. Recovering from that mistake means rotating
+# the account, not deleting a file, so it is worth a line here.
+.env
+.env.*
+!.env.example
+
+# Node dependencies for the opencode plugin. Restored with `npm install`.
+node_modules/
+# Spike crypto store: device keys, not to be committed.
+plugins/opencode/spike/store/
+# Spike runtime state: crypto store (device keys), IndexedDB backing, room bookkeeping.
+plugins/opencode/spike/indexeddb/
+plugins/opencode/spike/encrypted-room.txt
+plugins/opencode/spike/last-run.json
+# Built plugin output and its local crypto store.
+plugins/opencode/dist/
+plugins/opencode/.store/
+plugins/opencode/indexeddb/

@@ -1,0 +1,16 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 5,
+	"kind": "tool.call",
+	"tool": {
+		"name": "webfetch",
+		"index": 2,
+		"args": {
+			"url": "https://example.org/versions"
+		},
+		"preview": "https://example.org/versions",
+		"status": "running"
+	}
+}

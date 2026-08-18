@@ -229,9 +229,31 @@ always beats a lossy one from the first.
 The textual path is emoji-chrome matching against the shapes an agent declares, plus
 fenced code block extraction. It yields tool cards without results, exit codes or
 durations, because none of those are on the wire. It is a compatibility path, never the
-primary one, and panes fed by it show a dim `~` marker. Until an agent emits the
-extension it is also the *only* path, which is the honest position for v1: heddle works
-with agents exactly as they are, and works better with any that adopt §3.2.
+primary one, and panes fed by it show a dim `~` marker.
+
+### 3.5 The opencode plugin
+
+`plugins/opencode` is the first producer of §3.2, and the reason the paragraph above no
+longer ends "until an agent emits the extension it is also the *only* path". It is an
+[opencode](https://opencode.ai) plugin that mirrors a live coding-agent session into a
+Matrix thread as `dev.heddle.agent.v1`, so a pane fed by it is lossless and unmarked.
+
+It lives in this repository rather than beside it for one reason: the schema and its only
+producer can then change in a single commit, and the fixtures under
+`plugins/opencode/test/fixtures` are recordings of the emitter that
+`crates/heddle-agent/tests/conformance.rs` reads back. Drift between the two halves is a
+failing build rather than a `~` on somebody's screen.
+
+Two rules of §3.2 are easy to satisfy incorrectly, and both were, before the conformance
+test existed:
+
+- **One `seq` per Matrix event, not per frame.** A client reads the edit chain resolved,
+  so a `seq` spent on an intermediate frame is never observed and reads as a gap — the
+  `!` marker — to anyone loading the room fresh.
+- **A tool call and its result are one event, edited.** The transcript renders one card
+  per event, so sending the result as a second event leaves a card stuck on `running`
+  beside its own outcome. A result therefore arrives at a `seq` already folded, which the
+  store admits specifically for this case.
 
 The two pane markers say different things and stack worst-first, `!~`:
 

@@ -1,0 +1,16 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 4,
+	"kind": "tool.call",
+	"tool": {
+		"name": "bash",
+		"index": 1,
+		"args": {
+			"command": "cargo test --workspace"
+		},
+		"preview": "cargo test --workspace",
+		"status": "running"
+	}
+}
