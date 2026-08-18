@@ -1,0 +1,8 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 7,
+	"kind": "message.stop",
+	"final": true
+}

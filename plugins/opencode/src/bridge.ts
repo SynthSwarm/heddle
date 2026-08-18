@@ -103,14 +103,30 @@ type Part = {
 	};
 };
 
+/** Hooks that exist so fixtures can be generated deterministically. */
+export interface BridgeOptions {
+	/**
+	 * Override the turn identifier.
+	 *
+	 * The real one is time-and-random, which is correct on the wire and useless in a
+	 * committed fixture: every regeneration would differ and the drift check would cry
+	 * wolf on every run.
+	 */
+	newTurnId?: () => string;
+}
+
 export class Bridge {
 	private readonly sessions = new Map<string, SessionState>();
+	private readonly newTurnId: () => string;
 
 	constructor(
 		private readonly transport: Transport,
 		private readonly config: Config,
 		private readonly log: (msg: string) => void,
-	) {}
+		options: BridgeOptions = {},
+	) {
+		this.newTurnId = options.newTurnId ?? ulid;
+	}
 
 	private session(sessionID: string): SessionState {
 		let s = this.sessions.get(sessionID);
@@ -147,7 +163,7 @@ export class Bridge {
 		let t = s.turns.get(messageID);
 		if (!t) {
 			t = {
-				id: ulid(),
+				id: this.newTurnId(),
 				nextSeq: 1,
 				agentSent: false,
 				textEventId: null,

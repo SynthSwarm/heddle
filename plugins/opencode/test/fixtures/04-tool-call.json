@@ -1,0 +1,16 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 3,
+	"kind": "tool.call",
+	"tool": {
+		"name": "edit",
+		"index": 0,
+		"args": {
+			"filePath": "crates/heddle-agent/src/store.rs"
+		},
+		"preview": "crates/heddle-agent/src/store.rs",
+		"status": "running"
+	}
+}

@@ -1,0 +1,107 @@
+{
+	"description": "Recorded from the heddle-opencode emitter. Regenerate with `npm run fixtures`.",
+	"frames": [
+		{
+			"file": "00-message-delta.json",
+			"op": "send",
+			"kind": "message.delta",
+			"seq": 1
+		},
+		{
+			"file": "01-message-delta.json",
+			"op": "edit",
+			"kind": "message.delta",
+			"seq": 1
+		},
+		{
+			"file": "02-message-delta.json",
+			"op": "edit",
+			"kind": "message.delta",
+			"seq": 1
+		},
+		{
+			"file": "03-commentary.json",
+			"op": "send",
+			"kind": "commentary",
+			"seq": 2
+		},
+		{
+			"file": "04-tool-call.json",
+			"op": "send",
+			"kind": "tool.call",
+			"seq": 3
+		},
+		{
+			"file": "05-tool-result.json",
+			"op": "edit",
+			"kind": "tool.result",
+			"seq": 3
+		},
+		{
+			"file": "06-tool-call.json",
+			"op": "send",
+			"kind": "tool.call",
+			"seq": 4
+		},
+		{
+			"file": "07-tool-result.json",
+			"op": "edit",
+			"kind": "tool.result",
+			"seq": 4
+		},
+		{
+			"file": "08-tool-call.json",
+			"op": "send",
+			"kind": "tool.call",
+			"seq": 5
+		},
+		{
+			"file": "09-tool-result.json",
+			"op": "edit",
+			"kind": "tool.result",
+			"seq": 5
+		},
+		{
+			"file": "10-usage.json",
+			"op": "send",
+			"kind": "usage",
+			"seq": 6
+		},
+		{
+			"file": "11-message-stop.json",
+			"op": "send",
+			"kind": "message.stop",
+			"seq": 7
+		}
+	],
+	"resolved": [
+		{
+			"kind": "message.delta",
+			"seq": 1
+		},
+		{
+			"kind": "commentary",
+			"seq": 2
+		},
+		{
+			"kind": "tool.result",
+			"seq": 3
+		},
+		{
+			"kind": "tool.result",
+			"seq": 4
+		},
+		{
+			"kind": "tool.result",
+			"seq": 5
+		},
+		{
+			"kind": "usage",
+			"seq": 6
+		},
+		{
+			"kind": "message.stop",
+			"seq": 7
+		}
+	]
+}

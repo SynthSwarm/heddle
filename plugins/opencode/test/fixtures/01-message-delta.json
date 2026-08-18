@@ -1,0 +1,8 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 1,
+	"kind": "message.delta",
+	"text": "The emitter is live"
+}

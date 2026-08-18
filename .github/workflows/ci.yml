@@ -106,3 +106,44 @@ jobs:
       # library let a test module use a newer API and still pass.
       - name: Check MSRV
         run: cargo check --workspace --all-targets --locked
+
+  # The opencode plugin is the only producer of `dev.heddle.agent.v1`, and it is
+  # TypeScript in an otherwise Rust repository -- so `cargo test` being green stopped
+  # meaning "everything is green" the moment it landed.
+  #
+  # This job exists for the seam rather than for the plugin. The fixtures under
+  # `plugins/opencode/test/fixtures` are recordings of the emitter which
+  # `crates/heddle-agent/tests/conformance.rs` reads back, so the two sides can only
+  # drift if someone changes the emitter and does not regenerate them. Regenerating here
+  # and failing on a diff is what turns that from a convention into a check.
+  plugin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: plugins/opencode
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: plugins/opencode/package-lock.json
+
+      # `npm ci` rather than `npm install`: the lockfile is the point, and an install
+      # that quietly resolves something newer would test a tree nobody has.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # Regenerates from the emitter and diffs against what is committed. A failure here
+      # is not "the fixtures are wrong" -- it is "the emitter changed and the recordings
+      # no longer match it", which is exactly the drift the Rust test cannot see.
+      - name: Fixtures are current
+        run: node test/fixtures.mjs --check

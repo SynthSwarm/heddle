@@ -87,15 +87,15 @@ export interface AgentEvent {
  * the single most useful rendering heddle has.
  */
 export function mimeFor(tool: string, body: string): string {
+	// Content first, tool name second. The name is a hint about what a tool usually
+	// returns; the body is evidence about what it returned this time. `webfetch` keyed on
+	// its name alone announced a JSON API response as markdown, which costs the
+	// collapsible tree and gets a wall of braces rendered as prose.
 	if (tool === "edit" || tool === "patch" || tool === "multiedit") {
 		// Only claim a diff if it actually looks like one. opencode's edit tool reports
 		// its output in more than one shape depending on the model and the file.
 		if (/^(---|\+\+\+|@@)/m.test(body)) return "text/x-diff";
 	}
-	if (tool === "read" || tool === "grep" || tool === "glob" || tool === "list") {
-		return "text/plain";
-	}
-	if (tool === "webfetch") return "text/markdown";
 	const trimmed = body.trimStart();
 	if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
 		try {
@@ -105,6 +105,7 @@ export function mimeFor(tool: string, body: string): string {
 			// Not JSON after all; fall through rather than mislabel it.
 		}
 	}
+	if (tool === "webfetch") return "text/markdown";
 	return "text/plain";
 }
 

@@ -1,0 +1,20 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 4,
+	"kind": "tool.result",
+	"tool": {
+		"name": "bash",
+		"index": 1,
+		"args": {
+			"command": "cargo test --workspace"
+		},
+		"preview": "cargo test --workspace",
+		"status": "error",
+		"duration_ms": 4210,
+		"mime": "text/plain",
+		"body": "test result: FAILED. 1 failed; 391 passed",
+		"truncated": false
+	}
+}

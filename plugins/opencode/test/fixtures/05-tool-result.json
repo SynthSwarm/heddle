@@ -1,0 +1,20 @@
+{
+	"v": 1,
+	"session_id": "ses_fixture",
+	"turn_id": "01FIXTURETURN001",
+	"seq": 3,
+	"kind": "tool.result",
+	"tool": {
+		"name": "edit",
+		"index": 0,
+		"args": {
+			"filePath": "crates/heddle-agent/src/store.rs"
+		},
+		"preview": "crates/heddle-agent/src/store.rs",
+		"status": "ok",
+		"duration_ms": 1240,
+		"mime": "text/x-diff",
+		"body": "--- a/crates/heddle-agent/src/store.rs\n+++ b/crates/heddle-agent/src/store.rs\n@@ -283,7 +283,7 @@\n-        if ev.seq <= turn.high_seq {\n+        if ev.seq <= turn.high_seq && !completes_tool {\n",
+		"truncated": false
+	}
+}
